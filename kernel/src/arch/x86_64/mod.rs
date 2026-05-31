@@ -43,6 +43,7 @@ pub fn inb(port: u16) -> u8 {
     val
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn outw(port: u16, val: u16) {
     unsafe {
@@ -55,6 +56,7 @@ pub fn outw(port: u16, val: u16) {
     }
 }
 
+#[allow(dead_code)]
 #[inline]
 pub fn inw(port: u16) -> u16 {
     let val: u16;

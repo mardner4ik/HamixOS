@@ -1,5 +1,6 @@
 pub mod vesa;
 
+#[allow(dead_code)]
 pub trait Framebuffer: Send {
     fn width(&self) -> usize;
     fn height(&self) -> usize;

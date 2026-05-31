@@ -125,6 +125,7 @@ impl Console {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_color(&mut self, fg: u32) {
         self.color = fg;
     }

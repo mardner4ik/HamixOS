@@ -33,6 +33,7 @@ impl VesaFramebuffer {
         self.bytes_per_pixel = (bpp + 7) / 8;
     }
 
+    #[allow(dead_code)]
     pub fn is_ready(&self) -> bool {
         !self.addr.is_null()
     }

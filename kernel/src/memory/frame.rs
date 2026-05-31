@@ -6,6 +6,7 @@ const PAGE_SIZE: usize = 4096;
 
 pub struct BitmapFrameAllocator {
     bitmap: [u64; BITMAP_SIZE],
+    #[allow(dead_code)]
     next_free: usize,
     total_frames: usize,
     free_frames: usize,
@@ -37,14 +38,17 @@ impl BitmapFrameAllocator {
         self.bitmap[frame / 64] |= 1 << (frame % 64);
     }
 
+    #[allow(dead_code)]
     fn set_used(&mut self, frame: usize) {
         self.bitmap[frame / 64] &= !(1 << (frame % 64));
     }
 
+    #[allow(dead_code)]
     fn is_free(&self, frame: usize) -> bool {
         self.bitmap[frame / 64] & (1 << (frame % 64)) != 0
     }
 
+    #[allow(dead_code)]
     pub fn alloc(&mut self) -> Option<usize> {
         let start = self.next_free;
         let total = self.total_frames;
@@ -69,6 +73,7 @@ impl BitmapFrameAllocator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn free(&mut self, addr: usize) {
         let frame = addr / PAGE_SIZE;
         if frame < MAX_FRAMES && !self.is_free(frame) {
@@ -92,10 +97,12 @@ pub fn init(alloc: BitmapFrameAllocator) {
     *FRAME_ALLOCATOR.lock() = alloc;
 }
 
+#[allow(dead_code)]
 pub fn alloc_frame() -> Option<usize> {
     FRAME_ALLOCATOR.lock().alloc()
 }
 
+#[allow(dead_code)]
 pub fn free_frame(addr: usize) {
     FRAME_ALLOCATOR.lock().free(addr);
 }

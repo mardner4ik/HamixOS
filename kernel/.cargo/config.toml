@@ -2,7 +2,7 @@
 target = "x86_64-hamix_os.json"
 
 rustflags = [
-    "-C", "link-arg=-Tsrc/../linker.ld",
+    "-C", "link-arg=-Tlinker.ld",
     "-C", "link-arg=--build-id=none",
 ]
 

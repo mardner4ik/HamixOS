@@ -1,6 +1,7 @@
 pub mod frame;
 mod heap;
 
+#[allow(dead_code)]
 const MULTIBOOT2_MAGIC: u32 = 0x36d76289;
 
 #[repr(C, packed)]
