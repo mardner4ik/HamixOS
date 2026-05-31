@@ -43,9 +43,9 @@ struct GdtPointer {
 static GDT: [GdtEntry; 5] = [
     GdtEntry::null(),
     GdtEntry::new(0, 0xFFFFF, 0x9A, 0xA0),
-    GdtEntry::new(0, 0xFFFFF, 0x92, 0xC0),
+    GdtEntry::new(0, 0xFFFFF, 0x92, 0x80),
     GdtEntry::new(0, 0xFFFFF, 0xFA, 0xA0),
-    GdtEntry::new(0, 0xFFFFF, 0xF2, 0xC0),
+    GdtEntry::new(0, 0xFFFFF, 0xF2, 0x80),
 ];
 
 pub fn init() {

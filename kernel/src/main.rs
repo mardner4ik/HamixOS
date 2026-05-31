@@ -26,7 +26,10 @@ static MULTIBOOT_HEADER: [u32; 4] = {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(multiboot_info_ptr: u32) -> ! {
-    unsafe { zero_bss() };
+    unsafe { 
+        arch::x86_64::disable_interrupts();
+        zero_bss();
+    }
 
     arch::x86_64::gdt::init();
     arch::x86_64::idt::init();
