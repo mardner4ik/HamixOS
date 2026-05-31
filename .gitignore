@@ -1,1 +1,8 @@
 /target
+/hamix_os.iso
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+Cargo.lock

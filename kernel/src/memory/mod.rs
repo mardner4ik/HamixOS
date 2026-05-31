@@ -1,7 +1,5 @@
-mod frame;
+pub mod frame;
 mod heap;
-
-pub use frame::memory_info;
 
 const MULTIBOOT2_MAGIC: u32 = 0x36d76289;
 

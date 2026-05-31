@@ -9,7 +9,7 @@ pub fn init() {
     write_msr(IA32_EFER, efer | 1);
 
     write_msr(IA32_STAR, (0x0008u64 << 32) | (0x0018u64 << 48));
-    write_msr(IA32_LSTAR, syscall_entry as u64);
+    write_msr(IA32_LSTAR, syscall_entry as *const () as u64);
     write_msr(IA32_FMASK, 0x200);
 }
 

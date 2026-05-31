@@ -1,0 +1,9 @@
+[build]
+target = "./kernel/x86_64-hamix_os.json"
+rustflags = ["-Zunstable-options"]
+
+[profile.release]
+strip = false
+
+[unstable]
+json-target-spec = true

@@ -58,10 +58,10 @@ pub fn init() {
         asm!(
             "lgdt [{ptr}]",
             "push 0x08",
-            "lea {tmp}, [rip + 1f]",
+            "lea {tmp}, [rip + 2f]",
             "push {tmp}",
             "retfq",
-            "1:",
+            "2:",
             "mov ax, 0x10",
             "mov ds, ax",
             "mov es, ax",
@@ -70,7 +70,6 @@ pub fn init() {
             "mov ss, ax",
             ptr = in(reg) &ptr,
             tmp = lateout(reg) _,
-            options(att_syntax)
         );
     }
 }

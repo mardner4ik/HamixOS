@@ -21,61 +21,67 @@ impl LinkedListAllocator {
     }
 
     unsafe fn init(&mut self, start: *mut u8, size: usize) {
-        let node = start as *mut Node;
-        (*node).size = size - core::mem::size_of::<Node>();
-        (*node).next = None;
-        self.head = Some(node);
+        unsafe {
+            let node = start as *mut Node;
+            (*node).size = size - core::mem::size_of::<Node>();
+            (*node).next = None;
+            self.head = Some(node);
+        }
     }
 
     unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
-        let align = layout.align().max(core::mem::align_of::<Node>());
-        let size = layout.size().max(core::mem::size_of::<Node>());
+        unsafe {
+            let align = layout.align().max(core::mem::align_of::<Node>());
+            let size = layout.size().max(core::mem::size_of::<Node>());
 
-        let mut prev: Option<*mut Node> = None;
-        let mut current = self.head;
+            let mut prev: Option<*mut Node> = None;
+            let mut current = self.head;
 
-        while let Some(node) = current {
-            let node_end = node as usize + core::mem::size_of::<Node>();
-            let alloc_start = (node_end + align - 1) & !(align - 1);
-            let alloc_end = alloc_start + size;
-            let node_region_end = node as usize + core::mem::size_of::<Node>() + (*node).size;
+            while let Some(node) = current {
+                let node_end = node as usize + core::mem::size_of::<Node>();
+                let alloc_start = (node_end + align - 1) & !(align - 1);
+                let alloc_end = alloc_start + size;
+                let node_region_end = node as usize + core::mem::size_of::<Node>() + (*node).size;
 
-            if alloc_end <= node_region_end {
-                let next = (*node).next;
-                if let Some(prev_node) = prev {
-                    (*prev_node).next = next;
-                } else {
-                    self.head = next;
-                }
-
-                let leftover = node_region_end - alloc_end;
-                if leftover >= core::mem::size_of::<Node>() + 8 {
-                    let new_node = alloc_end as *mut Node;
-                    (*new_node).size = leftover - core::mem::size_of::<Node>();
-                    (*new_node).next = next;
+                if alloc_end <= node_region_end {
+                    let next = (*node).next;
                     if let Some(prev_node) = prev {
-                        (*prev_node).next = Some(new_node);
+                        (*prev_node).next = next;
                     } else {
-                        self.head = Some(new_node);
+                        self.head = next;
                     }
+
+                    let leftover = node_region_end - alloc_end;
+                    if leftover >= core::mem::size_of::<Node>() + 8 {
+                        let new_node = alloc_end as *mut Node;
+                        (*new_node).size = leftover - core::mem::size_of::<Node>();
+                        (*new_node).next = next;
+                        if let Some(prev_node) = prev {
+                            (*prev_node).next = Some(new_node);
+                        } else {
+                            self.head = Some(new_node);
+                        }
+                    }
+
+                    return alloc_start as *mut u8;
                 }
 
-                return alloc_start as *mut u8;
+                prev = current;
+                current = (*node).next;
             }
 
-            prev = current;
-            current = (*node).next;
+            core::ptr::null_mut()
         }
-
-        core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&mut self, ptr: *mut u8, layout: Layout) {
-        let size = layout.size().max(core::mem::size_of::<Node>());
-        let node = ptr as *mut Node;
-        (*node).size = size;
-        (*node).next = self.head;
-        self.head = Some(node);
+        unsafe {
+            let size = layout.size().max(core::mem::size_of::<Node>());
+            let node = ptr as *mut Node;
+            (*node).size = size;
+            (*node).next = self.head;
+            self.head = Some(node);
+        }
     }
 }
 
@@ -89,11 +95,15 @@ impl LockedAllocator {
 
 unsafe impl GlobalAlloc for LockedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        self.0.lock().alloc(layout)
+        unsafe {
+            self.0.lock().alloc(layout)
+        }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.0.lock().dealloc(ptr, layout);
+        unsafe {
+            self.0.lock().dealloc(ptr, layout);
+        }
     }
 }
 
@@ -105,6 +115,6 @@ pub fn init() {
         ALLOCATOR
             .0
             .lock()
-            .init(HEAP_STORAGE.as_mut_ptr(), HEAP_SIZE);
+            .init(&raw mut HEAP_STORAGE as *mut u8, HEAP_SIZE);
     }
 }

@@ -6,3 +6,9 @@ members = [
     "apps/hello_world",
 ]
 resolver = "2"
+
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

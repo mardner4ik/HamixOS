@@ -2,6 +2,7 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
+#![crate_type = "bin"]
 
 extern crate alloc;
 
@@ -14,7 +15,7 @@ mod syscall;
 mod task;
 
 #[used]
-#[link_section = ".multiboot_header"]
+#[unsafe(link_section = ".multiboot_header")]
 static MULTIBOOT_HEADER: [u32; 4] = {
     let magic: u32 = 0xe85250d6;
     let arch: u32 = 0;
@@ -23,7 +24,7 @@ static MULTIBOOT_HEADER: [u32; 4] = {
     [magic, arch, length, checksum]
 };
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn _start(multiboot_info_ptr: u32) -> ! {
     unsafe { zero_bss() };
 
@@ -40,14 +41,16 @@ pub extern "C" fn _start(multiboot_info_ptr: u32) -> ! {
 }
 
 unsafe fn zero_bss() {
-    extern "C" {
-        static mut __bss_start: u8;
-        static mut __bss_end: u8;
+    unsafe {
+        unsafe extern "C" {
+            static mut __bss_start: u8;
+            static mut __bss_end: u8;
+        }
+        let start = core::ptr::addr_of_mut!(__bss_start);
+        let end = core::ptr::addr_of_mut!(__bss_end);
+        let len = end as usize - start as usize;
+        core::ptr::write_bytes(start, 0, len);
     }
-    let start = core::ptr::addr_of_mut!(__bss_start);
-    let end = core::ptr::addr_of_mut!(__bss_end);
-    let len = end as usize - start as usize;
-    core::ptr::write_bytes(start, 0, len);
 }
 
 #[panic_handler]

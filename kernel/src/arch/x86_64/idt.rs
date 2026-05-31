@@ -47,6 +47,7 @@ static mut IDT: [IdtEntry; 256] = [IdtEntry::missing(); 256];
 
 pub static KEYBOARD_HANDLER: Mutex<Option<fn(u8)>> = Mutex::new(None);
 
+#[allow(unused_macros)]
 macro_rules! make_isr {
     ($name:ident, $num:expr, $body:block) => {
         unsafe extern "x86-interrupt" fn $name(_frame: InterruptStackFrame) $body
@@ -75,9 +76,11 @@ unsafe extern "x86-interrupt" fn general_protection(frame: InterruptStackFrame, 
 }
 
 unsafe extern "x86-interrupt" fn page_fault(frame: InterruptStackFrame, ec: u64) {
-    let addr: u64;
-    asm!("mov {}, cr2", out(reg) addr, options(nomem, nostack));
-    panic!("Page fault at {:#x} accessing {:#x}, code={:#x}", frame.ip, addr, ec);
+    unsafe {
+        let addr: u64;
+        asm!("mov {}, cr2", out(reg) addr, options(nomem, nostack));
+        panic!("Page fault at {:#x} accessing {:#x}, code={:#x}", frame.ip, addr, ec);
+    }
 }
 
 unsafe extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
@@ -116,24 +119,24 @@ fn remap_pic() {
 
 pub fn init() {
     unsafe {
-        IDT[0].set_handler(divide_by_zero as u64, 0x8E);
-        IDT[8].set_handler(double_fault as u64, 0x8E);
-        IDT[13].set_handler(general_protection as u64, 0x8E);
-        IDT[14].set_handler(page_fault as u64, 0x8E);
-        IDT[32].set_handler(timer_handler as u64, 0x8E);
-        IDT[33].set_handler(keyboard_handler as u64, 0x8E);
-        IDT[39].set_handler(spurious_handler as u64, 0x8E);
+        IDT[0].set_handler(divide_by_zero as *const () as u64, 0x8E);
+        IDT[8].set_handler(double_fault as *const () as u64, 0x8E);
+        IDT[13].set_handler(general_protection as *const () as u64, 0x8E);
+        IDT[14].set_handler(page_fault as *const () as u64, 0x8E);
+        IDT[32].set_handler(timer_handler as *const () as u64, 0x8E);
+        IDT[33].set_handler(keyboard_handler as *const () as u64, 0x8E);
+        IDT[39].set_handler(spurious_handler as *const () as u64, 0x8E);
 
         for i in 34..39usize {
-            IDT[i].set_handler(spurious_handler as u64, 0x8E);
+            IDT[i].set_handler(spurious_handler as *const () as u64, 0x8E);
         }
         for i in 40..48usize {
-            IDT[i].set_handler(spurious_handler as u64, 0x8E);
+            IDT[i].set_handler(spurious_handler as *const () as u64, 0x8E);
         }
 
         let ptr = IdtPointer {
-            size: (core::mem::size_of_val(&IDT) - 1) as u16,
-            base: IDT.as_ptr() as u64,
+            size: (core::mem::size_of_val(&*(&raw const IDT)) - 1) as u16,
+            base: &raw const IDT as u64,
         };
 
         asm!("lidt [{ptr}]", ptr = in(reg) &ptr, options(nostack));

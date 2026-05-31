@@ -98,6 +98,11 @@ Password is hidden while typing (Unix behavior).
 | `uptime`      | System uptime in seconds         |
 | `pwd`         | Current directory (/)            |
 | `ls`          | List directory entries           |
+
+## Future Plans
+
+### ARM Support (armv7, aarch64)
+Planned for future releases. The kernel architecture is designed to be modular, allowing for HAL layer expansion to support ARM processors.
 | `hostname`    | System hostname                  |
 | `cpuinfo`     | CPU architecture info            |
 | `version`     | HamixOS version                  |
@@ -139,3 +144,4 @@ Password is hidden while typing (Unix behavior).
 - [ ] ACPI power management
 - [ ] Network stack (RTL8139/e1000)
 - [ ] x86 (32-bit) support
+- [ ] ARM support (armv7, aarch64) — planned for future releases

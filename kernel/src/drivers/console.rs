@@ -260,7 +260,7 @@ fn run_shell(user: &str) -> ! {
                     let p = read_line_masked(true);
                     if check_credentials(u.trim(), p.trim()) {
                         println_colored("\nLogin successful.", COLOR_SUCCESS);
-                        return run_shell(u.trim());
+                        run_shell(u.trim());
                     } else {
                         println_colored("\nLogin incorrect.", COLOR_ERROR);
                         print_colored("\n", COLOR_FG);
