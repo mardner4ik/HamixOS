@@ -15,7 +15,7 @@ cargo +nightly build \
     -Z build-std-features=compiler-builtins-mem \
     --target x86_64-hamix_os.json
 
-KERNEL_BIN="$KERNEL_DIR/target/x86_64-hamix_os/release/kernel"
+KERNEL_BIN="$SCRIPT_DIR/target/x86_64-hamix_os/release/kernel"
 
 if [ ! -f "$KERNEL_BIN" ]; then
     echo "[ERROR] Kernel binary not found at $KERNEL_BIN"
