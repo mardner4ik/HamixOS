@@ -1,0 +1,73 @@
+use core::fmt;
+use spin::Mutex;
+use crate::arch::x86_64::{inb, outb};
+
+const COM1: u16 = 0x3F8;
+
+pub struct SerialPort {
+    port: u16,
+}
+
+impl SerialPort {
+    pub const fn new(port: u16) -> Self {
+        Self { port }
+    }
+
+    pub fn init(&self) {
+        outb(self.port + 1, 0x00);
+        outb(self.port + 3, 0x80);
+        outb(self.port + 0, 0x03);
+        outb(self.port + 1, 0x00);
+        outb(self.port + 3, 0x03);
+        outb(self.port + 2, 0xC7);
+        outb(self.port + 4, 0x0B);
+    }
+
+    fn is_transmit_empty(&self) -> bool {
+        inb(self.port + 5) & 0x20 != 0
+    }
+
+    pub fn write_byte(&self, byte: u8) {
+        while !self.is_transmit_empty() {}
+        outb(self.port, byte);
+    }
+}
+
+impl fmt::Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            self.write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
+
+pub fn init() {
+    SERIAL.lock().init();
+}
+
+#[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write;
+            if let Some(mut s) = $crate::drivers::serial::SERIAL.try_lock() {
+                let _ = write!(s, $($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! serial_println {
+    ($($arg:tt)*) => {
+        {
+            use core::fmt::Write;
+            if let Some(mut s) = $crate::drivers::serial::SERIAL.try_lock() {
+                let _ = writeln!(s, $($arg)*);
+            }
+        }
+    };
+}

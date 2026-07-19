@@ -1,0 +1,11 @@
+/target
+/hamix_os.iso
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+Cargo.lock
+/target/
+/hamix_os.iso
+/build.log

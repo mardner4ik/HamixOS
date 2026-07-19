@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "kernel",
+    "sdk/hamix_std",
+    "apps/hsh",
+    "apps/hello_world",
+]
+resolver = "2"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+panic = "abort"
+opt-level = 2
