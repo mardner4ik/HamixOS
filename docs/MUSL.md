@@ -4,6 +4,14 @@ See `docs/USERSPACE_ROADMAP.md` for the full milestone-by-milestone plan --
 this file only covers the syscall ABI side of the story, which is already
 built and testable today.
 
+If the goal is a pure-Rust userspace binary rather than a musl/C one, see
+`sdk/hamix_std` instead: it is a small `#![no_std]` runtime (raw `syscall`
+wrappers, a `brk`-backed global allocator, `println!`/`eprintln!`, an
+`entry!` macro for `_start`) built directly against the same syscall table
+documented below, with no musl toolchain required. `apps/hello_world` and
+`apps/hxserver` are both built against it and are a better starting point
+for a new Rust program than raw musl-gcc.
+
 ## Where the syscall table lives
 
 `kernel/src/syscall/mod.rs` implements `handle_syscall`, matching the real
@@ -16,14 +24,26 @@ stubs use):
 | 1 | write | fd 1/2 → console, fd ≥ 3 → VFS-backed file |
 | 2 | open | creates/looks up a path in the in-RAM VFS, returns an fd |
 | 3 | close | frees the fd slot |
+| 5 | fstat | fills a real 144-byte `struct stat`; only `st_size`/`st_mode`/`st_nlink`/`st_blksize`/`st_blocks` are meaningful, the rest is zeroed |
+| 8 | lseek | SEEK_SET/CUR/END against the VFS file's real length |
 | 9 | mmap | anonymous only: `alloc_zeroed` from the kernel heap |
+| 11 | munmap | stub, always returns 0 (nothing is ever unmapped yet) |
 | 12 | brk | bump allocator over a fixed 4 MiB arena |
+| 13/14 | rt_sigaction / rt_sigprocmask | stub, returns 0 (no signal delivery yet) |
 | 16 | ioctl | stub, returns 0 |
+| 20 | writev | loops the existing `write` path over each iovec |
 | 39 | getpid | always returns 1 (single "process" for now) |
 | 60/231 | exit / exit_group | logs the exit code, does not yet tear down a task |
 | 63 | uname | fills a real `struct utsname` with HamixOS's identity |
+| 102/107 | getuid / geteuid | always returns 0 (single-user ring-3 bridge stage) |
 | 158 | arch_prctl | stub, returns 0 |
+| 186 | gettid | always returns 1 |
+| 218 | set_tid_address | stub, returns 1 |
+| 228 | clock_gettime | derived from the PIT tick counter (`kernel/src/task`), ignores `clockid_t` |
+| 9001 | **hamix_fbmap** (HamixOS-specific, not a real Linux number) | fills `{addr,pitch,width,height,bpp}` for the boot framebuffer and grants the calling ring-3 program access to that memory range. This is how userspace programs (e.g. `apps/hxserver`, see `docs/XORG.md`) get at the screen without a kernel-side display component. |
 | anything else | — | returns `-ENOSYS` (-38), exactly like real Linux |
+
+None of the syscalls above need more than 3 arguments (`rdi`,`rsi`,`rdx`), which is all `syscall_entry`'s trampoline currently forwards to `handle_syscall` — `r10`/`r8`/`r9` (musl's arg4-arg6 registers) reach the trampoline but are not yet threaded through. A real 6-argument `mmap(addr,len,prot,flags,fd,offset)` needs `fd`/`offset` (arg5/arg6) and is the next syscall-ABI milestone once a program actually needs file-backed mmap instead of the `hamix_fbmap` shortcut above.
 
 `init()` in that file programs `IA32_STAR/LSTAR/FMASK` so the `syscall`
 instruction (the one musl always uses on x86_64, it never falls back to

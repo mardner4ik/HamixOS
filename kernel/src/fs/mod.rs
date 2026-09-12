@@ -11,6 +11,7 @@ pub const DEV_NULL: u8 = 0;
 pub const DEV_ZERO: u8 = 1;
 pub const DEV_CONSOLE: u8 = 2;
 pub const DEV_RANDOM: u8 = 3;
+pub const DEV_FB0: u8 = 4;
 
 pub const MODE_DIR_DEFAULT: u16 = 0o755;
 pub const MODE_FILE_DEFAULT: u16 = 0o644;
@@ -357,7 +358,7 @@ pub fn init() {
     let _ = vfs.create_file(
         root,
         "/etc/os-release",
-        b"NAME=\"HamixOS\"\nID=hamix\nVERSION=\"0.1.0\"\nPRETTY_NAME=\"HamixOS 0.1.0\"\n".to_vec(),
+        b"NAME=\"HamixOS\"\nID=hamix\nVERSION=\"0.2.0\"\nPRETTY_NAME=\"HamixOS 0.2.0\"\n".to_vec(),
         0,
     );
     let _ = vfs.create_file(root, "/etc/motd", b"Welcome to HamixOS.\n".to_vec(), 0);
@@ -366,6 +367,7 @@ pub fn init() {
     let _ = vfs.mknod_device(root, "/dev/zero", DEV_ZERO);
     let _ = vfs.mknod_device(root, "/dev/console", DEV_CONSOLE);
     let _ = vfs.mknod_device(root, "/dev/random", DEV_RANDOM);
+    let _ = vfs.mknod_device(root, "/dev/fb0", DEV_FB0);
 
     let _ = vfs.mknod_proc(root, "/proc/uptime", proc_uptime);
     let _ = vfs.mknod_proc(root, "/proc/meminfo", proc_meminfo);

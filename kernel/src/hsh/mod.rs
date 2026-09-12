@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::format;
 
@@ -8,7 +8,7 @@ use crate::drivers::tty::{
     COLOR_FG, COLOR_PROMPT, COLOR_INPUT, COLOR_ERROR, COLOR_SUCCESS,
     COLOR_HEADER, COLOR_DIM, COLOR_WARN,
 };
-use crate::drivers::video::intel_penryn;
+use crate::drivers::video::{intel_graphics, registry};
 use crate::fs;
 
 const MAX_HISTORY: usize = 64;
@@ -99,6 +99,11 @@ fn read_line(mask: bool, history: Option<&History>) -> String {
                     }
                 }
             }
+            Key::Ctrl('c') => {
+                CONSOLE.lock().write_str_colored("^C\n", COLOR_DIM);
+                buf.clear();
+                break;
+            }
             _ => {}
         }
     }
@@ -106,13 +111,14 @@ fn read_line(mask: bool, history: Option<&History>) -> String {
     buf
 }
 
-fn print_banner() {
+fn print_banner(vt: usize) {
     let mut c = CONSOLE.lock();
     c.clear();
     c.write_str_colored("+--------------------------------------------------+\n", COLOR_HEADER);
     c.write_str_colored("|          HamixOS  v0.1.0  (x86_64)              |\n", COLOR_HEADER);
     c.write_str_colored("|     Unix-like kernel -- built in Rust            |\n", COLOR_DIM);
     c.write_str_colored("+--------------------------------------------------+\n", COLOR_HEADER);
+    c.write_str_colored(&format!("HamixOS tty{}\n", vt + 1), COLOR_DIM);
     c.write_str_colored("\n", COLOR_FG);
 }
 
@@ -120,8 +126,13 @@ fn check_credentials(user: &str, pass: &str) -> bool {
     crate::users::find_by_name(user).is_some() && crate::users::verify_password(user, pass)
 }
 
-pub fn run_login() -> ! {
-    print_banner();
+/// Entry point for one virtual terminal's login/shell session (see vt.rs).
+/// Each of the VT_COUNT workspaces -- switchable with Ctrl+Alt+F1..F6 --
+/// runs its own independent copy of this, with its own login state, cwd,
+/// and history; only the actual screen contents and (for at most one VT at
+/// a time) a live ring-3 process are shared/exclusive resources.
+pub fn run_login(vt: usize) -> ! {
+    print_banner(vt);
 
     loop {
         print_colored("login: ", COLOR_PROMPT);
@@ -132,7 +143,7 @@ pub fn run_login() -> ! {
 
         if check_credentials(username.trim(), password.trim()) {
             println_colored("\nLogin successful.", COLOR_SUCCESS);
-            run_shell(username.trim());
+            run_shell(username.trim(), vt);
         } else {
             println_colored("\nLogin incorrect.", COLOR_ERROR);
             print_colored("\n", COLOR_FG);
@@ -157,7 +168,7 @@ fn display_cwd(user: &str, cwd_path: &str) -> String {
     }
 }
 
-fn run_shell(user: &str) -> ! {
+fn run_shell(user: &str, vt: usize) -> ! {
     let mut history = History::new();
     let mut cwd_id = fs::VFS.lock().as_ref().map(|v| v.root_id()).unwrap_or(0);
     let mut cwd_path = String::from("/");
@@ -188,7 +199,7 @@ fn run_shell(user: &str) -> ! {
 
         if line_str == "logout" || line_str == "exit" {
             println_colored("\nLogged out.\n", COLOR_DIM);
-            print_banner();
+            print_banner(vt);
             loop {
                 print_colored("login: ", COLOR_PROMPT);
                 let u = read_line(false, None);
@@ -196,7 +207,7 @@ fn run_shell(user: &str) -> ! {
                 let p = read_line(true, None);
                 if check_credentials(u.trim(), p.trim()) {
                     println_colored("\nLogin successful.", COLOR_SUCCESS);
-                    run_shell(u.trim());
+                    run_shell(u.trim(), vt);
                 } else {
                     println_colored("\nLogin incorrect.", COLOR_ERROR);
                     print_colored("\n", COLOR_FG);
@@ -224,6 +235,7 @@ fn dispatch(
     match cmd {
         "help"     => cmd_help(),
         "clear"    => { CONSOLE.lock().clear(); }
+        "edit"     => cmd_edit(*cwd_id, cwd_path.as_str(), args),
         "echo"     => cmd_echo(*cwd_id, args, euid),
         "uname"    => cmd_uname(args),
         "whoami"   => println_colored(if euid == 0 { "root" } else { user }, COLOR_FG),
@@ -241,8 +253,13 @@ fn dispatch(
         "chown"    => cmd_chown(*cwd_id, args, euid),
         "tree"     => cmd_tree(*cwd_id, cwd_path.as_str()),
         "fb"       => cmd_fb(args),
+        "gpuinfo"  => cmd_gpuinfo(),
+        "drivers"  => cmd_drivers(),
+        "usb"      => cmd_usb(),
+        "mouse"    => cmd_mouse(),
         "ring3smoketest" => cmd_ring3_smoke_test(),
         "exec"     => cmd_exec(args),
+        "startx"   => cmd_exec("/usr/bin/hxserver"),
         "diskls"   => cmd_diskls(),
         "diskcat"  => cmd_diskcat(args),
         "hostname" => println_colored("hamix", COLOR_FG),
@@ -364,8 +381,8 @@ fn cmd_useradd(euid: u32, args: &str) {
 }
 
 fn cmd_help() {
-    let mut c = CONSOLE.lock();
-    c.write_str_colored("\nAvailable commands:\n", COLOR_HEADER);
+    let mut text = String::new();
+    text.push_str("Available commands:\n\n");
     let cmds = [
         ("help",       "show this help"),
         ("clear",      "clear the screen"),
@@ -389,9 +406,17 @@ fn cmd_help() {
         ("useradd <name>", "create a new user (root only)"),
         ("tree",       "show directory tree from cwd"),
         ("echo a > f", "write/append output to a file"),
-        ("fb <color>", "fill the linear framebuffer (intel_penryn)"),
+        ("fb <color>", "fill the linear framebuffer (intel-graphics-driver)"),
+        ("gpuinfo",    "graphics chipset and framebuffer information"),
+        ("drivers",    "list registered kernel drivers"),
+        ("usb",        "list USB host controllers and attached devices"),
+        ("mouse",      "pointer state; drag to select text, middle-click pastes"),
         ("ring3smoketest", "one-way jump to a tiny ring-3 stub (GDT/TSS/SYSCALL smoke test)"),
-        ("exec <path>", "load and jump to a static ET_EXEC x86_64 binary (one-way, no scheduler yet)"),
+        ("exec <path>", "run a static ET_EXEC x86_64 binary and return here when it exits"),
+        ("edit <path>", "open a file in the hed text editor"),
+        ("startx",      "run the Nook desktop (Esc returns here; click Nook for the menu)"),
+        ("Ctrl+Alt+F1..F6", "switch workspaces -- each keeps its own login/shell; a running exec/edit/startx session stays put and picks up right where you left it"),
+        ("Ctrl+C",      "kill whatever exec/edit/startx session is currently running on this workspace"),
         ("diskls",     "list root dir of the ext4 disk image module"),
         ("diskcat <p>","read a file from the ext4 disk image module"),
         ("hostname",   "system hostname"),
@@ -404,10 +429,10 @@ fn cmd_help() {
     ];
     for (name, desc) in &cmds {
         let line = format!("  {:<14}  {}\n", name, desc);
-        c.write_str_colored(&line, COLOR_FG);
+        text.push_str(&line);
     }
 
-    c.write_str_colored("\nDeveloper tools:\n", COLOR_HEADER);
+    text.push_str("\nDeveloper tools:\n");
     let dev_cmds = [
         ("dmesg",                 "show kernel boot log"),
         ("hexdump <addr> [len]",  "dump raw memory (hex, default len=64)"),
@@ -419,9 +444,110 @@ fn cmd_help() {
     ];
     for (name, desc) in &dev_cmds {
         let line = format!("  {:<22}  {}\n", name, desc);
-        c.write_str_colored(&line, COLOR_FG);
+        text.push_str(&line);
     }
-    c.write_str_colored("\n", COLOR_FG);
+
+    // The full text doesn't fit on one 80x25 screen, which is exactly why
+    // this now opens in hed (a scrolling view) instead of printing
+    // straight to the console and scrolling most of it out of sight.
+    open_in_hed("/run/help.txt", &text, true);
+}
+
+/// Claims the single system-wide ring-3 slot (see vt::try_claim_ring3),
+/// runs the binary, and releases the slot again if it never made it into
+/// ring 3 at all (a real exit already releases it from the SYS_EXIT
+/// handler in syscall.rs, so this is just the defensive early-failure
+/// path). Every place that execs a ring-3 binary -- exec, edit, startx,
+/// and help's "open in hed" -- goes through this so two workspaces can
+/// never end up with two live processes corrupting each other's memory.
+fn run_ring3(path: &str) -> Result<i32, String> {
+    let vt = crate::vt::current();
+    if let Err(owner) = crate::vt::try_claim_ring3(vt) {
+        return Err(format!(
+            "a graphical/editor session is already open on tty{} -- switch there (Ctrl+Alt+F{}) or quit it first",
+            owner + 1,
+            owner + 1
+        ));
+    }
+    let result = crate::task::elf::load_and_exec(path);
+    if result.is_err() {
+        crate::vt::release_ring3(vt);
+    }
+    result.map_err(String::from)
+}
+
+/// Writes `content` to `path` (as root, since /run is a system scratch
+/// area not owned by any particular user) and writes the hed handoff file
+/// (see apps/hed's doc comment -- HamixOS's exec has no argv, so this
+/// fixed file is how hed learns what to open), then execs hed.
+fn open_in_hed(path: &str, content: &str, view_only: bool) {
+    let mut guard = fs::VFS.lock();
+    let Some(vfs) = guard.as_mut() else {
+        println_colored("edit: filesystem not mounted", COLOR_ERROR);
+        return;
+    };
+    let root = vfs.root_id();
+    if let Err(e) = vfs.write(root, path, content.as_bytes(), false, crate::users::ROOT_UID) {
+        println_colored(&format!("edit: {}", e), COLOR_ERROR);
+        return;
+    }
+    let handoff = format!("{}\n{}\n", path, if view_only { "view" } else { "edit" });
+    if let Err(e) = vfs.write(root, "/run/hed_target", handoff.as_bytes(), false, crate::users::ROOT_UID) {
+        println_colored(&format!("edit: {}", e), COLOR_ERROR);
+        return;
+    }
+    drop(guard);
+
+    match run_ring3("/usr/bin/hed") {
+        Ok(_) => {
+            // hed already cleared the screen with its own \x0C on the way
+            // out; just repaint the shell's own prompt/banner state.
+            CONSOLE.lock().clear();
+        }
+        Err(e) => println_colored(&format!("edit: {}", e), COLOR_ERROR),
+    }
+}
+
+fn cmd_edit(cwd: usize, cwd_path: &str, args: &str) {
+    let rel = args.trim();
+    if rel.is_empty() {
+        println_colored("usage: edit <path>", COLOR_ERROR);
+        return;
+    }
+    let abs_path = if rel.starts_with('/') {
+        rel.to_string()
+    } else {
+        format!("{}/{}", cwd_path.trim_end_matches('/'), rel)
+    };
+
+    // hed opens files itself (from the filesystem root, since a fresh
+    // process has no inherited cwd), so unlike open_in_hed's help-text
+    // case we don't pre-write the content -- just point it at the real
+    // (already-resolved-to-absolute) path so saves land back in the
+    // actual file rather than a throwaway copy.
+    let mut guard = fs::VFS.lock();
+    let Some(vfs) = guard.as_mut() else {
+        println_colored("edit: filesystem not mounted", COLOR_ERROR);
+        return;
+    };
+    let root = vfs.root_id();
+    if !vfs.exists(cwd, rel) && vfs.create_file(cwd, rel, Vec::new(), crate::users::ROOT_UID).is_err() {
+        println_colored("edit: could not create file", COLOR_ERROR);
+        return;
+    }
+    let handoff = format!("{}\nedit\n", abs_path);
+    if let Err(e) = vfs.write(root, "/run/hed_target", handoff.as_bytes(), false, crate::users::ROOT_UID) {
+        println_colored(&format!("edit: {}", e), COLOR_ERROR);
+        return;
+    }
+    drop(guard);
+
+    match run_ring3("/usr/bin/hed") {
+        Ok(_) => {
+            CONSOLE.lock().clear();
+        }
+        Err(e) => println_colored(&format!("edit: {}", e), COLOR_ERROR),
+    }
 }
 
 fn cmd_uname(args: &str) {
@@ -737,12 +863,12 @@ fn cmd_exec(args: &str) {
         println_colored("exec: usage: exec <path to static ET_EXEC binary>", COLOR_ERROR);
         return;
     }
-    println_colored(
-        "exec: this does not return -- HamixOS has no scheduler yet.",
-        COLOR_WARN,
-    );
-    if let Err(e) = crate::task::elf::load_and_exec(path) {
-        println_colored(&format!("exec: {}", e), COLOR_ERROR);
+    match run_ring3(path) {
+        Ok(code) => {
+            let msg = format!("exec: {} exited with code {}\n", path, code);
+            println_colored(&msg, if code == 0 { COLOR_SUCCESS } else { COLOR_WARN });
+        }
+        Err(e) => println_colored(&format!("exec: {}", e), COLOR_ERROR),
     }
 }
 
@@ -759,19 +885,19 @@ fn cmd_ring3_smoke_test() {
 }
 
 fn cmd_fb(args: &str) {
-    if !intel_penryn::available() {
+    if !intel_graphics::available() {
         println_colored("fb: no linear framebuffer available (boot without VBE/gfxterm?)", COLOR_ERROR);
         return;
     }
-    let (w, h) = intel_penryn::resolution().unwrap_or((0, 0));
+    let (w, h) = intel_graphics::resolution().unwrap_or((0, 0));
     match args.trim() {
         "gradient" => {
-            intel_penryn::fill_gradient();
+            intel_graphics::fill_gradient();
         }
-        "red" => intel_penryn::fill_screen(0x00FF0000),
-        "green" => intel_penryn::fill_screen(0x0000FF00),
-        "blue" => intel_penryn::fill_screen(0x000000FF),
-        "black" => intel_penryn::fill_screen(0x00000000),
+        "red" => intel_graphics::fill_screen(0x00FF0000),
+        "green" => intel_graphics::fill_screen(0x0000FF00),
+        "blue" => intel_graphics::fill_screen(0x000000FF),
+        "black" => intel_graphics::fill_screen(0x00000000),
         _ => {
             let msg = format!("fb: {}x{} framebuffer ready. usage: fb <red|green|blue|black|gradient>", w, h);
             println_colored(&msg, COLOR_FG);
@@ -780,6 +906,132 @@ fn cmd_fb(args: &str) {
     }
     let msg = format!("fb: filled {}x{} framebuffer", w, h);
     println_colored(&msg, COLOR_SUCCESS);
+}
+
+fn cmd_gpuinfo() {
+    let mut c = CONSOLE.lock();
+    c.write_str_colored("\nGraphics:\n", COLOR_HEADER);
+    let chipset_line = format!("  Chipset      : {}\n", intel_graphics::chipset_name());
+    c.write_str_colored(&chipset_line, COLOR_FG);
+    let codename_line = format!("  Codename     : {}\n", intel_graphics::chipset_codename());
+    c.write_str_colored(&codename_line, COLOR_FG);
+    let driver_line = format!(
+        "  Driver       : {} {}\n",
+        intel_graphics::driver_name(),
+        intel_graphics::driver_version()
+    );
+    c.write_str_colored(&driver_line, COLOR_FG);
+    if intel_graphics::available() {
+        let (w, h) = intel_graphics::resolution().unwrap_or((0, 0));
+        let res_line = format!("  Framebuffer  : {}x{}\n", w, h);
+        c.write_str_colored(&res_line, COLOR_FG);
+        c.write_str_colored("  Status       : ready\n\n", COLOR_SUCCESS);
+    } else {
+        c.write_str_colored("  Status       : no linear framebuffer reported by firmware\n\n", COLOR_WARN);
+    }
+}
+
+fn cmd_drivers() {
+    let mut c = CONSOLE.lock();
+    c.write_str_colored("\n", COLOR_FG);
+    let header = format!("  {:<22}  {:<8}  {:<11}  {}\n", "NAME", "VERSION", "KIND", "STATUS");
+    c.write_str_colored(&header, COLOR_HEADER);
+    registry::for_each(|driver| {
+        let status = if driver.is_ready() { "ready" } else { "not ready" };
+        let line = format!(
+            "  {:<22}  {:<8}  {:<11}  {}\n",
+            driver.name(),
+            driver.version(),
+            driver.kind(),
+            status
+        );
+        let color = if driver.is_ready() { COLOR_FG } else { COLOR_DIM };
+        c.write_str_colored(&line, color);
+    });
+    c.write_str_colored("\n", COLOR_FG);
+}
+
+fn cmd_usb() {
+    use crate::drivers::usb;
+
+    let controllers = usb::controllers();
+    let mut c = CONSOLE.lock();
+    c.write_str_colored("\n", COLOR_FG);
+
+    if controllers.is_empty() {
+        c.write_str_colored("  no USB host controllers on the PCI bus\n\n", COLOR_DIM);
+        return;
+    }
+
+    c.write_str_colored(
+        &format!("  {:<20}  {:<9}  {:<7}  {}\n", "CONTROLLER", "PCI ID", "BASE", "STATE"),
+        COLOR_HEADER,
+    );
+    for controller in &controllers {
+        c.write_str_colored(
+            &format!(
+                "  {:<20}  {:04x}:{:04x}  {:#07x}  {}\n",
+                controller.kind.name(),
+                controller.device.vendor,
+                controller.device.device,
+                controller.base,
+                if controller.note.is_empty() { "ready" } else { &controller.note }
+            ),
+            if controller.driven { COLOR_FG } else { COLOR_DIM },
+        );
+    }
+
+    let devices = usb::devices();
+    c.write_str_colored("\n", COLOR_FG);
+    if devices.is_empty() {
+        c.write_str_colored("  no USB devices attached\n\n", COLOR_DIM);
+        return;
+    }
+    c.write_str_colored(
+        &format!("  {:<5}  {:<5}  {:<9}  {:<9}  {}\n", "ADDR", "PORT", "ID", "SPEED", "CLASS"),
+        COLOR_HEADER,
+    );
+    for device in &devices {
+        c.write_str_colored(
+            &format!(
+                "  {:<5}  {:<5}  {:04x}:{:04x}  {:<9}  {}\n",
+                device.address,
+                device.port,
+                device.vendor,
+                device.product,
+                if device.low_speed { "low" } else { "full" },
+                match device.class {
+                    usb::DeviceClass::HidMouse => "HID mouse",
+                    usb::DeviceClass::HidKeyboard => "HID keyboard",
+                    usb::DeviceClass::HidOther => "HID device",
+                    usb::DeviceClass::MassStorage => "mass storage",
+                    usb::DeviceClass::Hub => "hub",
+                    usb::DeviceClass::Other => "other",
+                }
+            ),
+            COLOR_FG,
+        );
+    }
+    c.write_str_colored("\n", COLOR_FG);
+}
+
+fn cmd_mouse() {
+    use crate::drivers::input::mouse;
+
+    let state = mouse::state();
+    let mut c = CONSOLE.lock();
+    c.write_str_colored("\n", COLOR_FG);
+    if !mouse::present() {
+        c.write_str_colored("  no pointing device detected\n\n", COLOR_DIM);
+        return;
+    }
+    c.write_str_colored(&format!("  position   {}, {}\n", state.x, state.y), COLOR_FG);
+    c.write_str_colored(&format!("  buttons    {:03b}\n", state.buttons & 7), COLOR_FG);
+    c.write_str_colored(&format!("  wheel      {}\n", state.wheel), COLOR_FG);
+    c.write_str_colored(
+        "  drag with the left button to select, middle button pastes\n\n",
+        COLOR_DIM,
+    );
 }
 
 fn cmd_halt(euid: u32) {
@@ -811,16 +1063,43 @@ fn cmd_version() {
     c.write_str_colored("Kernel : Rust no_std, x86_64\n", COLOR_FG);
     c.write_str_colored("Shell  : hsh\n", COLOR_FG);
     c.write_str_colored("Boot   : GRUB2 Multiboot2\n", COLOR_FG);
-    c.write_str_colored("Target : Pentium G640 / Celeron T3100\n\n", COLOR_FG);
+    let info = crate::arch::x86_64::cpuid::identify();
+    let cpu_line = if info.brand.is_empty() {
+        format!("CPU    : {}\n\n", info.vendor)
+    } else {
+        format!("CPU    : {}\n\n", info.brand)
+    };
+    c.write_str_colored(&cpu_line, COLOR_FG);
 }
 
 fn cmd_cpuinfo() {
+    let info = crate::arch::x86_64::cpuid::identify();
     let mut c = CONSOLE.lock();
     c.write_str_colored("\nProcessor:\n", COLOR_HEADER);
+    let name_line = if info.brand.is_empty() {
+        format!("  Model        : {} (brand string unavailable)\n", info.vendor)
+    } else {
+        format!("  Model        : {}\n", info.brand)
+    };
+    c.write_str_colored(&name_line, COLOR_FG);
+    c.write_str_colored(&format!("  Vendor       : {}\n", info.vendor), COLOR_FG);
     c.write_str_colored("  Architecture : x86_64\n", COLOR_FG);
     c.write_str_colored("  Mode         : 64-bit Long Mode\n", COLOR_FG);
-    c.write_str_colored("  Features     : SSE, SSE2\n", COLOR_FG);
-    c.write_str_colored("  Compatible   : Pentium G640, Celeron T3100\n\n", COLOR_FG);
+    c.write_str_colored(
+        &format!("  Family/Model : family {}, model {}, stepping {}\n", info.family, info.model, info.stepping),
+        COLOR_FG,
+    );
+    let mut feats = alloc::vec::Vec::new();
+    if info.features.fpu { feats.push("FPU"); }
+    if info.features.mmx { feats.push("MMX"); }
+    if info.features.sse { feats.push("SSE"); }
+    if info.features.sse2 { feats.push("SSE2"); }
+    if info.features.sse3 { feats.push("SSE3"); }
+    if info.features.ssse3 { feats.push("SSSE3"); }
+    if info.features.sse4_1 { feats.push("SSE4.1"); }
+    if info.features.sse4_2 { feats.push("SSE4.2"); }
+    if info.features.avx { feats.push("AVX"); }
+    c.write_str_colored(&format!("  Features     : {}\n\n", feats.join(", ")), COLOR_FG);
 }
 
 fn cmd_history(history: &History) {

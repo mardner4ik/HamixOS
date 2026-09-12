@@ -80,8 +80,10 @@ fn validate(header: &Elf64Header) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Loads a static ET_EXEC x86_64 binary from the VFS and jumps to it in
-/// ring 3. Does not return on success -- see usermode::enter_user_mode.
+/// Loads a static ET_EXEC x86_64 binary from the VFS and runs it in ring 3,
+/// returning its exit code once it calls exit()/exit_group() -- see
+/// usermode::enter_user_mode_and_return for how that "return" actually
+/// works given there's no scheduler.
 ///
 /// HamixOS does not yet have per-process page tables (see
 /// docs/USERSPACE_ROADMAP.md), so every PT_LOAD segment is copied straight
@@ -92,7 +94,7 @@ fn validate(header: &Elf64Header) -> Result<(), &'static str> {
 /// the kernel; this loader trusts the binary the same way early Linux
 /// trusted init before real isolation existed. It is a bridge to real
 /// per-process address spaces, not a replacement for them.
-pub fn load_and_exec(path: &str) -> Result<(), &'static str> {
+pub fn load_and_exec(path: &str) -> Result<i32, &'static str> {
     let data: Vec<u8> = {
         let vfs_guard = fs::VFS.lock();
         let vfs = vfs_guard.as_ref().ok_or("elf: no filesystem mounted")?;
@@ -160,7 +162,19 @@ pub fn load_and_exec(path: &str) -> Result<(), &'static str> {
 
     let stack_top = unsafe { (&raw const USER_STACK) as u64 + USER_STACK_SIZE as u64 };
     paging::allow_user_access(stack_top - USER_STACK_SIZE as u64, USER_STACK_SIZE as u64);
-    let aligned_stack_top = stack_top & !0xF;
+    // _start (from hamix_std's `entry!` macro) is an ordinary `extern "C" fn`,
+    // not a naked function that sets up its own frame. LLVM therefore emits
+    // its prologue assuming the SysV "just-called" convention: on entry,
+    // rsp % 16 == 8 (as if a `call` had just pushed a return address), so
+    // that after the prologue's own pushes the stack is 16-aligned for the
+    // body -- which matters every time the compiler lays out a local or
+    // spill on a 16-byte boundary for an aligned SSE store/load (movaps,
+    // movdqa, etc). Handing it a plain 16-aligned rsp (as the real SysV
+    // *process*-entry rule technically calls for) is 8 bytes off from what
+    // the generated code expects, so any aligned SSE access anywhere in the
+    // call tree can land on an unaligned address and raise #GP -- exactly
+    // the "sometimes it just doesn't start" crashes this was causing.
+    let aligned_stack_top = (stack_top & !0xF) - 8;
 
     crate::serial_println!(
         "elf: loaded {}, entry {:#x}, stack {:#x}",
@@ -169,5 +183,7 @@ pub fn load_and_exec(path: &str) -> Result<(), &'static str> {
         aligned_stack_top
     );
 
-    unsafe { usermode::enter_user_mode(header.e_entry, aligned_stack_top) }
+    let slot = crate::vt::current_coro_slot_ptr();
+    let code = unsafe { usermode::enter_user_mode_and_return(header.e_entry, aligned_stack_top, slot) };
+    Ok(code)
 }

@@ -1,0 +1,14 @@
+[package]
+name = "hxserver"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxserver"
+path = "src/main.rs"
+
+[dependencies]
+hamix_std = { path = "../../sdk/hamix_std" }
+vellum = { path = "../../libs/vellum" }
+intel-graphics-driver = { path = "../../drivers/intel-graphics-driver" }
+mini_png = { path = "../../libs/mini_png" }

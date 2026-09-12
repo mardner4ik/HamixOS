@@ -23,6 +23,8 @@ mod syscall;
 mod task;
 #[cfg(target_arch = "x86_64")]
 mod users;
+#[cfg(target_arch = "x86_64")]
+mod vt;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64_main {
@@ -31,14 +33,63 @@ mod x86_64_main {
 
     use crate::{arch, drivers, fs, hsh, memory, syscall, task, users};
 
+    // Requests a linear graphics-mode framebuffer from GRUB at boot (see
+    // memory::init's tag-8 handling and intel_graphics::init). The console
+    // keeps its character cells in kernel RAM and renders them with an 8x8
+    // bitmap font scaled to the framebuffer (drivers::video::text_mode); it
+    // only falls back to the legacy 0xB8000 text buffer when no framebuffer
+    // was handed to us, since that window stops decoding once the hardware
+    // leaves text mode.
+    #[repr(C, packed)]
+    struct Mb2FramebufferTag {
+        typ: u16,
+        flags: u16,
+        size: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        _pad: u32,
+    }
+
+    #[repr(C, packed)]
+    struct Mb2EndTag {
+        typ: u32,
+        size: u32,
+    }
+
+    #[repr(C, packed)]
+    struct MultibootHeader {
+        magic: u32,
+        arch: u32,
+        length: u32,
+        checksum: u32,
+        fb_tag: Mb2FramebufferTag,
+        end_tag: Mb2EndTag,
+    }
+
     #[used]
     #[unsafe(link_section = ".multiboot_header")]
-    static MULTIBOOT_HEADER: [u32; 6] = {
+    static MULTIBOOT_HEADER: MultibootHeader = {
         let magic: u32 = 0xe85250d6;
         let arch: u32 = 0;
-        let length: u32 = 24;
+        let length: u32 = core::mem::size_of::<MultibootHeader>() as u32;
         let checksum: u32 = (0u32).wrapping_sub(magic.wrapping_add(arch).wrapping_add(length));
-        [magic, arch, length, checksum, 0, 8]
+        MultibootHeader {
+            magic,
+            arch,
+            length,
+            checksum,
+            fb_tag: Mb2FramebufferTag {
+                typ: 5,
+                flags: 0,
+                size: 20,
+                width: 1024,
+                height: 768,
+                depth: 32,
+                _pad: 0,
+            },
+            end_tag: Mb2EndTag { typ: 0, size: 8 },
+        }
     };
 
     const MBI_BUF_SIZE: usize = 8192;
@@ -62,14 +113,30 @@ mod x86_64_main {
         }
 
         drivers::serial::init();
-        serial_println!("boot: start");
+        crate::serial_println!("boot: start");
+        // Must run before anything logs via drivers::klog, which now
+        // allocates (owned Strings) so it can record real hardware-detected
+        // messages -- see memory::early_heap_init's doc comment.
+        memory::early_heap_init();
         arch::x86_64::gdt::init();
         drivers::klog::log("boot: gdt");
         arch::x86_64::idt::init();
         drivers::klog::log("boot: idt");
+        {
+            let cpu = arch::x86_64::cpuid::identify();
+            let line = if cpu.brand.is_empty() {
+                alloc::format!("cpu: {} (family {}, model {}, stepping {})", cpu.vendor, cpu.family, cpu.model, cpu.stepping)
+            } else {
+                alloc::format!("cpu: {}", cpu.brand)
+            };
+            drivers::klog::log(&line);
+        }
         memory::init(mbi_copy.as_ptr() as usize);
         drivers::klog::log("boot: memory");
-        serial_println!("{}", drivers::video::intel_penryn::info_string());
+        drivers::video::text_mode::cache_framebuffer();
+        drivers::video::intel_graphics::init();
+        drivers::video::text_mode::fb_clear_full();
+        crate::serial_println!("{}", drivers::video::intel_graphics::info_line());
         drivers::klog::log("boot: video");
         drivers::klog::log("boot: serial");
         fs::init();
@@ -77,29 +144,37 @@ mod x86_64_main {
         if let Some(module) = memory::modules()[0] {
             let addr = module.start as usize;
             let size = (module.end - module.start) as usize;
-            serial_println!("boot: initramfs at {:#x}, {} bytes", addr, size);
+            crate::serial_println!("boot: initramfs at {:#x}, {} bytes", addr, size);
             fs::load_initramfs(addr, size);
         } else {
-            serial_println!("boot: no initramfs module found");
+            crate::serial_println!("boot: no initramfs module found");
         }
         drivers::klog::log("boot: initramfs");
         if let Some(disk) = memory::modules()[1] {
             let addr = disk.start as usize;
             let size = (disk.end - disk.start) as usize;
-            serial_println!("boot: disk image module at {:#x}, {} bytes", addr, size);
+            crate::serial_println!("boot: disk image module at {:#x}, {} bytes", addr, size);
             *fs::DISK_IMAGE.lock() = Some((addr, size));
         }
         users::init();
         drivers::klog::log("boot: users");
         drivers::input::keyboard::init();
         drivers::klog::log("boot: keyboard");
+        drivers::input::mouse::init();
+        drivers::video::console_mouse::enable();
+        drivers::klog::log("boot: mouse");
+        drivers::usb::init();
+        drivers::klog::log("boot: usb");
         syscall::init();
         drivers::klog::log("boot: syscall");
         task::init();
         drivers::klog::log("boot: task");
         arch::x86_64::enable_interrupts();
 
-        hsh::run_login();
+        // VT0 runs directly on the boot stack -- see vt.rs, which only
+        // allocates dedicated stacks for VT1..VT5, bootstrapped lazily the
+        // first time Ctrl+Alt+F2..F6 is pressed.
+        hsh::run_login(0);
     }
 
     unsafe fn snapshot_multiboot_info(ptr: usize, dst: &mut [u8; MBI_BUF_SIZE]) {

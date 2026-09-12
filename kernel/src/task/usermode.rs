@@ -22,6 +22,71 @@ unsafe extern "C" fn ring3_stub() {
     );
 }
 
+/// Drops into ring 3 at `entry`/`user_stack_top` and, unlike
+/// `enter_user_mode`, actually comes back: when the user process calls
+/// exit()/exit_group(), the kernel's syscall handler calls `resume_kernel`
+/// instead of `sysretq`, which restores the rsp and callee-saved registers
+/// captured here and `ret`s -- so to the caller this looks like an ordinary
+/// function call that returns the process's exit code once it's done.
+///
+/// `save_slot` is a pointer to *this VT's own* parking spot (see
+/// `vt::current_coro_slot_ptr`), not a single fixed global -- each virtual
+/// terminal that ever execs a ring-3 binary gets its own slot, so VT1's
+/// in-flight `hed`/`hxserver` call and VT2's don't stomp on each other's
+/// saved rsp when Ctrl+Alt+F<n> switches which one is actually running.
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn enter_user_mode_and_return(
+    entry: u64,
+    user_stack_top: u64,
+    save_slot: *mut u64,
+) -> i32 {
+    core::arch::naked_asm!(
+        "push rbx",
+        "push rbp",
+        "push r12",
+        "push r13",
+        "push r14",
+        "push r15",
+        "mov [rdx], rsp",
+        "mov rax, {user_ds}",
+        "mov ds, ax",
+        "mov es, ax",
+        "mov fs, ax",
+        "push {user_ds}",
+        "push rsi",
+        "push 0x202",
+        "push {user_cs}",
+        "push rdi",
+        "iretq",
+        user_ds = const USER_DS as u64,
+        user_cs = const USER_CS as u64,
+    );
+}
+
+/// Called from the SYS_EXIT/SYS_EXIT_GROUP syscall handler (still running
+/// on the syscall's own kernel stack, right after the `swapgs` that
+/// `syscall_entry` did on the way in). Undoes that swapgs, then throws away
+/// the syscall stack entirely and long-jumps back to whatever called
+/// `enter_user_mode_and_return`, handing back `exit_code` as if that call
+/// had simply returned. `restore_slot` must be the *same* VT slot pointer
+/// that was passed to the matching `enter_user_mode_and_return` call (the
+/// exiting process's own VT, i.e. `vt::current_coro_slot_ptr()`).
+#[unsafe(naked)]
+pub unsafe extern "C" fn resume_kernel(exit_code: i32, restore_slot: *mut u64) -> ! {
+    core::arch::naked_asm!(
+        "swapgs",
+        "mov eax, edi",
+        "mov rsp, [rsi]",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbp",
+        "pop rbx",
+        "ret",
+    );
+}
+
 pub(crate) unsafe fn enter_user_mode(entry: u64, user_stack_top: u64) -> ! {
     unsafe {
         core::arch::asm!(

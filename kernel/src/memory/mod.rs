@@ -1,6 +1,15 @@
 pub mod frame;
 mod heap;
 
+/// Bringing the heap up needs nothing from the multiboot info (it's just a
+/// fixed static array in the kernel's own .bss), so it can and must run
+/// before anything that allocates -- including `klog::log`, which now
+/// stores owned Strings so it can record real detected-hardware messages
+/// (see drivers::klog). Call this first, before gdt/idt::init().
+pub fn early_heap_init() {
+    heap::init();
+}
+
 use spin::Mutex;
 
 #[allow(dead_code)]
@@ -14,6 +23,14 @@ pub struct FramebufferInfo {
     pub height: u32,
     pub bpp: u8,
 }
+
+/// Multiboot2 framebuffer color types (spec section 3.6.9). We only treat
+/// type 1 (direct RGB) as a real pixel framebuffer -- type 2 is the legacy
+/// EGA/VGA text buffer (0xB8000, 2 bytes/char cell) that GRUB reports
+/// whenever no graphics mode was actually requested/set, and drawing
+/// pixel colors into that as if it were RGB memory is exactly what
+/// produced garbled/"squished" output before a real mode was requested.
+const MB2_FB_TYPE_RGB: u8 = 1;
 
 pub static FRAMEBUFFER: Mutex<Option<FramebufferInfo>> = Mutex::new(None);
 
@@ -123,7 +140,16 @@ pub fn init(multiboot_info_ptr: usize) {
                     let width = core::ptr::read_unaligned(tag_ptr.add(5));
                     let height = core::ptr::read_unaligned(tag_ptr.add(6));
                     let bpp = core::ptr::read_unaligned((tag_ptr as *const u8).add(28));
-                    *FRAMEBUFFER.lock() = Some(FramebufferInfo { addr, pitch, width, height, bpp });
+                    let fb_type = core::ptr::read_unaligned((tag_ptr as *const u8).add(29));
+                    if fb_type == MB2_FB_TYPE_RGB {
+                        *FRAMEBUFFER.lock() = Some(FramebufferInfo { addr, pitch, width, height, bpp });
+                    } else {
+                        crate::serial_println!(
+                            "boot: framebuffer tag is type {} (not RGB) -- likely still in text \
+                             mode because GRUB was never asked for a graphics mode; ignoring it",
+                            fb_type
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -131,6 +157,4 @@ pub fn init(multiboot_info_ptr: usize) {
             offset += (tag_size + 7) & !7;
         }
     }
-
-    heap::init();
 }

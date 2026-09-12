@@ -9,3 +9,7 @@ Cargo.lock
 /target/
 /hamix_os.iso
 /build.log
+/rootfs/
+/isoroot/boot/kernel.bin
+/isoroot/boot/initramfs.tar
+/isoroot/boot/disk.img

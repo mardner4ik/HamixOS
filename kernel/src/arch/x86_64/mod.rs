@@ -1,3 +1,4 @@
+pub mod cpuid;
 pub mod gdt;
 pub mod idt;
 pub mod paging;
@@ -85,6 +86,32 @@ pub fn inw(port: u16) -> u16 {
         core::arch::asm!(
             "in ax, dx",
             out("ax") val,
+            in("dx") port,
+            options(nomem, nostack)
+        );
+    }
+    val
+}
+
+#[inline]
+pub fn outl(port: u16, val: u32) {
+    unsafe {
+        core::arch::asm!(
+            "out dx, eax",
+            in("dx") port,
+            in("eax") val,
+            options(nomem, nostack)
+        );
+    }
+}
+
+#[inline]
+pub fn inl(port: u16) -> u32 {
+    let val: u32;
+    unsafe {
+        core::arch::asm!(
+            "in eax, dx",
+            out("eax") val,
             in("dx") port,
             options(nomem, nostack)
         );

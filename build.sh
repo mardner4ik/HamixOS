@@ -60,25 +60,60 @@ root:x:0:0:root:/root:/bin/hsh
 user:x:1000:1000:user:/home/user:/bin/hsh
 EOF
 
+cat > "$ROOTFS_DIR/etc/shadow" <<'EOF'
+root:00000001:f344ed9f
+user:00000001:da7b420e
+EOF
+
+cat > "$ROOTFS_DIR/etc/sudoers" <<'EOF'
+user
+EOF
+
 cat > "$ROOTFS_DIR/etc/os-release" <<'EOF'
 NAME="HamixOS"
 ID=hamix
-VERSION="0.1.0"
-PRETTY_NAME="HamixOS 0.1.0 (live ramdisk)"
+VERSION="0.2.0"
+PRETTY_NAME="HamixOS 0.2.0 (live ramdisk)"
 EOF
 
 cat > "$ROOTFS_DIR/etc/motd" <<'EOF'
 Welcome to HamixOS -- live image, root filesystem lives entirely in RAM.
+Try `exec /usr/bin/hello_world` for a Rust + hamix_std userspace program,
+or `startx` for Nook, the desktop -- click "Nook" for the menu, Esc to leave.
+In the console the mouse selects text: drag with the left button, paste with
+the middle button.
 EOF
 
 cat > "$ROOTFS_DIR/usr/share/doc/README" <<'EOF'
 /bin and /sbin are reserved for musl-linked static binaries built against
 HamixOS's syscall ABI (see docs/MUSL.md at the repo root for the toolchain
-setup). The kernel does not yet contain an ELF loader / ring3 process
-switch, so this directory intentionally ships empty in this build.
+setup). /usr/bin ships the Rust userspace binaries built from apps/ against
+sdk/hamix_std -- hello_world and hxserver (the display server, see
+docs/XORG.md) -- loaded via the kernel's ELF loader / ring-3 switch
+(kernel/src/task/elf.rs), run with the shell's `exec` or `startx` commands.
 EOF
 
 touch "$ROOTFS_DIR/var/log/boot.log"
+
+echo "[HamixOS] Building userspace apps (Rust, hamix_std, target x86_64-hamix_os)..."
+for app in hello_world hxserver hed; do
+    APP_DIR="$SCRIPT_DIR/apps/$app"
+    (
+        cd "$APP_DIR"
+        cargo +nightly build \
+            --release \
+            -Z build-std=core,compiler_builtins,alloc \
+            -Z build-std-features=compiler-builtins-mem \
+            --target "$KERNEL_DIR/x86_64-hamix_os.json"
+    )
+    APP_BIN="$SCRIPT_DIR/target/x86_64-hamix_os/release/$app"
+    if [ -f "$APP_BIN" ]; then
+        cp "$APP_BIN" "$ROOTFS_DIR/usr/bin/$app"
+        echo "[HamixOS] Installed /usr/bin/$app"
+    else
+        echo "[WARN] $app build did not produce $APP_BIN, skipping install"
+    fi
+done
 
 OVERLAY_DIR="$SCRIPT_DIR/overlay"
 if [ -d "$OVERLAY_DIR" ]; then

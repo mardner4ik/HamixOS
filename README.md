@@ -30,7 +30,9 @@ HamixOS/
 │   │   │   ├── serial.rs         # COM1 serial (debug output, serial_print!/serial_println!)
 │   │   │   ├── video/
 │   │   │   │   ├── mod.rs
-│   │   │   │   └── text_mode.rs  # VGA 80x25 text-mode driver, hw cursor, panic screen
+│   │   │   │   ├── text_mode.rs      # VGA 80x25 text-mode driver, hw cursor, panic screen
+│   │   │   │   ├── intel_graphics.rs # kernel-side adapter for the intel-graphics-driver crate
+│   │   │   │   └── registry.rs       # VideoDriver trait + driver registry (backs `drivers`)
 │   │   │   └── input/
 │   │   │       ├── mod.rs
 │   │   │       └── keyboard.rs   # PS/2 keyboard, scancode set 1 + extended keys
@@ -44,11 +46,22 @@ HamixOS/
 │   ├── linker.ld                 # Memory layout (1MB load, BSS symbols)
 │   ├── x86_64-hamix_os.json      # Custom Rust target
 │   └── .cargo/config.toml        # Build config (nightly, build-std)
+├── drivers/
+│   └── intel-graphics-driver/    # standalone crate: Intel chipset graphics driver (see below)
+├── libs/
+│   └── vellum/                   # standalone crate: no_std 2D graphics primitives library
 ├── isoroot/boot/grub/grub.cfg    # GRUB2 menu
-├── apps/                         # Userland crates reserved for future ring-3 support
-├── sdk/hamix_std/                # Userland std shim reserved for future ring-3 support
-└── build.sh                      # Full build -> ISO script
+├── apps/                         # Ring-3 Rust binaries built against sdk/hamix_std
+│   ├── hello_world/              # Minimal hamix_std + alloc demo program
+│   ├── hxserver/                 # HamixOS's Xorg-equivalent display server (see docs/XORG.md)
+│   └── hsh/                      # Still a placeholder -- hsh itself is still kernel-hosted, see docs/USERSPACE_ROADMAP.md
+├── sdk/hamix_std/                # no_std userspace runtime: syscalls, brk-backed allocator, println!, entry!
+└── build.sh                      # Full build -> ISO script (also builds + installs apps/ into rootfs/usr/bin)
 ```
+
+See `docs/MUSL.md` for the syscall ABI (musl-compatible numbering) and
+`docs/USERSPACE_ROADMAP.md` for what's real vs. still a bridge-stage
+stand-in on the road to real per-process address spaces.
 
 The console is VGA text mode (80x25, `0xB8000`), not a linear framebuffer —
 `drivers::video::text_mode` owns the hardware, `drivers::tty` layers 16-color
@@ -141,7 +154,9 @@ missing to make that possible and the order in which it gets built.
 | `chown <user> <p>` | Change file owner (root only)    |
 | `tree`        | Recursive directory listing from cwd |
 | `echo a > f`  | Write/append output to a file    |
-| `fb <color>`  | Fill the linear framebuffer (`intel_penryn` driver) |
+| `fb <color>`  | Fill the linear framebuffer (`intel-graphics-driver`) |
+| `gpuinfo`     | Graphics chipset and framebuffer information |
+| `drivers`     | List registered kernel drivers and their status |
 | `diskls`      | List root dir of the ext4 disk image module |
 | `diskcat <p>` | Read a file straight off the ext4 disk image |
 | `hostname`    | System hostname                  |
@@ -175,14 +190,50 @@ extent-tree block mapping, linear directory parsing) you can browse with
 `metadata_csum`/64-bit group descriptors, so `build.sh` disables those
 features when formatting.
 
-## Video: `intel_penryn` driver
+## Video: `intel-graphics-driver`
 
-`kernel/src/drivers/video/intel_penryn.rs` drives the linear framebuffer that
-GRUB/VBE hands off via the multiboot2 framebuffer tag (this is the practical
-way to get pixels on real Intel GMA 4500MHD hardware, like the graphics core
-paired with an Intel Celeron T3100, without writing a full mode-setting
-driver). `fb <red|green|blue|black|gradient>` in `hsh` fills the whole screen
-at whatever resolution the firmware reported.
+Video drivers no longer live as loose files inside the kernel tree. Anything
+that draws pixels on real Intel graphics hardware lives in
+[`drivers/intel-graphics-driver`](drivers/intel-graphics-driver/README.md),
+a standalone crate with its own `Cargo.toml`, pulled into the kernel as a
+normal workspace dependency. It currently drives the linear framebuffer that
+GRUB/VBE hands off via the multiboot2 framebuffer tag for the **Intel Mobile
+Series 4 Express Chipset Family** (GMA 4500MHD, e.g. the graphics core paired
+with an Intel Celeron T3100) — the practical way to get pixels on that
+hardware without writing a full mode-setting driver. It is built to grow into
+more chipsets over time; see the crate's own README for its roadmap.
+
+The kernel only talks to this crate through a thin adapter,
+`kernel/src/drivers/video/intel_graphics.rs`, which reads the framebuffer
+address/pitch/resolution GRUB reported and hands it to the driver — no raw
+pixel math lives in the kernel anymore. `fb <red|green|blue|black|gradient>`
+and `gpuinfo` in `hsh` both go through this adapter.
+
+### `vellum`: the first HamixOS graphics library
+
+Drawing primitives (`Color`, `Point`, `Rect`, and a `Canvas` trait with
+`fill`/`fill_rect`/`horizontal_gradient`) live in
+[`libs/vellum`](libs/vellum/README.md), a small `no_std`, allocation-free
+library that is completely hardware-agnostic. `intel-graphics-driver`
+implements `vellum::Canvas` for its `Framebuffer` type to get all of its
+drawing operations from it. This is the first of what's meant to become a
+small stack of HamixOS graphics libraries — `vellum` stays primitives-only
+for now and grows one stage at a time (see its README for the roadmap)
+rather than trying to become a full 2D/3D stack in one step.
+
+See [`docs/GRAPHICS_ROADMAP.md`](docs/GRAPHICS_ROADMAP.md) for the full plan
+behind this three-layer split (`vellum` → driver crates → kernel adapters)
+and where it's headed next.
+
+### Driver registry
+
+`kernel/src/drivers/video/registry.rs` defines a small `VideoDriver` trait
+(`name`, `version`, `is_ready`, `resolution`, `kind`) that every video driver
+— text-mode console included — implements, and a static registry of all of
+them. `drivers` in `hsh` lists every registered driver with its version and
+live status, the same idea as `lsmod`, and is the first piece of what should
+grow into a general kernel driver registry (not just video) as more driver
+classes are added.
 
 That resolution is entirely up to GRUB, not to this driver, and two things
 have to be right for it to match the real panel instead of falling back to a
@@ -250,7 +301,8 @@ Planned for future releases. The kernel architecture is designed to be modular, 
 
 ## Design Decisions
 
-- **No external crates** except `spin` (for `Mutex`). All boot parsing is custom.
+- **No external crates** except `spin` (for `Mutex`) and the in-workspace
+  `intel-graphics-driver` / `vellum` crates. All boot parsing is custom.
 - **SSE enabled**: CR4.OSFXSR/OSXMMEXCPT are set during boot because the compiler emits SSE instructions (e.g. in `memcpy`/`memset` and `x86-interrupt` handlers) even for a "soft-float" target; leaving them off causes `#UD` on first use.
 - **No red zone**: disabled for kernel interrupt safety.
 - **Static heap**: 4MB compile-time arena, backed by an address-ordered
@@ -310,3 +362,7 @@ Planned for future releases. The kernel architecture is designed to be modular, 
 - [ ] Network stack (RTL8139/e1000)
 - [ ] x86 (32-bit) support
 - [ ] ARM support (armv7, aarch64) — planned for future releases
+- [ ] PCI bus driver, used to autodetect the chipset in `intel-graphics-driver`
+- [ ] More `intel-graphics-driver` chipsets (GMA 950, GMA 3100, HD Graphics)
+- [ ] `vellum` stage 2: line/circle rasterization, bitmap fonts
+- [ ] General (non-video) driver registry, extending `drivers::video::registry`

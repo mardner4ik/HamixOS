@@ -37,10 +37,47 @@ impl KeyQueue {
 }
 
 static KEY_QUEUE: Mutex<KeyQueue> = Mutex::new(KeyQueue::new());
+static PASTE_QUEUE: Mutex<alloc::collections::VecDeque<char>> =
+    Mutex::new(alloc::collections::VecDeque::new());
+
+pub fn push_text(text: &str) {
+    let mut queue = PASTE_QUEUE.lock();
+    for ch in text.chars() {
+        queue.push_back(ch);
+    }
+}
 static SHIFT_STATE: Mutex<bool> = Mutex::new(false);
 static CAPS_STATE: Mutex<bool> = Mutex::new(false);
+static CTRL_STATE: Mutex<bool> = Mutex::new(false);
+
+// Independent, minimal modifier tracking used *only* to recognize the
+// Ctrl+Alt+F1..F6 workspace-switch hotkey at the moment the F-key scancode
+// arrives (deliberately separate from SHIFT_STATE/CTRL_STATE above, which
+// are consumed lazily by read_key() -- duplicating two booleans here is
+// simpler and safer than restructuring that existing, working pipeline).
+static HOTKEY_CTRL: Mutex<bool> = Mutex::new(false);
+static HOTKEY_ALT: Mutex<bool> = Mutex::new(false);
+
+// Scancode Set 1 make codes for F1..F6, and for the 'C' key (Ctrl+C).
+const SC_F1: u8 = 0x3B;
+const SC_F6: u8 = 0x40;
+const SC_C: u8 = 0x2E;
 
 fn on_scancode(scancode: u8) {
+    match scancode {
+        0x1D => *HOTKEY_CTRL.lock() = true,
+        0x9D => *HOTKEY_CTRL.lock() = false,
+        0x38 => *HOTKEY_ALT.lock() = true,
+        0xB8 => *HOTKEY_ALT.lock() = false,
+        _ => {}
+    }
+    if (SC_F1..=SC_F6).contains(&scancode) && *HOTKEY_CTRL.lock() && *HOTKEY_ALT.lock() {
+        crate::vt::request_switch((scancode - SC_F1) as usize);
+        return;
+    }
+    if scancode == SC_C && *HOTKEY_CTRL.lock() {
+        crate::vt::request_kill();
+    }
     KEY_QUEUE.lock().push(scancode);
 }
 
@@ -79,6 +116,7 @@ fn scancode_to_char(sc: u8, shift: bool, caps: bool) -> Option<char> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     Char(char),
+    Ctrl(char),
     Backspace,
     Enter,
     Tab,
@@ -105,12 +143,32 @@ fn extended_to_key(sc: u8) -> Option<Key> {
 }
 
 pub fn read_key() -> Option<Key> {
+    if !crate::vt::is_foreground_task() {
+        return None;
+    }
+    if let Some(ch) = crate::arch::x86_64::without_interrupts(|| PASTE_QUEUE.lock().pop_front()) {
+        return Some(match ch {
+            '\n' | '\r' => Key::Enter,
+            '\t' => Key::Tab,
+            other => Key::Char(other),
+        });
+    }
     loop {
-        let sc = KEY_QUEUE.lock().pop()?;
+        // read_key() now runs both at ring0 (interrupts always on) and
+        // inside syscalls (interrupts on for the duration, see
+        // syscall::syscall_entry's sti/cli). KEY_QUEUE is also written
+        // from on_scancode, which runs *inside* the keyboard IRQ handler.
+        // Without this guard, a keyboard interrupt landing exactly while
+        // this pop() holds the lock would spin forever trying to take a
+        // lock the interrupted code can't release until the handler
+        // returns -- a classic single-core spinlock-in-IRQ deadlock, and
+        // with a timer tick re-entering this loop at high frequency while
+        // blocked waiting for a key, it was hitting basically every time.
+        let sc = crate::arch::x86_64::without_interrupts(|| KEY_QUEUE.lock().pop())?;
 
         if sc == 0xE0 {
             let sc2 = loop {
-                if let Some(b) = KEY_QUEUE.lock().pop() {
+                if let Some(b) = crate::arch::x86_64::without_interrupts(|| KEY_QUEUE.lock().pop()) {
                     break b;
                 }
                 crate::arch::x86_64::hlt();
@@ -134,6 +192,10 @@ pub fn read_key() -> Option<Key> {
                 *SHIFT_STATE.lock() = !is_break;
                 continue;
             }
+            0x1D => {
+                *CTRL_STATE.lock() = !is_break;
+                continue;
+            }
             0x3A if !is_break => {
                 let mut caps = CAPS_STATE.lock();
                 *caps = !*caps;
@@ -148,11 +210,13 @@ pub fn read_key() -> Option<Key> {
 
         let shift = *SHIFT_STATE.lock();
         let caps = *CAPS_STATE.lock();
+        let ctrl = *CTRL_STATE.lock();
 
         return match scancode_to_char(make, shift, caps) {
             Some('\n') => Some(Key::Enter),
             Some('\x08') => Some(Key::Backspace),
             Some('\t') => Some(Key::Tab),
+            Some(ch) if ctrl && ch.is_ascii_alphabetic() => Some(Key::Ctrl(ch.to_ascii_lowercase())),
             Some(ch) => Some(Key::Char(ch)),
             None => continue,
         };
@@ -164,6 +228,22 @@ pub fn read_key_blocking() -> Key {
         if let Some(key) = read_key() {
             return key;
         }
+        crate::vt::service_pending_foreground_switch();
+        crate::vt::yield_to_next();
+        crate::arch::x86_64::hlt();
+    }
+}
+
+pub fn read_key_blocking_ring3() -> Key {
+    loop {
+        if crate::vt::kill_pending() {
+            crate::vt::terminate_current_ring3();
+        }
+        if let Some(key) = read_key() {
+            return key;
+        }
+        crate::vt::service_pending_foreground_switch();
+        crate::vt::yield_to_next();
         crate::arch::x86_64::hlt();
     }
 }

@@ -1,50 +1,46 @@
+use alloc::string::String;
+use alloc::vec::Vec;
 use spin::Mutex;
 
-const KLOG_CAP: usize = 64;
+const KLOG_CAP: usize = 128;
 
 struct KLog {
-    lines: [Option<&'static str>; KLOG_CAP],
-    len: usize,
+    lines: Vec<String>,
 }
 
 impl KLog {
     const fn new() -> Self {
-        Self {
-            lines: [None; KLOG_CAP],
-            len: 0,
-        }
+        Self { lines: Vec::new() }
     }
 
-    fn push(&mut self, msg: &'static str) {
-        if self.len < KLOG_CAP {
-            self.lines[self.len] = Some(msg);
-            self.len += 1;
-        } else {
-            for i in 1..KLOG_CAP {
-                self.lines[i - 1] = self.lines[i];
-            }
-            self.lines[KLOG_CAP - 1] = Some(msg);
+    fn push(&mut self, msg: String) {
+        if self.lines.len() >= KLOG_CAP {
+            self.lines.remove(0);
         }
+        self.lines.push(msg);
     }
 }
 
 static KLOG: Mutex<KLog> = Mutex::new(KLog::new());
 
-pub fn log(msg: &'static str) {
-    KLOG.lock().push(msg);
+/// Records a boot/runtime message in the in-memory ring buffer (visible via
+/// the `dmesg` shell command) and mirrors it to the serial console. Takes
+/// any `&str`, not just `&'static str`, so callers can log real detected
+/// hardware (CPU brand string, GPU chipset, etc) the way Linux's dmesg
+/// does, not just fixed boot-stage markers.
+pub fn log(msg: &str) {
+    KLOG.lock().push(String::from(msg));
     crate::serial_println!("{}", msg);
 }
 
 pub fn for_each<F: FnMut(&str)>(mut f: F) {
     let klog = KLOG.lock();
-    for i in 0..klog.len {
-        if let Some(line) = klog.lines[i] {
-            f(line);
-        }
+    for line in klog.lines.iter() {
+        f(line.as_str());
     }
 }
 
 #[allow(dead_code)]
 pub fn count() -> usize {
-    KLOG.lock().len
+    KLOG.lock().lines.len()
 }

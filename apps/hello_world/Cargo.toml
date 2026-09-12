@@ -3,7 +3,9 @@ name = "hello_world"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
+[[bin]]
+name = "hello_world"
+path = "src/main.rs"
 
 [dependencies]
 hamix_std = { path = "../../sdk/hamix_std" }

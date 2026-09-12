@@ -4,6 +4,11 @@ members = [
     "sdk/hamix_std",
     "apps/hsh",
     "apps/hello_world",
+    "apps/hxserver",
+    "drivers/intel-graphics-driver",
+    "libs/vellum",
+    "libs/mini_png",
+    "apps/hed",
 ]
 resolver = "2"
 

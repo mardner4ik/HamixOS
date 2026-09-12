@@ -1,5 +1,17 @@
 # Getting hsh, sudo, and musl binaries out of the kernel and into rootfs
 
+> **Status update:** milestones 1 (GDT ring-3 segments + TSS), 4 (ELF
+> loader, `kernel/src/task/elf.rs`), and the ring-3 entry path (milestone
+> 2's single-address-space bridge version, `kernel/src/task/usermode.rs`)
+> are done and reachable today from `hsh` via `exec <path>` /
+> `ring3smoketest`. `apps/hxserver` (see `docs/XORG.md`) is the first real
+> program built and run this way. What's below is kept as-is for anyone
+> reading it as the original design log; milestones 2 (real per-process
+> page tables, today's version is a shared-address-space stand-in), 3 (a
+> real task struct/scheduler -- there is still exactly one "process" and
+> `exec` never returns to the shell), and 6 (moving `hsh`/`sudo`
+> themselves into rootfs) are still open.
+
 This is the same question asked three different ways:
 
 1. "Why is `hsh` still `kernel/src/hsh/mod.rs` instead of `/bin/hsh` in the
