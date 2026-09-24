@@ -156,3 +156,92 @@ long_mode_start:
     popq %rax
     call rust_main
     hlt
+
+.section .text
+.global ap_trampoline
+.global ap_trampoline_end
+.global ap_slot_cr3
+.global ap_slot_stack
+.global ap_slot_entry
+.code16
+.p2align 12
+ap_trampoline:
+    cli
+    cld
+    xorw %ax, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    lgdtl (ap_gdt32_ptr - ap_trampoline + 0x7000)
+    movl %cr0, %eax
+    orl $1, %eax
+    movl %eax, %cr0
+    ljmpl $0x08, $(ap_protected - ap_trampoline + 0x7000)
+
+.code32
+ap_protected:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    movl (ap_slot_cr3 - ap_trampoline + 0x7000), %eax
+    movl %eax, %cr3
+    movl %cr4, %eax
+    orl $0x00000620, %eax
+    movl %eax, %cr4
+    movl $0xC0000080, %ecx
+    rdmsr
+    orl $0x00000101, %eax
+    wrmsr
+    movl %cr0, %eax
+    andl $0x9FFFFFFF, %eax
+    orl $0x80000022, %eax
+    movl %eax, %cr0
+    lgdt (ap_gdt64_ptr - ap_trampoline + 0x7000)
+    ljmp $0x08, $(ap_long - ap_trampoline + 0x7000)
+
+.code64
+ap_long:
+    movw $0x10, %ax
+    movw %ax, %ds
+    movw %ax, %es
+    movw %ax, %ss
+    xorw %ax, %ax
+    movw %ax, %fs
+    movw %ax, %gs
+    movq (ap_slot_stack - ap_trampoline + 0x7000), %rsp
+    xorq %rbp, %rbp
+    fninit
+    movq $0x1F80, %rax
+    pushq %rax
+    ldmxcsr (%rsp)
+    popq %rax
+    movq (ap_slot_entry - ap_trampoline + 0x7000), %rax
+    callq *%rax
+    hlt
+
+.p2align 3
+ap_gdt32:
+    .quad 0
+    .quad 0x00CF9A000000FFFF
+    .quad 0x00CF92000000FFFF
+ap_gdt32_ptr:
+    .word 23
+    .long ap_gdt32 - ap_trampoline + 0x7000
+.p2align 3
+ap_gdt64:
+    .quad 0
+    .quad 0x00209A0000000000
+    .quad 0x0000920000000000
+ap_gdt64_ptr:
+    .word 23
+    .long ap_gdt64 - ap_trampoline + 0x7000
+.p2align 3
+ap_slot_cr3:
+    .long 0
+    .long 0
+ap_slot_stack:
+    .quad 0
+ap_slot_entry:
+    .quad 0
+ap_trampoline_end:

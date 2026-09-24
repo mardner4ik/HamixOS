@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=Display, network, wallpaper, session
+Keywords=preferences;control;wifi;
+Exec=/usr/bin/hxsettings
+Icon=settings
+Terminal=false
+X-Nook-Key=settings
+X-Nook-Order=70
+Categories=Settings;
+X-Nook-Role=settings
+X-Nook-Dock=true
+X-Nook-Desktop=true

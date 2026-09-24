@@ -1,0 +1,11 @@
+[package]
+name = "intel-display"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable display module for Intel integrated graphics, gen6 (Sandy Bridge) to gen9 (Skylake/Kaby Lake)"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

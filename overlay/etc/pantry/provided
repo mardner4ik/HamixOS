@@ -1,0 +1,14 @@
+P:musl
+V:1.2.5-r12
+T:musl C library and dynamic linker (shipped with HamixOS)
+p:so:libc.musl-x86_64.so.1=1
+
+P:busybox
+V:1.37.0-r99
+T:BusyBox (static PIE, shipped with HamixOS)
+p:cmd:busybox
+
+P:busybox-binsh
+V:1.37.0-r99
+T:/bin/sh from BusyBox (shipped with HamixOS)
+p:/bin/sh cmd:sh=1.37.0-r99

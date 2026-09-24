@@ -1,4 +1,4 @@
-use super::{intel_graphics, text_mode};
+use super::text_mode;
 
 pub trait VideoDriver: Sync {
     fn name(&self) -> &'static str;
@@ -32,23 +32,23 @@ impl VideoDriver for TextModeDriver {
     }
 }
 
-pub struct IntelGraphicsVideoDriver;
+pub struct BootFramebufferDriver;
 
-impl VideoDriver for IntelGraphicsVideoDriver {
+impl VideoDriver for BootFramebufferDriver {
     fn name(&self) -> &'static str {
-        intel_graphics::driver_name()
+        "boot-framebuffer"
     }
 
     fn version(&self) -> &'static str {
-        intel_graphics::driver_version()
+        "0.2.0"
     }
 
     fn is_ready(&self) -> bool {
-        intel_graphics::available()
+        super::framebuffer_ready()
     }
 
     fn resolution(&self) -> Option<(u32, u32)> {
-        intel_graphics::resolution()
+        super::resolution()
     }
 
     fn kind(&self) -> &'static str {
@@ -57,9 +57,9 @@ impl VideoDriver for IntelGraphicsVideoDriver {
 }
 
 pub static TEXT_MODE_DRIVER: TextModeDriver = TextModeDriver;
-pub static INTEL_GRAPHICS_DRIVER: IntelGraphicsVideoDriver = IntelGraphicsVideoDriver;
+pub static BOOT_FRAMEBUFFER_DRIVER: BootFramebufferDriver = BootFramebufferDriver;
 
-pub static DRIVERS: &[&dyn VideoDriver] = &[&TEXT_MODE_DRIVER, &INTEL_GRAPHICS_DRIVER];
+pub static DRIVERS: &[&dyn VideoDriver] = &[&TEXT_MODE_DRIVER, &BOOT_FRAMEBUFFER_DRIVER];
 
 pub fn for_each<F: FnMut(&dyn VideoDriver)>(mut f: F) {
     for driver in DRIVERS {

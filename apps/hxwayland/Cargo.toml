@@ -1,0 +1,12 @@
+[package]
+name = "hxwayland"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxwayland"
+path = "src/main.rs"
+
+[dependencies]
+hamix_std = { path = "../../sdk/hamix_std" }
+hxproto = { path = "../../libs/hxproto" }

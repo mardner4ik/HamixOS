@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Monitor
+Comment=Processes, processors, memory and disks
+Keywords=task;process;system;
+Exec=/usr/bin/hxmon
+Icon=monitor
+Terminal=false
+X-Nook-Key=monitor
+X-Nook-Order=60
+Categories=System;Monitor;
+X-Nook-Role=monitor
+X-Nook-Dock=true

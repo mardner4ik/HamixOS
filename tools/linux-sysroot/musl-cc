@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MUSL_ROOT:?MUSL_ROOT must point at the extracted Alpine musl-dev root}"
+LIB="$MUSL_ROOT/usr/lib"
+RESOURCE_INCLUDE="$(clang -print-resource-dir)/include"
+COMMON=(--target=x86_64-linux-musl -nostdinc -isystem "$MUSL_ROOT/usr/include" -isystem "$RESOURCE_INCLUDE" -fPIE)
+
+mode=link
+for arg in "$@"; do
+    case "$arg" in
+        -c|-E|-S|-M|-MM) mode=compile ;;
+        -r) mode=relocatable ;;
+    esac
+done
+
+case "$mode" in
+    compile) exec clang "${COMMON[@]}" "$@" ;;
+    relocatable) exec clang "${COMMON[@]}" -fuse-ld=lld -nostdlib "$@" ;;
+esac
+
+exec clang "${COMMON[@]}" -static-pie -fuse-ld=lld -nostdlib \
+    "$LIB/rcrt1.o" "$LIB/crti.o" "$@" -L"$LIB" \
+    -Wl,--start-group "$LIB/libc.a" "$(gcc -print-libgcc-file-name)" -Wl,--end-group "$LIB/crtn.o"

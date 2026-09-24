@@ -1,0 +1,2 @@
+# PCI ids this module claims: vendor:device, one per line.
+8086:100e

@@ -1,0 +1,11 @@
+[package]
+name = "virtio-gpu"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable display module for the virtio-gpu 2D device"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

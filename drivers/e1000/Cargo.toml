@@ -1,0 +1,11 @@
+[package]
+name = "e1000"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable network module for Intel 8254x (e1000) Gigabit Ethernet controllers"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

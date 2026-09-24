@@ -1,0 +1,11 @@
+[package]
+name = "intel-gma"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable display module for Intel gen4 graphics (GMA X3100, GMA 4500/4500MHD)"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

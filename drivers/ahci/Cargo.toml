@@ -1,0 +1,11 @@
+[package]
+name = "ahci"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable block module for AHCI SATA controllers"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

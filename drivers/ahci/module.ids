@@ -1,0 +1,3 @@
+# Any AHCI SATA controller (class 01, subclass 06, interface 01) and Intel RAID-mode SATA.
+class:01:06:01
+class:01:04:*

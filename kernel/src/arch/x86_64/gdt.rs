@@ -1,5 +1,7 @@
 use core::arch::asm;
 
+use super::smp::MAX_CPUS;
+
 #[repr(C, packed)]
 struct GdtEntry {
     limit_low: u16,
@@ -68,7 +70,7 @@ impl Tss {
 #[repr(C)]
 struct GdtWithTss {
     entries: [GdtEntry; 6],
-    tss_descriptor: [u64; 2],
+    tss_descriptors: [[u64; 2]; MAX_CPUS],
 }
 
 #[allow(dead_code)]
@@ -88,7 +90,7 @@ static mut DOUBLE_FAULT_STACK: [u8; DF_STACK_SIZE] = [0u8; DF_STACK_SIZE];
 const KERNEL_STACK_SIZE: usize = 4096 * 5;
 static mut KERNEL_STACK: [u8; KERNEL_STACK_SIZE] = [0u8; KERNEL_STACK_SIZE];
 
-static mut TSS: Tss = Tss::new();
+static mut TSS: [Tss; MAX_CPUS] = [const { Tss::new() }; MAX_CPUS];
 
 static mut GDT: GdtWithTss = GdtWithTss {
     entries: [
@@ -99,43 +101,37 @@ static mut GDT: GdtWithTss = GdtWithTss {
         GdtEntry::new(0, 0xFFFFF, 0xF2, 0x80),
         GdtEntry::new(0, 0xFFFFF, 0xFA, 0xA0),
     ],
-    tss_descriptor: [0, 0],
+    tss_descriptors: [[0, 0]; MAX_CPUS],
 };
 
 pub const DOUBLE_FAULT_IST_INDEX: u8 = 1;
 
-pub fn init() {
+pub fn set_kernel_stack(top: u64) {
+    let cpu = super::smp::cpu_id();
     unsafe {
-        let df_top = (&raw const DOUBLE_FAULT_STACK) as u64 + DF_STACK_SIZE as u64;
-        let kstack_top = (&raw const KERNEL_STACK) as u64 + KERNEL_STACK_SIZE as u64;
-        TSS.ist[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = df_top;
-        TSS.rsp[0] = kstack_top;
+        let tss = (&raw mut TSS) as *mut Tss;
+        core::ptr::write_unaligned(core::ptr::addr_of_mut!((*tss.add(cpu)).rsp) as *mut u64, top);
+    }
+}
 
-        let base = (&raw const TSS) as u64;
+fn describe_tss(cpu: usize) {
+    unsafe {
+        let tss = ((&raw const TSS) as *const Tss).add(cpu);
+        let base = tss as u64;
         let limit = (core::mem::size_of::<Tss>() - 1) as u64;
         let access: u64 = 0x89;
-        let flags: u64 = 0x0;
-
-        let low = (limit & 0xFFFF)
-            | ((base & 0xFFFFFF) << 16)
-            | (access << 40)
-            | (((limit >> 16) & 0xF) << 48)
-            | ((flags & 0xF) << 52)
-            | (((base >> 24) & 0xFF) << 56);
+        let low = (limit & 0xFFFF) | ((base & 0xFFFFFF) << 16) | (access << 40) | (((limit >> 16) & 0xF) << 48) | (((base >> 24) & 0xFF) << 56);
         let high = (base >> 32) & 0xFFFFFFFF;
-
-        GDT.tss_descriptor[0] = low;
-        GDT.tss_descriptor[1] = high;
+        let gdt = &raw mut GDT;
+        (*gdt).tss_descriptors[cpu] = [low, high];
     }
+}
 
+fn load(cpu: usize) {
     let gdt_base = (&raw const GDT) as u64;
     let gdt_size = core::mem::size_of::<GdtWithTss>() as u64;
-
-    let ptr = GdtPointer {
-        size: (gdt_size - 1) as u16,
-        base: gdt_base,
-    };
-
+    let ptr = GdtPointer { size: (gdt_size - 1) as u16, base: gdt_base };
+    let selector = TSS_SEL + (cpu as u16) * 16;
     unsafe {
         asm!(
             "lgdt [{ptr}]",
@@ -147,13 +143,36 @@ pub fn init() {
             "mov ax, 0x10",
             "mov ds, ax",
             "mov es, ax",
-            "mov fs, ax",
-            "mov gs, ax",
             "mov ss, ax",
-            "mov ax, 0x30",
-            "ltr ax",
+            "xor eax, eax",
+            "mov fs, ax",
+            "ltr {sel:x}",
             ptr = in(reg) &ptr,
             tmp = lateout(reg) _,
+            sel = in(reg) selector as u64,
+            out("rax") _,
         );
     }
+}
+
+pub fn init() {
+    unsafe {
+        let df_top = (&raw const DOUBLE_FAULT_STACK) as u64 + DF_STACK_SIZE as u64;
+        let kstack_top = (&raw const KERNEL_STACK) as u64 + KERNEL_STACK_SIZE as u64;
+        let tss = (&raw mut TSS) as *mut Tss;
+        (*tss).ist[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = df_top;
+        (*tss).rsp[0] = kstack_top;
+    }
+    describe_tss(0);
+    load(0);
+}
+
+pub fn init_ap(cpu: usize, df_stack_top: u64, kernel_stack_top: u64) {
+    unsafe {
+        let tss = ((&raw mut TSS) as *mut Tss).add(cpu);
+        (*tss).ist[(DOUBLE_FAULT_IST_INDEX - 1) as usize] = df_stack_top;
+        (*tss).rsp[0] = kernel_stack_top;
+    }
+    describe_tss(cpu);
+    load(cpu);
 }

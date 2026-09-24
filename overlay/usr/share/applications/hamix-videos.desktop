@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Videos
+Comment=Play MP4 videos
+Keywords=movie;player;mp4;
+Exec=/usr/bin/hxvideo
+Icon=videos
+Terminal=false
+X-Nook-Key=videos
+X-Nook-Order=40
+Categories=AudioVideo;Video;Player;
+X-Nook-Role=videos
+X-Nook-Dock=true

@@ -1,0 +1,11 @@
+[package]
+name = "shiguredo_mp4"
+version = "2026.5.0"
+edition = "2024"
+description = "MP4 library (vendored for HamixOS)"
+license = "Apache-2.0"
+repository = "https://github.com/shiguredo/mp4-rs"
+
+[lib]
+name = "shiguredo_mp4"
+path = "src/lib.rs"

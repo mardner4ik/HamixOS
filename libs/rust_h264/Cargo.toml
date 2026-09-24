@@ -1,0 +1,14 @@
+[package]
+name = "rust_h264"
+version = "0.4.0"
+edition = "2021"
+description = "Pure Rust H.264/AVC video decoder (vendored for HamixOS, no_std + alloc)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/roticv/rust_h264"
+
+[lib]
+name = "rust_h264"
+path = "src/lib.rs"
+
+[features]
+dev-internals = []

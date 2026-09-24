@@ -1,16 +1,27 @@
 # Getting hsh, sudo, and musl binaries out of the kernel and into rootfs
 
-> **Status update:** milestones 1 (GDT ring-3 segments + TSS), 4 (ELF
-> loader, `kernel/src/task/elf.rs`), and the ring-3 entry path (milestone
-> 2's single-address-space bridge version, `kernel/src/task/usermode.rs`)
-> are done and reachable today from `hsh` via `exec <path>` /
-> `ring3smoketest`. `apps/hxserver` (see `docs/XORG.md`) is the first real
-> program built and run this way. What's below is kept as-is for anyone
-> reading it as the original design log; milestones 2 (real per-process
-> page tables, today's version is a shared-address-space stand-in), 3 (a
-> real task struct/scheduler -- there is still exactly one "process" and
-> `exec` never returns to the shell), and 6 (moving `hsh`/`sudo`
-> themselves into rootfs) are still open.
+> **Historical document.** Everything this file set out to build exists:
+> milestones 1 (GDT ring-3 segments + TSS), 2 (per-process page tables,
+> `arch::x86_64::paging::AddressSpace`), 3 (task struct and scheduler,
+> `kernel/src/task/mod.rs`), 4 (ELF loader with argv, `kernel/src/task/elf.rs`)
+> and 5 (the syscall entry, now `kernel/src/syscall/mod.rs` plus
+> `syscall/native/` and `syscall/linux/`) are done, and `hsh` itself left the
+> kernel for `apps/hsh` — every program runs in its own address space at
+> `0x80_0000_0000`, several run at once, the timer preempts ring 3 and `exec`
+> returns to the shell. The text below is kept as the original design log; it
+> describes the state *before* that work, so read it as history, not as the
+> current shape of the system.
+>
+> **What is still open (milestone 6, the only remaining piece):**
+> `sudo` is still a builtin inside `hsh` (`apps/hsh/src/builtins/users.rs`)
+> backed by a root ticket, not a real `/bin/sudo` ELF binary with a `setuid`
+> bit on `fs::Node.mode`. The machinery it was waiting for now exists —
+> `sys_setuid` (`kernel/src/syscall/linux/misc.rs`), a real `execve` path
+> (`kernel/src/syscall/linux/process.rs`) and the user database
+> (`kernel/src/users.rs`) — so what is left is the permission work in
+> `docs/ARCHITECTURE_ROADMAP.md` point 6: honour the `setuid` bit at exec
+> time, ship `/bin/sudo` as its own binary, then extend `Vfs::can_write`'s
+> three-class check to reads and groups.
 
 This is the same question asked three different ways:
 

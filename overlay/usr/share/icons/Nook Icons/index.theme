@@ -1,0 +1,22 @@
+[Icon Theme]
+Name=Nook Icons
+Comment=HamixOS icons for Nook and popular Linux applications
+Inherits=Adwaita,hicolor
+Example=utilities-terminal
+Directories=24x24/apps,48x48/apps,128x128/apps
+
+[24x24/apps]
+Size=24
+Context=Applications
+Type=Fixed
+
+[48x48/apps]
+Size=48
+Context=Applications
+Type=Fixed
+
+[128x128/apps]
+Size=128
+Context=Applications
+Type=Fixed
+

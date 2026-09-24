@@ -154,6 +154,9 @@ extern "C" fn nmi(frame: &InterruptStackFrame, _ec: u64) {
 
 extern "C" fn breakpoint(frame: &InterruptStackFrame, _ec: u64) {
     crate::serial_println!("breakpoint at {:#x}", frame.ip);
+    if frame.cs & 3 == 3 {
+        kill_faulting_process("breakpoint trap", frame.sp);
+    }
 }
 
 extern "C" fn overflow(frame: &InterruptStackFrame, _ec: u64) {
@@ -195,12 +198,32 @@ extern "C" fn general_protection(frame: &InterruptStackFrame, ec: u64) {
 extern "C" fn page_fault(frame: &InterruptStackFrame, ec: u64) {
     let addr: u64;
     unsafe { asm!("mov {}, cr2", out(reg) addr, options(nomem, nostack)) };
+    let user_mode = frame.cs & 3 == 3;
+    let interruptible = user_mode || frame.flags & (1 << 9) != 0;
+    if ec & 1 == 0 && interruptible && crate::arch::paging::is_user_range(addr, 1) && crate::task::current_pid() != 0 && crate::task::is_user_process() {
+        crate::arch::enable_interrupts();
+        let had_lock = crate::task::bkl::held();
+        if !had_lock {
+            crate::task::bkl::acquire();
+        }
+        let handled = crate::syscall::linux::base::lazy_fault(addr);
+        if !had_lock {
+            crate::task::bkl::release();
+        }
+        crate::arch::disable_interrupts();
+        if handled {
+            return;
+        }
+    }
     crate::serial_println!(
         "#PF ip={:#x} cr2={:#x} ec={:#x} cs={:#x} rsp={:#x}",
         frame.ip, addr, ec, frame.cs, frame.sp
     );
     if frame.cs & 3 == 3 {
-        kill_faulting_process("page fault");
+        kill_faulting_process("page fault", frame.sp);
+    }
+    if crate::arch::paging::is_user_range(addr, 1) && crate::task::current_pid() != 0 && crate::task::is_user_process() {
+        kill_faulting_process("bad user pointer", 0);
     }
     panic!("Page fault at {:#x} accessing {:#x}, code={:#x}", frame.ip, addr, ec);
 }
@@ -231,18 +254,25 @@ fn fault(name: &str, frame: &InterruptStackFrame, ec: u64) {
         name, frame.ip, ec, frame.cs, frame.ss, frame.sp, frame.flags
     );
     if frame.cs & 3 == 3 {
-        kill_faulting_process(name);
+        kill_faulting_process(name, frame.sp);
     }
     panic!("{} at {:#x}, code={:#x}", name, frame.ip, ec);
 }
 
-fn kill_faulting_process(name: &str) -> ! {
-    crate::drivers::tty::println_colored(
-        &alloc::format!("\nsegmentation fault ({})", name),
-        crate::drivers::tty::COLOR_ERROR,
-    );
-    unsafe { asm!("swapgs", options(nomem, nostack)) };
-    crate::vt::terminate_current_ring3_with(139);
+fn kill_faulting_process(name: &str, sp: u64) -> ! {
+    crate::task::bkl::acquire_from_trap();
+    let pid = crate::task::current_pid();
+    if sp != 0 {
+        let words = crate::syscall::user_stack_words(sp, 32);
+        let text: alloc::vec::Vec<alloc::string::String> = words.iter().map(|w| alloc::format!("{:x}", w)).collect();
+        crate::serial_println!("fault: pid {} stack at {:#x}: {}", pid, sp, text.join(" "));
+    }
+    let message = alloc::format!("\n\x1b[91msegmentation fault: pid {} ({})\x1b[0m\n", pid, name);
+    crate::syscall::emit(2, message.as_bytes());
+    let leader = crate::task::current_pid();
+    crate::task::with_task(leader, |t| t.exit_signal = 11);
+    crate::task::kill(leader, 139);
+    crate::task::exit_current(139);
 }
 
 extern "C" fn keyboard_handler(_frame: &InterruptStackFrame, _ec: u64) {
@@ -264,14 +294,11 @@ extern "C" fn mouse_handler(_frame: &InterruptStackFrame, _ec: u64) {
     outb(0x20, 0x20);
 }
 
-extern "C" fn spurious_handler(_frame: &InterruptStackFrame, _ec: u64) {
-    crate::arch::x86_64::outb(0x20, 0x20);
+extern "C" fn wake_handler(_frame: &InterruptStackFrame, _ec: u64) {
+    crate::arch::x86_64::lapic::eoi();
 }
 
-extern "C" fn spurious_slave_handler(_frame: &InterruptStackFrame, _ec: u64) {
-    crate::arch::x86_64::outb(0xA0, 0x20);
-    crate::arch::x86_64::outb(0x20, 0x20);
-}
+extern "C" fn apic_spurious_handler(_frame: &InterruptStackFrame, _ec: u64) {}
 
 isr_noerr!(isr_divide_by_zero, divide_by_zero);
 isr_noerr!(isr_debug, debug_exception);
@@ -294,8 +321,72 @@ isr_noerr!(isr_simd_fp, simd_fp_exception);
 isr_noerr!(isr_reserved, reserved_exception);
 isr_noerr!(isr_keyboard, keyboard_handler);
 isr_noerr!(isr_mouse, mouse_handler);
-isr_noerr!(isr_spurious, spurious_handler);
-isr_noerr!(isr_spurious_slave, spurious_slave_handler);
+isr_noerr!(isr_wake, wake_handler);
+isr_noerr!(isr_apic_error, wake_handler);
+isr_noerr!(isr_apic_spurious, apic_spurious_handler);
+
+
+macro_rules! device_vectors {
+    ($(($entry:ident, $name:ident, $vector:literal)),* $(,)?) => {
+        $(
+            extern "C" fn $name(_frame: &InterruptStackFrame, _ec: u64) {
+                crate::drivers::irq::dispatch($vector);
+            }
+            isr_noerr!($entry, $name);
+        )*
+        unsafe fn install_device_vectors(idt: *mut [IdtEntry; 256]) {
+            unsafe { $( (*idt)[$vector as usize].set_handler($entry as *const () as u64, 0x8E, 0); )* }
+        }
+    };
+}
+
+device_vectors! {
+    (isr_device_22, device_22, 34),
+    (isr_device_23, device_23, 35),
+    (isr_device_24, device_24, 36),
+    (isr_device_25, device_25, 37),
+    (isr_device_26, device_26, 38),
+    (isr_device_27, device_27, 39),
+    (isr_device_28, device_28, 40),
+    (isr_device_29, device_29, 41),
+    (isr_device_2a, device_2a, 42),
+    (isr_device_2b, device_2b, 43),
+    (isr_device_2d, device_2d, 45),
+    (isr_device_2e, device_2e, 46),
+    (isr_device_2f, device_2f, 47),
+    (isr_device_50, device_50, 80),
+    (isr_device_51, device_51, 81),
+    (isr_device_52, device_52, 82),
+    (isr_device_53, device_53, 83),
+    (isr_device_54, device_54, 84),
+    (isr_device_55, device_55, 85),
+    (isr_device_56, device_56, 86),
+    (isr_device_57, device_57, 87),
+    (isr_device_58, device_58, 88),
+    (isr_device_59, device_59, 89),
+    (isr_device_5a, device_5a, 90),
+    (isr_device_5b, device_5b, 91),
+    (isr_device_5c, device_5c, 92),
+    (isr_device_5d, device_5d, 93),
+    (isr_device_5e, device_5e, 94),
+    (isr_device_5f, device_5f, 95),
+    (isr_device_60, device_60, 96),
+    (isr_device_61, device_61, 97),
+    (isr_device_62, device_62, 98),
+    (isr_device_63, device_63, 99),
+    (isr_device_64, device_64, 100),
+    (isr_device_65, device_65, 101),
+    (isr_device_66, device_66, 102),
+    (isr_device_67, device_67, 103),
+    (isr_device_68, device_68, 104),
+    (isr_device_69, device_69, 105),
+    (isr_device_6a, device_6a, 106),
+    (isr_device_6b, device_6b, 107),
+    (isr_device_6c, device_6c, 108),
+    (isr_device_6d, device_6d, 109),
+    (isr_device_6e, device_6e, 110),
+    (isr_device_6f, device_6f, 111),
+}
 
 fn remap_pic() {
     use crate::arch::x86_64::{outb, io_wait};
@@ -322,7 +413,7 @@ pub fn init() {
         (*idt_ptr)[0].set_handler(isr_divide_by_zero as *const () as u64, 0x8E, 0);
         (*idt_ptr)[1].set_handler(isr_debug as *const () as u64, 0x8E, 0);
         (*idt_ptr)[2].set_handler(isr_nmi as *const () as u64, 0x8E, 0);
-        (*idt_ptr)[3].set_handler(isr_breakpoint as *const () as u64, 0x8E, 0);
+        (*idt_ptr)[3].set_handler(isr_breakpoint as *const () as u64, 0xEE, 0);
         (*idt_ptr)[4].set_handler(isr_overflow as *const () as u64, 0x8E, 0);
         (*idt_ptr)[5].set_handler(isr_bound_range as *const () as u64, 0x8E, 0);
         (*idt_ptr)[6].set_handler(isr_invalid_opcode as *const () as u64, 0x8E, 0);
@@ -342,26 +433,28 @@ pub fn init() {
         (*idt_ptr)[18].set_handler(isr_machine_check as *const () as u64, 0x8E, 0);
         (*idt_ptr)[19].set_handler(isr_simd_fp as *const () as u64, 0x8E, 0);
 
-        (*idt_ptr)[32].set_handler(crate::vt::timer_handler_entry(), 0x8E, 0);
+        (*idt_ptr)[32].set_handler(crate::task::switch::timer_entry as *const () as u64, 0x8E, 0);
         (*idt_ptr)[33].set_handler(isr_keyboard as *const () as u64, 0x8E, 0);
         (*idt_ptr)[44].set_handler(isr_mouse as *const () as u64, 0x8E, 0);
 
-        for i in 34..40usize {
-            (*idt_ptr)[i].set_handler(isr_spurious as *const () as u64, 0x8E, 0);
-        }
-        for i in 40..48usize {
-            if i != 44 {
-                (*idt_ptr)[i].set_handler(isr_spurious_slave as *const () as u64, 0x8E, 0);
-            }
-        }
+        install_device_vectors(idt_ptr);
 
+        (*idt_ptr)[crate::arch::x86_64::lapic::TIMER_VECTOR as usize].set_handler(crate::task::switch::lapic_timer_entry as *const () as u64, 0x8E, 0);
+        (*idt_ptr)[crate::arch::x86_64::lapic::WAKE_VECTOR as usize].set_handler(isr_wake as *const () as u64, 0x8E, 0);
+        (*idt_ptr)[crate::arch::x86_64::lapic::ERROR_VECTOR as usize].set_handler(isr_apic_error as *const () as u64, 0x8E, 0);
+        (*idt_ptr)[crate::arch::x86_64::lapic::SPURIOUS_VECTOR as usize].set_handler(isr_apic_spurious as *const () as u64, 0x8E, 0);
+    }
+
+    load();
+    remap_pic();
+}
+
+pub fn load() {
+    unsafe {
         let ptr = IdtPointer {
             size: (core::mem::size_of_val(&*(&raw const IDT)) - 1) as u16,
             base: &raw const IDT as u64,
         };
-
         asm!("lidt [{ptr}]", ptr = in(reg) &ptr, options(nostack));
     }
-
-    remap_pic();
 }

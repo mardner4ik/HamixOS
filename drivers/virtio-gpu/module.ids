@@ -1,0 +1,2 @@
+# virtio-gpu (modern PCI id, used by QEMU's virtio-vga and virtio-gpu-pci)
+1af4:1050

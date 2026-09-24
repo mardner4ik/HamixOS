@@ -1,0 +1,8 @@
+[package]
+name = "hamix_kpi"
+version = "0.1.0"
+edition = "2024"
+description = "Kernel programming interface a HamixOS loadable driver module links against"
+
+[lib]
+crate-type = ["rlib"]

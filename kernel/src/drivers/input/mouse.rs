@@ -1,6 +1,7 @@
 use spin::Mutex;
 
-use crate::arch::x86_64::{inb, outb, without_interrupts};
+use crate::arch::io::{inb, outb};
+use crate::arch::without_interrupts;
 
 const PS2_DATA: u16 = 0x60;
 const PS2_STATUS: u16 = 0x64;
@@ -14,11 +15,11 @@ const CMD_READ_CONFIG: u8 = 0x20;
 const CMD_WRITE_CONFIG: u8 = 0x60;
 const CMD_WRITE_AUX: u8 = 0xD4;
 
-const AUX_SET_DEFAULTS: u8 = 0xF6;
+pub const AUX_SET_DEFAULTS: u8 = 0xF6;
 const AUX_ENABLE_REPORTING: u8 = 0xF4;
 const AUX_SET_SAMPLE_RATE: u8 = 0xF3;
 const AUX_GET_DEVICE_ID: u8 = 0xF2;
-const AUX_ACK: u8 = 0xFA;
+pub const AUX_ACK: u8 = 0xFA;
 
 pub const BUTTON_LEFT: u8 = 1;
 pub const BUTTON_RIGHT: u8 = 2;
@@ -30,6 +31,7 @@ pub struct MouseState {
     pub y: i32,
     pub buttons: u8,
     pub wheel: i32,
+    pub presses: [u8; 3],
 }
 
 #[derive(Clone, Copy, Default)]
@@ -49,7 +51,7 @@ struct Packet {
 }
 
 static PACKET: Mutex<Packet> = Mutex::new(Packet { bytes: [0; 4], len: 0, size: 3 });
-static STATE: Mutex<MouseState> = Mutex::new(MouseState { x: 0, y: 0, buttons: 0, wheel: 0 });
+static STATE: Mutex<MouseState> = Mutex::new(MouseState { x: 0, y: 0, buttons: 0, wheel: 0, presses: [0; 3] });
 static BOUNDS: Mutex<(i32, i32)> = Mutex::new((640, 200));
 static PRESENT: Mutex<bool> = Mutex::new(false);
 
@@ -119,14 +121,14 @@ fn write_data(value: u8) {
     outb(PS2_DATA, value);
 }
 
-fn read_data() -> u8 {
+pub fn read_data() -> u8 {
     if !wait_output_full() {
         return 0;
     }
     inb(PS2_DATA)
 }
 
-fn aux_command(value: u8) -> u8 {
+pub fn aux_command(value: u8) -> u8 {
     command(CMD_WRITE_AUX);
     write_data(value);
     read_data()
@@ -166,6 +168,17 @@ pub fn init() {
         return;
     }
 
+    if let Some(description) = super::touchpad::detect() {
+        aux_command(AUX_ENABLE_REPORTING);
+        *PRESENT.lock() = true;
+        #[cfg(target_arch = "x86_64")]
+        {
+            *crate::arch::x86_64::idt::MOUSE_HANDLER.lock() = Some(super::touchpad::on_byte);
+        }
+        crate::drivers::klog::log(&alloc::format!("mouse: {}", description));
+        return;
+    }
+
     set_sample_rate(200);
     set_sample_rate(100);
     set_sample_rate(80);
@@ -177,7 +190,10 @@ pub fn init() {
 
     aux_command(AUX_ENABLE_REPORTING);
     *PRESENT.lock() = true;
-    *crate::arch::x86_64::idt::MOUSE_HANDLER.lock() = Some(on_byte);
+    #[cfg(target_arch = "x86_64")]
+    {
+        *crate::arch::x86_64::idt::MOUSE_HANDLER.lock() = Some(on_byte);
+    }
 
     crate::drivers::klog::log(&alloc::format!(
         "mouse: PS/2 pointing device id {} ({}-byte packets{})",
@@ -188,7 +204,7 @@ pub fn init() {
 }
 
 pub fn present() -> bool {
-    *PRESENT.lock()
+    without_interrupts(|| *PRESENT.lock())
 }
 
 pub fn set_bounds(w: i32, h: i32) {
@@ -199,7 +215,7 @@ pub fn set_bounds(w: i32, h: i32) {
 }
 
 pub fn state() -> MouseState {
-    *STATE.lock()
+    without_interrupts(|| *STATE.lock())
 }
 
 pub fn take_state() -> MouseState {
@@ -207,6 +223,7 @@ pub fn take_state() -> MouseState {
         let mut state = STATE.lock();
         let snapshot = *state;
         state.wheel = 0;
+        state.presses = [0; 3];
         snapshot
     })
 }
@@ -222,6 +239,22 @@ pub fn drain_events() {
     });
 }
 
+pub fn mark_present() {
+    *PRESENT.lock() = true;
+}
+
+pub fn inject_absolute(x: i32, y: i32, buttons: u8, wheel: i32) {
+    let (cx, cy) = {
+        let state = STATE.lock();
+        (state.x, state.y)
+    };
+    inject(x - cx, y - cy, buttons, wheel);
+}
+
+pub fn bounds() -> (i32, i32) {
+    *BOUNDS.lock()
+}
+
 pub fn inject(dx: i32, dy: i32, buttons: u8, wheel: i32) {
     *PRESENT.lock() = true;
     let (max_x, max_y) = *BOUNDS.lock();
@@ -230,12 +263,18 @@ pub fn inject(dx: i32, dy: i32, buttons: u8, wheel: i32) {
         let previous = state.buttons;
         state.x = (state.x + dx).clamp(0, max_x - 1);
         state.y = (state.y + dy).clamp(0, max_y - 1);
+        for bit in 0..3 {
+            if buttons & !previous & (1 << bit) != 0 {
+                state.presses[bit] = state.presses[bit].saturating_add(1);
+            }
+        }
         state.buttons = buttons;
         state.wheel += wheel;
         (state.x, state.y, buttons & !previous, previous & !buttons)
     };
     let event = MouseEvent { x, y, buttons, pressed, released, wheel };
     EVENTS.lock().push(event);
+    crate::task::notify_input();
     crate::drivers::video::console_mouse::on_event(event);
 }
 
@@ -287,12 +326,18 @@ fn on_byte(byte: u8) {
         let previous = state.buttons;
         state.x = (state.x + dx).clamp(0, max_x - 1);
         state.y = (state.y - dy).clamp(0, max_y - 1);
+        for bit in 0..3 {
+            if buttons & !previous & (1 << bit) != 0 {
+                state.presses[bit] = state.presses[bit].saturating_add(1);
+            }
+        }
         state.buttons = buttons;
         state.wheel += wheel;
         (state.x, state.y, buttons & !previous, previous & !buttons)
     };
 
     EVENTS.lock().push(MouseEvent { x, y, buttons, pressed, released, wheel });
+    crate::task::notify_input();
 
     crate::drivers::video::console_mouse::on_event(MouseEvent {
         x,

@@ -1,0 +1,11 @@
+[package]
+name = "xhci"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable USB host controller module for xHCI USB 3 host controllers"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

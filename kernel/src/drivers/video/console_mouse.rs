@@ -99,6 +99,9 @@ pub fn on_event(event: MouseEvent) {
     let Some((col, row)) = text_mode::cell_at_pixel(event.x, event.y) else {
         return;
     };
+    if report(&event, col, row) {
+        return;
+    }
     let index = row * COLS + col;
 
     let previous_selection = selection_bounds();
@@ -146,4 +149,48 @@ pub fn on_event(event: MouseEvent) {
         }
         redraw_index(index);
     }
+}
+
+static LAST_REPORTED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+fn report(event: &MouseEvent, col: usize, row: usize) -> bool {
+    use hxvt::{MouseButton, MouseEvent as VtEvent, MouseMode};
+    let vt = text_mode::foreground();
+    let Some(mut console) = text_mode::TEXT_CONSOLE.try_lock() else {
+        return false;
+    };
+    let modes = console.modes(vt);
+    if modes.mouse == MouseMode::Off {
+        return false;
+    }
+    let buttons = [(BUTTON_LEFT, MouseButton::Left), (BUTTON_MIDDLE, MouseButton::Middle), (BUTTON_RIGHT, MouseButton::Right)];
+    let mut events = alloc::vec::Vec::new();
+    for (bit, button) in buttons {
+        if event.pressed & bit != 0 {
+            events.push(VtEvent::Press(button));
+        }
+        if event.released & bit != 0 {
+            events.push(VtEvent::Release(button));
+        }
+    }
+    if event.wheel != 0 {
+        events.push(if event.wheel < 0 { VtEvent::WheelUp } else { VtEvent::WheelDown });
+    }
+    let cell = row * COLS + col;
+    if events.is_empty() && LAST_REPORTED.swap(cell, Ordering::Relaxed) != cell {
+        let held = buttons.iter().find(|(bit, _)| event.buttons & bit != 0).map(|(_, b)| *b);
+        events.push(VtEvent::Move(held));
+    }
+    let mut bytes = alloc::vec::Vec::new();
+    for e in events {
+        if let Some(seq) = hxvt::encode_mouse(&modes, e, col, row, 0) {
+            bytes.extend_from_slice(&seq);
+        }
+    }
+    if !bytes.is_empty() {
+        console.push_input(vt, &bytes);
+        drop(console);
+        crate::task::notify_input();
+    }
+    true
 }

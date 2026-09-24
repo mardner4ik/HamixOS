@@ -33,6 +33,10 @@ pub fn log(msg: &str) {
     crate::serial_println!("{}", msg);
 }
 
+pub fn record(msg: &str) {
+    KLOG.lock().push(String::from(msg));
+}
+
 pub fn for_each<F: FnMut(&str)>(mut f: F) {
     let klog = KLOG.lock();
     for line in klog.lines.iter() {

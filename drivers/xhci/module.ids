@@ -1,0 +1,2 @@
+# Any xHCI USB host controller (class 0c, subclass 03, interface 30).
+class:0c:03:30

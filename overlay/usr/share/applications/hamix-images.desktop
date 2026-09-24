@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Images
+Comment=View pictures
+Keywords=photo;picture;viewer;
+Exec=/usr/bin/hxview
+Icon=images
+Terminal=false
+X-Nook-Key=images
+X-Nook-Order=30
+Categories=Graphics;Viewer;
+X-Nook-Role=images
+X-Nook-Dock=true

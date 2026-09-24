@@ -1,0 +1,9 @@
+[package]
+name = "hxclient"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hamix_std = { path = "../../sdk/hamix_std" }
+vellum = { path = "../vellum" }
+hxproto = { path = "../hxproto" }

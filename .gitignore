@@ -13,3 +13,8 @@ Cargo.lock
 /isoroot/boot/kernel.bin
 /isoroot/boot/initramfs.tar
 /isoroot/boot/disk.img
+/hamix_disk.img
+/isoroot/boot/hext.img.gz
+/rootfs-aarch64/
+/rootfs-riscv64/
+/out/

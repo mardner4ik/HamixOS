@@ -1,0 +1,11 @@
+[package]
+name = "hx264"
+version = "0.1.0"
+edition = "2021"
+description = "H.264 video decoding for HamixOS (built on the vendored rust_h264 decoder)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+rust_h264 = { path = "../rust_h264" }

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Command line (hsh)
+Keywords=shell;console;hsh;command;
+Exec=/usr/bin/hxterm
+Icon=terminal
+Terminal=false
+X-Nook-Key=terminal
+X-Nook-Order=10
+Categories=System;TerminalEmulator;
+X-Nook-Role=terminal
+X-Nook-Dock=true
+X-Nook-Desktop=true

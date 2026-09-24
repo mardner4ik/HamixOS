@@ -1,0 +1,13 @@
+[package]
+name = "hxcmd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxcmd"
+path = "src/main.rs"
+
+[dependencies]
+hamix_std = { path = "../../sdk/hamix_std" }
+vellum = { path = "../../libs/vellum" }
+hxclient = { path = "../../libs/hxclient" }

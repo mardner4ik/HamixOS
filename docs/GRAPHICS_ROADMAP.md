@@ -43,6 +43,59 @@ all of them, so `hsh`'s `drivers` command — and anything else that needs to
 enumerate video drivers later — doesn't need to know about each driver by
 name.
 
+## Layer 4: accelerated display modules (`kernel/src/drivers/video/gpu.rs`)
+
+Layers 1-3 assume one thing that stopped being true: that the framebuffer is
+a fixed linear region the bootloader hands over, which the CPU writes and the
+hardware scans out by itself. A real GPU does not work that way -- it owns
+its scanout buffer, it wants to be told which rectangle changed, and it has
+planes (a cursor, at minimum) that composite without the CPU touching a
+pixel.
+
+Layer 4 is the seam for that. A loadable module (`docs/MODULES.md`) can
+register a `DisplayOps` capability table and a framebuffer it owns, and from
+then on that buffer *is* the kernel framebuffer -- the text console, `fbmap`
+and the mouse bounds all follow it. The capabilities are `flush` (push a
+damage rectangle), `set_mode`, `cursor_set`/`cursor_move`/`cursor_hide`, and
+`fill`/`copy` for 2D offload.
+
+Nothing above changes when no module is loaded: `gpu::active()` is false,
+`Screen::present` skips the flush, `hxserver` draws the pointer in software,
+and `modes.rs` keeps its Bochs/Intel backends. That is deliberate -- the
+architecture roadmap is explicit that Nook must not depend on a heavy GPU
+path being present.
+
+`drivers/virtio-gpu` is the first driver in this layer, and it is what the
+architecture roadmap calls the first queue of the GPU work: mode setting and
+scanout, no 3D. It gives HamixOS, on any machine with a virtio GPU:
+
+* a scanout resource the device owns, with only the damaged rectangle
+  transferred per frame instead of a full-screen linear framebuffer,
+* real mode setting through Settings, at the panel's preferred size,
+* a hardware cursor, which is the one place where moving work to the GPU is
+  directly measurable: pointer motion stops costing the compositor anything.
+
+`drivers/intel-display` is the second driver in this layer, covering Intel
+integrated graphics from gen6 (Sandy Bridge, HD 2000) to gen9 (Skylake
+HD 520, Kaby Lake, Coffee Lake). Unlike virtio-gpu it does not own a scanout
+buffer -- the display engine already scans out the framebuffer the firmware
+set up, so there is no flush at all. What it adds is the panel size and
+timings read from the active transcoder, the real refresh rate measured from
+the pipe frame counter (which avoids decoding a different PLL layout on every
+generation), EDID over GMBUS for the rates the panel actually allows, refresh
+switching, and the hardware cursor plane. It is written from the documented
+register layout and is **not verified on hardware**; see `docs/MODULES.md`.
+
+Identification is a separate, driver-free concern: `models.rs` names Intel
+cards from their PCI id, and `kernel/src/drivers/video/sysfs.rs` publishes a
+Linux-shaped `/sys/bus/pci/devices` and `/sys/class/drm` so `fastfetch` and
+friends can see the card whether or not any driver claims it.
+
+What layer 4 does *not* do is 3D. `fill`/`copy` exist in the interface but
+have no backend, because virtio-gpu 2D has no drawing commands. The next
+backend for them is the Intel gen4 BLT ring, on the same hardware
+`drivers/intel-graphics-driver` already identifies.
+
 ## Why split it this way
 
 - A driver crate with its own `Cargo.toml` can be built, versioned, and

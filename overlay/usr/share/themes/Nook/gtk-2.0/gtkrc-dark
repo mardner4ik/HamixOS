@@ -1,0 +1,58 @@
+gtk-color-scheme = "bg_color:#1b1e25\nfg_color:#e8eaf0\nbase_color:#23272f\ntext_color:#e8eaf0\nselected_bg_color:#5b8cff\nselected_fg_color:#ffffff\ntooltip_bg_color:#23272f\ntooltip_fg_color:#e8eaf0"
+gtk-font-name = "Noto Sans 10"
+gtk-menu-popup-delay = 0
+gtk-button-images = 0
+gtk-menu-images = 1
+
+style "nook-default" {
+  xthickness = 1
+  ythickness = 1
+  GtkButton::default-border = { 0, 0, 0, 0 }
+  GtkButton::inner-border = { 6, 6, 2, 2 }
+  GtkWidget::focus-line-width = 1
+  GtkMenuBar::shadow-type = GTK_SHADOW_NONE
+  GtkMenuBar::internal-padding = 2
+  GtkMenu::horizontal-padding = 2
+  GtkMenu::vertical-padding = 4
+  GtkToolbar::shadow-type = GTK_SHADOW_NONE
+  GtkScrollbar::slider-width = 10
+  GtkScrollbar::has-backward-stepper = 0
+  GtkScrollbar::has-forward-stepper = 0
+  GtkScrolledWindow::scrollbar-spacing = 0
+  fg[NORMAL] = @fg_color
+  fg[PRELIGHT] = @fg_color
+  fg[SELECTED] = @selected_fg_color
+  fg[ACTIVE] = @fg_color
+  fg[INSENSITIVE] = "#6c7383"
+  bg[NORMAL] = @bg_color
+  bg[PRELIGHT] = "#313743"
+  bg[SELECTED] = @selected_bg_color
+  bg[ACTIVE] = "#3a4150"
+  bg[INSENSITIVE] = @bg_color
+  base[NORMAL] = @base_color
+  base[PRELIGHT] = "#313743"
+  base[SELECTED] = @selected_bg_color
+  base[ACTIVE] = @selected_bg_color
+  base[INSENSITIVE] = @bg_color
+  text[NORMAL] = @text_color
+  text[PRELIGHT] = @text_color
+  text[SELECTED] = @selected_fg_color
+  text[ACTIVE] = @selected_fg_color
+  text[INSENSITIVE] = "#6c7383"
+}
+
+style "nook-menuitem" {
+  xthickness = 3
+  ythickness = 3
+  bg[PRELIGHT] = @selected_bg_color
+  fg[PRELIGHT] = @selected_fg_color
+  text[PRELIGHT] = @selected_fg_color
+}
+
+style "nook-menu" {
+  bg[NORMAL] = @base_color
+}
+
+class "GtkWidget" style "nook-default"
+widget_class "*<GtkMenuItem>*" style "nook-menuitem"
+widget_class "*<GtkMenu>" style "nook-menu"

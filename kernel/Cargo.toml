@@ -12,5 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 spin = "0.9"
-intel-graphics-driver = { path = "../drivers/intel-graphics-driver" }
-vellum = { path = "../libs/vellum" }
+hxvt = { path = "../libs/hxvt" }
+hext = { path = "../libs/hext" }
+smoltcp = { path = "../libs/smoltcp", default-features = false, features = ["alloc", "medium-ethernet", "proto-ipv4", "proto-dhcpv4", "proto-dns", "socket-udp", "socket-tcp", "socket-icmp", "socket-dhcpv4", "socket-dns"] }

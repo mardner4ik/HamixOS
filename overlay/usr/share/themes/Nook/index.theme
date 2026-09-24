@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=X-GNOME-Metatheme
+Name=Nook
+Comment=The HamixOS Nook look for GTK programs
+Encoding=UTF-8
+
+[X-GNOME-Metatheme]
+GtkTheme=Nook
+IconTheme=Adwaita
+CursorTheme=Adwaita

@@ -1,0 +1,11 @@
+[package]
+name = "hxsound"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxsound"
+path = "src/main.rs"
+
+[dependencies]
+hamix_std = { path = "../../sdk/hamix_std" }

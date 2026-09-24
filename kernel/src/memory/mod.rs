@@ -1,19 +1,22 @@
+pub mod aspace;
 pub mod frame;
 mod heap;
+pub mod vmalloc;
+#[cfg(target_arch = "x86_64")]
+mod multiboot;
+#[cfg(not(target_arch = "x86_64"))]
+mod devicetree;
 
-/// Bringing the heap up needs nothing from the multiboot info (it's just a
-/// fixed static array in the kernel's own .bss), so it can and must run
-/// before anything that allocates -- including `klog::log`, which now
-/// stores owned Strings so it can record real detected-hardware messages
-/// (see drivers::klog). Call this first, before gdt/idt::init().
-pub fn early_heap_init() {
-    heap::init();
-}
+#[cfg(not(target_arch = "x86_64"))]
+pub use devicetree::{init_devicetree, set_boot_initrd};
+#[cfg(target_arch = "x86_64")]
+pub use multiboot::init;
 
 use spin::Mutex;
 
-#[allow(dead_code)]
-const MULTIBOOT2_MAGIC: u32 = 0x36d76289;
+pub fn early_heap_init() {
+    heap::init();
+}
 
 #[derive(Clone, Copy)]
 pub struct FramebufferInfo {
@@ -24,13 +27,11 @@ pub struct FramebufferInfo {
     pub bpp: u8,
 }
 
-/// Multiboot2 framebuffer color types (spec section 3.6.9). We only treat
-/// type 1 (direct RGB) as a real pixel framebuffer -- type 2 is the legacy
-/// EGA/VGA text buffer (0xB8000, 2 bytes/char cell) that GRUB reports
-/// whenever no graphics mode was actually requested/set, and drawing
-/// pixel colors into that as if it were RGB memory is exactly what
-/// produced garbled/"squished" output before a real mode was requested.
-const MB2_FB_TYPE_RGB: u8 = 1;
+impl FramebufferInfo {
+    pub fn byte_len(&self) -> u64 {
+        self.pitch as u64 * self.height as u64
+    }
+}
 
 pub static FRAMEBUFFER: Mutex<Option<FramebufferInfo>> = Mutex::new(None);
 
@@ -38,123 +39,87 @@ pub static FRAMEBUFFER: Mutex<Option<FramebufferInfo>> = Mutex::new(None);
 pub struct ModuleInfo {
     pub start: u32,
     pub end: u32,
+    name: [u8; 32],
+    name_len: usize,
 }
 
+impl ModuleInfo {
+    pub fn name(&self) -> &str {
+        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    }
+
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
+    }
+
+    pub fn matches(&self, key: &str) -> bool {
+        self.name().contains(key)
+    }
+}
+
+pub static RSDP: Mutex<Option<[u8; 36]>> = Mutex::new(None);
+
 pub static MODULES: Mutex<[Option<ModuleInfo>; 8]> = Mutex::new([None; 8]);
+static CMDLINE: Mutex<alloc::string::String> = Mutex::new(alloc::string::String::new());
+
+pub fn cmdline() -> alloc::string::String {
+    CMDLINE.lock().clone()
+}
+
+pub fn cmdline_value(key: &str) -> Option<alloc::string::String> {
+    let line = cmdline();
+    line.split_whitespace().find_map(|word| {
+        let (k, v) = word.split_once('=')?;
+        if k == key { Some(alloc::string::String::from(v)) } else { None }
+    })
+}
 
 pub fn modules() -> [Option<ModuleInfo>; 8] {
     *MODULES.lock()
 }
 
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct Mb2Header {
-    total_size: u32,
-    _reserved: u32,
+pub fn find_module(key: &str) -> Option<ModuleInfo> {
+    modules().into_iter().flatten().find(|m| m.matches(key))
 }
 
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct Mb2Tag {
-    typ: u32,
-    size: u32,
+unsafe extern "C" {
+    static __kernel_end: u8;
+    #[cfg(not(target_arch = "x86_64"))]
+    static __kernel_start: u8;
 }
 
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct Mb2MemMap {
-    typ: u32,
-    size: u32,
-    entry_size: u32,
-    entry_version: u32,
+#[cfg(not(target_arch = "x86_64"))]
+pub fn kernel_start() -> usize {
+    (&raw const __kernel_start) as usize
 }
 
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct Mb2MemEntry {
-    base_addr: u64,
-    length: u64,
-    typ: u32,
-    _reserved: u32,
+pub fn kernel_end() -> usize {
+    (&raw const __kernel_end) as usize
 }
 
-#[repr(C, packed)]
-#[allow(dead_code)]
-struct Mb2Framebuffer {
-    typ: u32,
-    size: u32,
-    addr: u64,
-    pitch: u32,
-    width: u32,
-    height: u32,
-    bpp: u8,
-    fb_type: u8,
-    _reserved: u16,
+pub fn heap_stats() -> (usize, usize) {
+    heap::stats()
 }
 
-pub fn init(multiboot_info_ptr: usize) {
-    crate::serial_println!("boot: memory start {:x}", multiboot_info_ptr);
-    frame::init();
+pub fn heap_trim() -> usize {
+    heap::trim()
+}
 
-    unsafe {
-        let header_ptr = multiboot_info_ptr as *const u32;
-        let total_size = core::ptr::read_unaligned(header_ptr.add(0)) as usize;
-        crate::serial_println!("boot: mb2 size {:x}", total_size);
-        let mut offset = 8usize;
-
-        while offset < total_size {
-            let tag_ptr = (multiboot_info_ptr + offset) as *const u32;
-            let typ = core::ptr::read_unaligned(tag_ptr.add(0)) as u32;
-            let tag_size = core::ptr::read_unaligned(tag_ptr.add(1)) as usize;
-
-            match typ {
-                0 => break,
-                6 => {
-                    let entry_size = core::ptr::read_unaligned(tag_ptr.add(2)) as usize;
-                    let mut e_off = 16usize;
-                    while e_off + entry_size <= tag_size {
-                        let entry_ptr = (multiboot_info_ptr + offset + e_off) as *const u64;
-                        let base_addr = core::ptr::read_unaligned(entry_ptr.add(0)) as u64;
-                        let length = core::ptr::read_unaligned(entry_ptr.add(1)) as u64;
-                        let entry_type = core::ptr::read_unaligned((entry_ptr as *const u32).add(4)) as u32;
-                        if entry_type == 1 {
-                            frame::add_region(base_addr as usize, length as usize);
-                        }
-                        e_off += entry_size;
-                    }
-                }
-                3 => {
-                    let mod_start = core::ptr::read_unaligned(tag_ptr.add(2)) as u32;
-                    let mod_end = core::ptr::read_unaligned(tag_ptr.add(3)) as u32;
-                    let mut mods = MODULES.lock();
-                    for slot in mods.iter_mut() {
-                        if slot.is_none() {
-                            *slot = Some(ModuleInfo { start: mod_start, end: mod_end });
-                            break;
-                        }
-                    }
-                }
-                8 => {
-                    let addr = core::ptr::read_unaligned((tag_ptr as *const u64).add(1));
-                    let pitch = core::ptr::read_unaligned(tag_ptr.add(4));
-                    let width = core::ptr::read_unaligned(tag_ptr.add(5));
-                    let height = core::ptr::read_unaligned(tag_ptr.add(6));
-                    let bpp = core::ptr::read_unaligned((tag_ptr as *const u8).add(28));
-                    let fb_type = core::ptr::read_unaligned((tag_ptr as *const u8).add(29));
-                    if fb_type == MB2_FB_TYPE_RGB {
-                        *FRAMEBUFFER.lock() = Some(FramebufferInfo { addr, pitch, width, height, bpp });
-                    } else {
-                        crate::serial_println!(
-                            "boot: framebuffer tag is type {} (not RGB) -- likely still in text \
-                             mode because GRUB was never asked for a graphics mode; ignoring it",
-                            fb_type
-                        );
-                    }
-                }
-                _ => {}
-            }
-
-            offset += (tag_size + 7) & !7;
-        }
+pub fn release_module(key: &str) -> usize {
+    let mut mods = MODULES.lock();
+    let Some(slot) = mods.iter_mut().find(|m| m.map(|m| m.matches(key)).unwrap_or(false)) else {
+        return 0;
+    };
+    let module = slot.take().unwrap();
+    drop(mods);
+    let start = (module.start as usize).div_ceil(frame::PAGE_SIZE) * frame::PAGE_SIZE;
+    let end = (module.end as usize) / frame::PAGE_SIZE * frame::PAGE_SIZE;
+    let mut freed = 0;
+    let mut page = start;
+    while page < end {
+        frame::free_frame(page);
+        page += frame::PAGE_SIZE;
+        freed += frame::PAGE_SIZE;
     }
+    freed
 }

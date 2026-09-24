@@ -1,11 +1,28 @@
+pub mod acpi;
+pub mod context;
 pub mod cpuid;
 pub mod gdt;
 pub mod idt;
+pub mod lapic;
 pub mod paging;
+pub mod platform;
+pub mod smp;
 
 #[inline]
 pub fn hlt() {
     unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+}
+
+pub fn start_tick(hz: u64) {
+    let divisor = (1_193_182 / hz) as u16;
+    outb(0x43, 0x36);
+    outb(0x40, (divisor & 0xFF) as u8);
+    outb(0x40, (divisor >> 8) as u8);
+}
+
+#[inline]
+pub fn idle_wait() {
+    unsafe { core::arch::asm!("sti", "hlt", options(nomem, nostack)) };
 }
 
 #[inline]
@@ -122,6 +139,38 @@ pub fn inl(port: u16) -> u32 {
 #[inline]
 pub fn io_wait() {
     outb(0x80, 0);
+}
+
+pub fn pit_delay_us(micros: u64) {
+    let mut remaining = micros;
+    while remaining > 0 {
+        let chunk = remaining.min(50_000);
+        let count = ((1_193_182 * chunk) / 1_000_000).clamp(1, 0xFFFF) as u16;
+        let gate = inb(0x61);
+        outb(0x61, (gate & 0xFC) | 0x00);
+        outb(0x43, 0xB0);
+        outb(0x42, count as u8);
+        outb(0x42, (count >> 8) as u8);
+        outb(0x61, (gate & 0xFC) | 0x01);
+        let mut guard = 0u32;
+        while inb(0x61) & 0x20 == 0 {
+            guard += 1;
+            if guard > 5_000_000 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        outb(0x61, gate & 0xFC);
+        remaining -= chunk;
+    }
+}
+
+pub fn delay_ms(ms: u64) {
+    if interrupts_enabled() && crate::task::current_pid() != 0 && crate::task::ticks() > 0 {
+        crate::task::sleep_ticks(crate::task::ms_to_ticks(ms));
+    } else {
+        pit_delay_us(ms * 1000);
+    }
 }
 
 pub fn read_msr(msr: u32) -> u64 {

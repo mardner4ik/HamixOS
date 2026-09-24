@@ -1,0 +1,558 @@
+@define-color theme_bg_color @nook_bg;
+@define-color theme_fg_color @nook_text;
+@define-color theme_base_color @nook_surface;
+@define-color theme_text_color @nook_text;
+@define-color theme_selected_bg_color @nook_accent;
+@define-color theme_selected_fg_color @nook_accent_text;
+@define-color insensitive_bg_color @nook_bg;
+@define-color insensitive_fg_color @nook_faint;
+@define-color insensitive_base_color @nook_surface;
+@define-color theme_unfocused_bg_color @nook_bg;
+@define-color theme_unfocused_fg_color @nook_text;
+@define-color theme_unfocused_base_color @nook_surface;
+@define-color theme_unfocused_text_color @nook_text;
+@define-color theme_unfocused_selected_bg_color @nook_accent;
+@define-color theme_unfocused_selected_fg_color @nook_accent_text;
+@define-color borders @nook_border;
+@define-color unfocused_borders @nook_border;
+@define-color warning_color #e3a33c;
+@define-color error_color @nook_danger;
+@define-color success_color #3fb950;
+
+* {
+  outline-color: alpha(@nook_accent, 0.55);
+  outline-width: 1px;
+  -gtk-outline-radius: 6px;
+}
+
+window,
+.background,
+.background:backdrop,
+dialog,
+messagedialog {
+  background-color: @nook_bg;
+  color: @nook_text;
+}
+
+label:disabled,
+label.dim-label,
+.dim-label {
+  color: @nook_faint;
+}
+
+headerbar,
+.titlebar:not(headerbar) {
+  background: @nook_title;
+  border: none;
+  border-bottom: 1px solid @nook_border;
+  box-shadow: none;
+  min-height: 38px;
+  padding: 0 8px;
+}
+
+headerbar:backdrop {
+  background: @nook_title;
+}
+
+headerbar .title {
+  font-weight: 500;
+  color: @nook_text;
+}
+
+headerbar .subtitle {
+  color: @nook_dim;
+}
+
+menubar,
+menubar:backdrop {
+  background: @nook_surface;
+  border-bottom: 1px solid @nook_border;
+  box-shadow: none;
+  padding: 2px 4px;
+}
+
+menubar > menuitem {
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: @nook_text;
+  min-height: 18px;
+}
+
+menubar > menuitem:hover {
+  background: @nook_hover;
+  color: @nook_text;
+  box-shadow: none;
+}
+
+menu,
+.menu,
+.context-menu {
+  background: @nook_popup;
+  color: @nook_text;
+  border: 1px solid @nook_border;
+  border-radius: 8px;
+  padding: 4px;
+  margin: 0;
+}
+
+.csd menu,
+.csd .menu,
+.csd .context-menu {
+  border-radius: 8px;
+}
+
+menu menuitem,
+.menu menuitem,
+.context-menu menuitem {
+  padding: 5px 12px;
+  border-radius: 6px;
+  min-height: 20px;
+  text-shadow: none;
+}
+
+menu menuitem:hover,
+.menu menuitem:hover,
+.context-menu menuitem:hover {
+  background: @nook_accent;
+  color: @nook_accent_text;
+}
+
+menu menuitem:hover accelerator,
+.menu menuitem:hover accelerator {
+  color: alpha(@nook_accent_text, 0.8);
+}
+
+menu menuitem:disabled,
+.menu menuitem:disabled {
+  color: @nook_faint;
+}
+
+menu menuitem accelerator,
+.menu menuitem accelerator {
+  color: @nook_faint;
+}
+
+menu separator,
+.menu separator {
+  background: @nook_border;
+  margin: 4px 6px;
+  min-height: 1px;
+}
+
+menu menuitem check,
+menu menuitem radio {
+  min-width: 14px;
+  min-height: 14px;
+}
+
+popover,
+popover.background {
+  background: @nook_popup;
+  color: @nook_text;
+  border: 1px solid @nook_border;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px @nook_shadow;
+}
+
+popover modelbutton {
+  border-radius: 6px;
+  padding: 5px 10px;
+}
+
+popover modelbutton:backdrop {
+  background: @nook_surface_2;
+  color: @nook_dim;
+  border-color: @nook_border;
+}
+
+button:hover {
+  background: @nook_accent;
+  color: @nook_accent_text;
+}
+
+button {
+  background: @nook_surface_2;
+  background-image: none;
+  border: 1px solid @nook_border;
+  border-radius: 7px;
+  box-shadow: none;
+  color: @nook_text;
+  text-shadow: none;
+  -gtk-icon-shadow: none;
+  padding: 4px 12px;
+  min-height: 22px;
+}
+
+button:hover {
+  background: @nook_hover;
+  border-color: @nook_border;
+}
+
+button:active,
+button:checked {
+  background: @nook_pressed;
+  box-shadow: none;
+}
+
+button:disabled {
+  background: @nook_bg;
+  color: @nook_faint;
+  border-color: alpha(@nook_border, 0.6);
+}
+
+button.suggested-action,
+button.default:focus,
+dialog .dialog-action-area button.default {
+  background: @nook_accent;
+  border-color: @nook_accent;
+  color: @nook_accent_text;
+}
+
+button.suggested-action:hover {
+  background: @nook_accent_hover;
+  border-color: @nook_accent_hover;
+}
+
+button.destructive-action {
+  background: @nook_danger;
+  border-color: @nook_danger;
+  color: #ffffff;
+}
+
+button.flat,
+button.image-button.flat,
+headerbar button,
+toolbar button,
+.toolbar button,
+.inline-toolbar button {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.flat:hover,
+headerbar button:hover,
+toolbar button:hover,
+.toolbar button:hover {
+  background: @nook_hover;
+  border-color: transparent;
+}
+
+button.flat:checked,
+toolbar button:checked,
+headerbar button:checked {
+  background: @nook_pressed;
+}
+
+button.titlebutton {
+  border-radius: 6px;
+  padding: 2px;
+  min-width: 26px;
+  min-height: 22px;
+}
+
+entry,
+spinbutton:not(.vertical),
+spinbutton.vertical entry {
+  background: @nook_surface;
+  color: @nook_text;
+  border: 1px solid @nook_border;
+  border-radius: 7px;
+  box-shadow: none;
+  min-height: 26px;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
+entry:focus,
+spinbutton:focus {
+  border-color: @nook_accent;
+  box-shadow: 0 0 0 2px alpha(@nook_accent, 0.25);
+}
+
+entry:backdrop {
+  background: @nook_surface;
+  border-color: @nook_border;
+}
+
+entry:disabled {
+  background: @nook_bg;
+  color: @nook_faint;
+}
+
+entry selection,
+textview text selection,
+label selection {
+  background: @nook_selection;
+  color: @nook_on_selection;
+}
+
+spinbutton button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+combobox button.combo,
+combobox box.linked button {
+  padding-left: 10px;
+  padding-right: 8px;
+}
+
+textview,
+textview text,
+iconview,
+.view,
+.view:backdrop {
+  background-color: @nook_surface;
+  color: @nook_text;
+}
+
+.view:selected,
+.view:selected:focus,
+treeview.view:selected,
+iconview:selected,
+flowbox flowboxchild:selected,
+list row:selected,
+row:selected {
+  background-color: @nook_accent;
+  color: @nook_accent_text;
+}
+
+treeview.view header button {
+  background: @nook_surface_2;
+  border: none;
+  border-right: 1px solid @nook_border;
+  border-bottom: 1px solid @nook_border;
+  border-radius: 0;
+  padding: 3px 8px;
+  color: @nook_dim;
+}
+
+list,
+listbox {
+  background: @nook_surface;
+  color: @nook_text;
+}
+
+list row:hover,
+listbox row:hover {
+  background: @nook_hover;
+}
+
+.sidebar,
+placessidebar,
+placessidebar list,
+stacksidebar list {
+  background: @nook_sidebar;
+  border-color: @nook_border;
+}
+
+placessidebar row,
+stacksidebar row {
+  border-radius: 6px;
+  margin: 1px 6px;
+}
+
+notebook {
+  background: @nook_bg;
+}
+
+notebook > header {
+  background: @nook_bg;
+  border-color: @nook_border;
+  box-shadow: none;
+}
+
+notebook > header tab {
+  padding: 5px 14px;
+  border-radius: 0;
+  color: @nook_dim;
+  box-shadow: none;
+}
+
+notebook > header tab:hover {
+  color: @nook_text;
+  box-shadow: inset 0 -2px @nook_border;
+}
+
+notebook > header tab:checked {
+  color: @nook_text;
+  box-shadow: inset 0 -2px @nook_accent;
+}
+
+notebook > stack:not(:only-child) {
+  background: @nook_surface;
+}
+
+frame > border,
+.frame {
+  border: 1px solid @nook_border;
+  border-radius: 7px;
+}
+
+separator {
+  background: @nook_border;
+}
+
+scrollbar {
+  background: transparent;
+  border: none;
+}
+
+scrollbar slider {
+  background: alpha(@nook_text, 0.28);
+  border: none;
+  border-radius: 8px;
+  min-width: 6px;
+  min-height: 6px;
+  margin: 2px;
+}
+
+scrollbar slider:hover {
+  background: alpha(@nook_text, 0.45);
+}
+
+scrollbar slider:active {
+  background: @nook_accent;
+}
+
+scrollbar.overlay-indicator:not(.dragging):not(.hovering) slider {
+  margin: 2px;
+  min-width: 4px;
+  min-height: 4px;
+}
+
+switch {
+  background: @nook_pressed;
+  border: none;
+  border-radius: 12px;
+  color: transparent;
+  min-width: 40px;
+  min-height: 20px;
+  font-size: 0;
+}
+
+switch:checked {
+  background: @nook_accent;
+}
+
+switch slider {
+  background: #ffffff;
+  border: none;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px alpha(black, 0.2);
+  margin: 2px;
+  min-width: 18px;
+  min-height: 18px;
+}
+
+check,
+radio {
+  background: @nook_surface;
+  background-image: none;
+  border: 1px solid @nook_faint;
+  box-shadow: none;
+  color: transparent;
+}
+
+check {
+  border-radius: 5px;
+}
+
+check:checked,
+check:indeterminate,
+radio:checked {
+  background: @nook_accent;
+  border-color: @nook_accent;
+  color: @nook_accent_text;
+}
+
+scale trough,
+progressbar trough,
+levelbar trough {
+  background: @nook_pressed;
+  border: none;
+  border-radius: 4px;
+}
+
+scale highlight,
+progressbar progress,
+levelbar block.filled {
+  background: @nook_accent;
+  border: none;
+  border-radius: 4px;
+}
+
+scale slider {
+  background: #ffffff;
+  border: 1px solid @nook_border;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px alpha(black, 0.2);
+}
+
+toolbar,
+.toolbar,
+.primary-toolbar,
+.inline-toolbar,
+searchbar,
+actionbar {
+  background: @nook_surface;
+  border-color: @nook_border;
+  box-shadow: none;
+}
+
+statusbar {
+  background: @nook_bg;
+  color: @nook_dim;
+  border-top: 1px solid @nook_border;
+}
+
+tooltip,
+tooltip.background {
+  background: @nook_popup;
+  color: @nook_text;
+  border: 1px solid @nook_border;
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+tooltip * {
+  color: @nook_text;
+}
+
+infobar {
+  border: none;
+}
+
+infobar.info > revealer > box {
+  background: alpha(@nook_accent, 0.15);
+  color: @nook_text;
+}
+
+.dialog-action-area button,
+dialog .dialog-action-box button {
+  border-radius: 7px;
+}
+
+messagedialog .dialog-action-area button {
+  border-radius: 0;
+}
+
+paned > separator {
+  background: @nook_border;
+}
+
+calendar {
+  background: @nook_surface;
+  border: 1px solid @nook_border;
+}
+
+calendar:selected {
+  background: @nook_accent;
+  color: @nook_accent_text;
+  border-radius: 5px;
+}
+
+vte-terminal {
+  padding: 4px 6px;
+}

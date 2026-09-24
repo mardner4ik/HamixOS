@@ -1,5 +1,8 @@
 # musl libc support in HamixOS
 
+> Superseded for running real Linux/musl binaries by `docs/LINUXULATOR.md`
+> (hxlinuxulator); the syscall table below predates it.
+
 See `docs/USERSPACE_ROADMAP.md` for the full milestone-by-milestone plan --
 this file only covers the syscall ABI side of the story, which is already
 built and testable today.
@@ -71,7 +74,7 @@ a separate, sizeable piece of work from the syscall table itself.
 
 ## Building a musl userland program against this ABI
 
-Once the ELF loader lands, a static musl binary needs nothing special
+A static musl binary needs nothing special
 beyond disabling dynamic linking and floating-point-heavy CRT startup
 paths that assume a working `mmap`/`futex` for TLS setup:
 
@@ -91,7 +94,7 @@ make -j$(nproc) && sudo make install
 #    futex, etc.) will get -ENOSYS back, not a crash.
 ```
 
-Until the loader exists, `hello.hamix` can be dropped into `/bin` inside
-`rootfs/` (see `build.sh`) purely as a static artifact — HamixOS will not
-execute it yet, but the file will be there, in the live filesystem, ready
-for the day the loader lands.
+The loader now exists: `kernel/src/task/elf.rs` loads static ELF binaries
+and `PT_INTERP` dynamic ones, so a musl binary built this way runs directly.
+The packages under `/opt/linux` (see `docs/LINUXULATOR.md`) are the real
+users of this path; `pantry` installs them.

@@ -1,7 +1,13 @@
+pub mod ahci;
+pub mod audio;
+pub mod ata;
+pub mod block;
 pub mod input;
+pub mod irq;
 pub mod klog;
 pub mod pci;
+pub mod rtc;
 pub mod serial;
-pub mod tty;
 pub mod video;
+pub mod virtio;
 pub mod usb;

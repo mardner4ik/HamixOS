@@ -1,0 +1,12 @@
+[package]
+name = "ar9285"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable Wi-Fi module for Qualcomm Atheros AR9285 (802.11n 1x1, WPA2-PSK station)"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }
+wlan = { path = "../../libs/wlan" }

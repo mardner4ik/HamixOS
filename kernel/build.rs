@@ -8,6 +8,12 @@ fn main() {
         return;
     }
 
+    if target.starts_with("riscv64") {
+        println!("cargo:rerun-if-changed=linker_riscv64.ld");
+        println!("cargo:rustc-link-arg=-T{}/linker_riscv64.ld", manifest_dir);
+        return;
+    }
+
     println!("cargo:rerun-if-changed=src/arch/x86_64/boot.S");
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rustc-link-arg=-T{}/linker.ld", manifest_dir);

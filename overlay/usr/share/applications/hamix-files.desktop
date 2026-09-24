@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Browse folders and open files
+Keywords=folder;file;manager;
+Exec=/usr/bin/hxfiles
+Icon=files
+Terminal=false
+X-Nook-Key=files
+X-Nook-Order=0
+Categories=System;FileManager;Utility;
+X-Nook-Role=files
+X-Nook-Dock=true

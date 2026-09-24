@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Notes
+Comment=Write and edit text files
+Keywords=text;editor;
+Exec=/usr/bin/hxnotes
+Icon=notes
+Terminal=false
+X-Nook-Key=notes
+X-Nook-Order=20
+Categories=Utility;TextEditor;
+X-Nook-Role=editor
+X-Nook-Dock=true

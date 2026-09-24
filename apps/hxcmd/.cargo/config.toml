@@ -1,0 +1,7 @@
+[build]
+target = "../../kernel/x86_64-hamix_os.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true

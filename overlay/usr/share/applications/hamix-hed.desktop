@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=hed
+Comment=Text editor for the terminal
+Keywords=editor;text;vi;
+Exec=/usr/bin/hed %f
+Icon=notes
+Terminal=true
+X-Nook-Key=hed
+X-Nook-Order=115
+Categories=Utility;TextEditor;Development;

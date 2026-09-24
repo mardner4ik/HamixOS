@@ -1,0 +1,11 @@
+[package]
+name = "example-nic"
+version = "0.1.0"
+edition = "2024"
+description = "Reference loadable module that exercises the HamixOS module loader and KPI"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

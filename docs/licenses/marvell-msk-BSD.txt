@@ -1,0 +1,5 @@
+kernel/src/net/yukon.rs is an independent Rust implementation. The register addresses,
+bit meanings and the controller bring-up order were taken from the documentation in the
+FreeBSD msk(4) driver sources (sys/dev/msk/if_msk.c and if_mskreg.h; Copyright (C) Marvell
+International Ltd. and/or its affiliates, Copyright (c) 1997-2000 Bill Paul, Copyright (c)
+2005 Pyun YongHyeon). No source code from those files is included in HamixOS.

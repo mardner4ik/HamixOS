@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hello
+Comment=A tiny hxclient demo window
+Keywords=demo;example;
+Exec=/usr/bin/hxhello
+Icon=hello
+Terminal=false
+X-Nook-Key=hello
+X-Nook-Order=100
+Categories=Development;

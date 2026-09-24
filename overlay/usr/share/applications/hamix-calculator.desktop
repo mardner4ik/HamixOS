@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Comment=Everyday arithmetic
+Keywords=math;
+Exec=/usr/bin/hxcalc
+Icon=calculator
+Terminal=false
+X-Nook-Key=calculator
+X-Nook-Order=50
+Categories=Utility;Calculator;
+X-Nook-Dock=true

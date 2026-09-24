@@ -47,8 +47,8 @@ pub fn make_shadow_entry(password: &str, salt: u32) -> String {
 fn parse_db() -> UserDb {
     let mut db = UserDb { users: Vec::new(), shadow: Vec::new(), sudoers: Vec::new() };
     let root = fs::root_id();
-    let guard = fs::VFS.lock();
-    let vfs = match guard.as_ref() {
+    let mut guard = fs::VFS.lock();
+    let vfs = match guard.as_mut() {
         Some(v) => v,
         None => return db,
     };
@@ -131,61 +131,36 @@ pub fn is_sudoer(name: &str) -> bool {
     USERDB.lock().as_ref().map(|d| d.sudoers.iter().any(|s| s == name)).unwrap_or(false)
 }
 
-pub fn set_password(name: &str, password: &str) -> Result<(), &'static str> {
-    let user = find_by_name(name).ok_or("no such user")?;
+pub fn set_own_password(name: &str, old: &str, new: &str) -> Result<(), &'static str> {
+    if !verify_password(name, old) {
+        return Err("authentication failure");
+    }
+    let salt = (crate::task::ticks() as u32).wrapping_mul(2_654_435_761) ^ crate::drivers::rtc::now() as u32 ^ 0x9e37_79b9;
+    let entry = make_shadow_entry(new, salt);
     let root = fs::root_id();
-    let salt = user.uid.wrapping_mul(2_654_435_761).wrapping_add(0x9e37_79b9);
-    let new_entry = make_shadow_entry(password, salt);
-
     let mut guard = fs::VFS.lock();
     let vfs = guard.as_mut().ok_or("filesystem not mounted")?;
-    let bytes = vfs.read(root, "/etc/shadow").unwrap_or_default();
-    let text = String::from_utf8_lossy(&bytes);
-
+    let text = vfs.read(root, "/etc/shadow").map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
     let mut out = String::new();
     let mut replaced = false;
     for line in text.lines() {
-        if let Some((n, _)) = line.split_once(':') {
-            if n == name {
-                out.push_str(&format!("{}:{}\n", name, new_entry));
-                replaced = true;
-                continue;
-            }
+        if line.split(':').next() == Some(name) {
+            out.push_str(&format!("{}:{}\n", name, entry));
+            replaced = true;
+        } else if !line.trim().is_empty() {
+            out.push_str(line);
+            out.push('\n');
         }
-        out.push_str(line);
-        out.push('\n');
     }
     if !replaced {
-        out.push_str(&format!("{}:{}\n", name, new_entry));
+        out.push_str(&format!("{}:{}\n", name, entry));
     }
-
-    vfs.write(root, "/etc/shadow", out.as_bytes(), false, ROOT_UID)
-        .map_err(|_| "cannot write /etc/shadow")?;
+    vfs.write(root, "/etc/shadow", out.as_bytes(), false, ROOT_UID).map_err(|_| "cannot write /etc/shadow")?;
     drop(guard);
     reload();
     Ok(())
 }
 
-pub fn add_user(name: &str, uid: u32, gid: u32, password: &str) -> Result<(), &'static str> {
-    if find_by_name(name).is_some() {
-        return Err("user already exists");
-    }
-    let root = fs::root_id();
-    let home = format!("/home/{}", name);
-
-    {
-        let mut guard = fs::VFS.lock();
-        let vfs = guard.as_mut().ok_or("filesystem not mounted")?;
-
-        let mut passwd = vfs.read(root, "/etc/passwd").unwrap_or_default();
-        let line = format!("{}:x:{}:{}:{}:{}:/bin/hsh\n", name, uid, gid, name, home);
-        passwd.extend_from_slice(line.as_bytes());
-        vfs.write(root, "/etc/passwd", &passwd, false, ROOT_UID)
-            .map_err(|_| "cannot write /etc/passwd")?;
-
-        let _ = vfs.mkdir_all(&home, uid);
-    }
-
-    reload();
-    set_password(name, password)
+pub fn name_of(uid: u32) -> Option<String> {
+    USERDB.lock().as_ref()?.users.iter().find(|u| u.uid == uid).map(|u| u.name.clone())
 }

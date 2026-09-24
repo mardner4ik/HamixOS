@@ -2,14 +2,49 @@
 members = [
     "kernel",
     "sdk/hamix_std",
+    "sdk/hamix_kpi",
     "apps/hsh",
     "apps/hello_world",
     "apps/hxserver",
-    "drivers/intel-graphics-driver",
+    "drivers/example-nic",
+    "drivers/e1000",
+    "drivers/yukon",
+    "drivers/ar9285",
+    "drivers/virtio-gpu",
+    "drivers/intel-display",
+    "drivers/intel-gma",
+    "drivers/ahci",
+    "drivers/xhci",
     "libs/vellum",
     "libs/mini_png",
     "apps/hed",
+    "apps/hxhello",
+    "apps/hxmon",
+    "apps/hxfiles",
+    "apps/hxcmd",
+    "apps/hxterm",
+    "apps/hxview",
+    "apps/hxinstall",
+    "apps/hxcalc",
+    "apps/hxsettings",
+    "apps/hxnotes",
+    "apps/hxsound",
+    "apps/hxvideo",
+    "apps/pantry",
+    "apps/hxwayland",
+    "libs/hxproto",
+    "libs/hxvt",
+    "libs/hxclient",
+    "libs/hext",
+    "libs/wlan",
+    "libs/rust_h264",
+    "libs/hx264",
+    "libs/shiguredo_mp4",
+    "libs/hxmp4",
+    "libs/hxaac",
+    "tools/mkhext",
 ]
+exclude = ["libs/smoltcp"]
 resolver = "2"
 
 [profile.release]
@@ -21,3 +56,11 @@ codegen-units = 1
 [profile.dev]
 panic = "abort"
 opt-level = 2
+
+[profile.module]
+inherits = "release"
+panic = "abort"
+opt-level = 2
+lto = "fat"
+codegen-units = 1
+debug = false

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Install HamixOS
+Comment=Install the system on a disk
+Keywords=installer;disk;
+Exec=/usr/bin/hxinstall
+Icon=install
+Terminal=false
+X-Nook-Key=install
+X-Nook-Order=90
+X-Nook-LiveOnly=true
+Categories=System;
+X-Nook-Role=installer
+X-Nook-Desktop=true

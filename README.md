@@ -1,368 +1,191 @@
+<div align="center">
+
+<img src="docs/screenshots/logo.png" width="128" alt="HamixOS logo"/>
+
 # HamixOS
 
-Unix-like operating system written in Rust from scratch, targeting x86_64.
+**A desktop operating system written from scratch in Rust — its own kernel, its own shell, its own desktop, and room for your Linux apps.**
 
-## Hardware Targets
+[![License: GPLv3](https://img.shields.io/badge/license-GPLv3-5b8cff?style=flat-square)](LICENSE)
+![Version](https://img.shields.io/badge/version-0.6.1-8b5cf6?style=flat-square)
+![Language](https://img.shields.io/badge/written%20in-Rust-e0621a?style=flat-square)
+![Arch](https://img.shields.io/badge/arch-x86__64%20·%20aarch64%20·%20riscv64-2dd4bf?style=flat-square)
+![Desktop](https://img.shields.io/badge/desktop-Nook-5aa0ff?style=flat-square)
 
-- Pentium G640 (Sandy Bridge, 2 cores, 2.8 GHz)
-- Celeron T3100 (Penryn, 2 cores, 1.9 GHz)
-- Any x86_64 CPU without SSE/MMX requirements
+[Screenshots](#-screenshots) ·
+[Features](#-features) ·
+[Get started](#-get-started) ·
+[Build](#-build-from-source) ·
+[Hardware](#-hardware) ·
+[Docs](#-documentation)
 
-## Architecture
+<img src="docs/screenshots/fastfetch.jpg" alt="fastfetch on the Nook desktop" width="100%"/>
 
-```
-HamixOS/
-├── kernel/                       # Kernel (Ring 0)
-│   ├── src/
-│   │   ├── main.rs               # Entry point (rust_main), boot sequence, panic handler
-│   │   ├── arch/
-│   │   │   ├── mod.rs            # Arch module root (re-exports x86_64)
-│   │   │   └── x86_64/
-│   │   │       ├── boot.S        # _start, long-mode + identity-paging bring-up
-│   │   │       ├── gdt.rs        # GDT + TSS (Long Mode, double-fault IST stack)
-│   │   │       ├── idt.rs        # IDT, CPU exception handlers, PIC remap, IRQ handlers
-│   │   │       ├── mod.rs        # outb/inb/hlt/cli/sti/rdmsr/wrmsr/without_interrupts
-│   │   │       └── paging.rs     # Reserved for future dynamic paging (currently a stub)
-│   │   ├── drivers/
-│   │   │   ├── mod.rs
-│   │   │   ├── tty.rs            # Colored console API on top of text_mode
-│   │   │   ├── klog.rs           # Boot log ring buffer (backs `dmesg`)
-│   │   │   ├── serial.rs         # COM1 serial (debug output, serial_print!/serial_println!)
-│   │   │   ├── video/
-│   │   │   │   ├── mod.rs
-│   │   │   │   ├── text_mode.rs      # VGA 80x25 text-mode driver, hw cursor, panic screen
-│   │   │   │   ├── intel_graphics.rs # kernel-side adapter for the intel-graphics-driver crate
-│   │   │   │   └── registry.rs       # VideoDriver trait + driver registry (backs `drivers`)
-│   │   │   └── input/
-│   │   │       ├── mod.rs
-│   │   │       └── keyboard.rs   # PS/2 keyboard, scancode set 1 + extended keys
-│   │   ├── hsh/mod.rs            # hsh: login + shell (command loop, history, dev tools)
-│   │   ├── memory/
-│   │   │   ├── mod.rs            # Multiboot2 tag parser, subsystem init
-│   │   │   ├── frame.rs          # Bitmap physical frame allocator
-│   │   │   └── heap.rs           # Kernel heap (address-ordered, coalescing allocator)
-│   │   ├── task/mod.rs           # PIT timer, tick counter
-│   │   └── syscall/mod.rs        # SYSCALL MSR setup (LSTAR/STAR)
-│   ├── linker.ld                 # Memory layout (1MB load, BSS symbols)
-│   ├── x86_64-hamix_os.json      # Custom Rust target
-│   └── .cargo/config.toml        # Build config (nightly, build-std)
-├── drivers/
-│   └── intel-graphics-driver/    # standalone crate: Intel chipset graphics driver (see below)
-├── libs/
-│   └── vellum/                   # standalone crate: no_std 2D graphics primitives library
-├── isoroot/boot/grub/grub.cfg    # GRUB2 menu
-├── apps/                         # Ring-3 Rust binaries built against sdk/hamix_std
-│   ├── hello_world/              # Minimal hamix_std + alloc demo program
-│   ├── hxserver/                 # HamixOS's Xorg-equivalent display server (see docs/XORG.md)
-│   └── hsh/                      # Still a placeholder -- hsh itself is still kernel-hosted, see docs/USERSPACE_ROADMAP.md
-├── sdk/hamix_std/                # no_std userspace runtime: syscalls, brk-backed allocator, println!, entry!
-└── build.sh                      # Full build -> ISO script (also builds + installs apps/ into rootfs/usr/bin)
-```
+</div>
 
-See `docs/MUSL.md` for the syscall ABI (musl-compatible numbering) and
-`docs/USERSPACE_ROADMAP.md` for what's real vs. still a bridge-stage
-stand-in on the road to real per-process address spaces.
+---
 
-The console is VGA text mode (80x25, `0xB8000`), not a linear framebuffer —
-`drivers::video::text_mode` owns the hardware, `drivers::tty` layers 16-color
-attributes and a `core::fmt::Write` impl on top of it, and `hsh` never touches
-the hardware directly.
+## 📸 Screenshots
 
-## Build Requirements
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/desktop.jpg" alt="Nook desktop, light style"/></td>
+    <td width="50%"><img src="docs/screenshots/launcher.jpg" alt="Application menu"/></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Nook</b> in the light style</td>
+    <td align="center">Compact application menu, grouped by category</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/about.jpg" alt="About HamixOS"/></td>
+    <td width="50%"><img src="docs/screenshots/nook-icons.png" alt="Nook Icons"/></td>
+  </tr>
+  <tr>
+    <td align="center"><b>About HamixOS</b> with the new logo</td>
+    <td align="center"><b>Nook Icons</b> — one style for system and Linux apps</td>
+  </tr>
+</table>
+
+## ✨ Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🧠 Own kernel
+- 64-bit kernel in `no_std` Rust, SMP, preemptive threads
+- **hext** — its own journaled filesystem
+- **hxinit** — parallel boot with a clear status for every unit
+- Loadable **driver modules** with a stable KPI, W^X, per-module memory budget and a watchdog
+
+</td>
+<td width="50%" valign="top">
+
+### 🪟 Nook desktop
+- Compositing window manager with snapping, animations and a dock
+- Light and dark styles, wallpapers, notifications, Wi-Fi and sound menus
+- Application menu built from `.desktop` files — installed apps show up by themselves
+- **Nook Icons** theme shared with GTK apps
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🐧 Linux apps
+- Runs unmodified Alpine Linux programs through the Linux ABI layer
+- Wayland (`hxwayland`) and X11 (Xwayland) for GTK and Qt apps
+- **pantry** package manager: `pantry install mousepad`
+- Tested: LibreOffice, Telegram Desktop, Chromium, Thunar, Mousepad, fastfetch, btop
+
+</td>
+<td valign="top">
+
+### 🧰 Native apps
+- **hsh** shell with scripts, pipes and background jobs
+- Terminal, Files, Notes, Images, Videos (own H.264/AAC decoder), Calculator, Monitor, Settings
+- Graphical installer with a real bootloader setup
+- Networking on smoltcp: Ethernet, Wi-Fi (WPA2), DHCP, DNS
+
+</td>
+</tr>
+</table>
+
+## 🚀 Get started
+
+1. Download `hamix_os.iso` from the [Releases](https://github.com/mardner4ik/HamixOS/releases) page (or [build it](#-build-from-source)).
+2. Write it to a USB stick (`dd`, [Ventoy](https://www.ventoy.net) or balenaEtcher) and boot it, or run it in QEMU:
 
 ```bash
-# Install Rust nightly with source
-rustup install nightly
-rustup component add rust-src --toolchain nightly
-
-# Install GRUB tools and xorriso
-sudo apt install grub-pc-bin grub-efi-amd64-bin xorriso mtools
-# or on Arch:
-sudo pacman -S grub xorriso
+qemu-system-x86_64 -M q35 -m 2G -smp 2 -enable-kvm \
+    -cdrom hamix_os.iso -boot d \
+    -device virtio-vga -nic user,model=e1000
 ```
 
-## Building
+3. Log in and start the desktop:
+
+| account | password |
+|---------|----------|
+| `user`  | `user`   |
+| `root`  | `hamix`  |
+
+```
+user@hamix:~$ startx
+```
+
+4. Double-click **Install HamixOS** on the desktop to put the system on a disk.
+
+> [!TIP]
+> Install Linux software with `pantry install <package>` — the package appears in the application menu with its icon a few seconds later.
+
+## 🛠 Build from source
+
+<details>
+<summary><b>Requirements</b></summary>
+
+- Rust nightly with `rust-src`
+- `grub-mkrescue`, `grub-mkimage` (i386-pc), `xorriso`, `gzip`
+- `clang` and `ld.lld` for the C driver modules
+- for regenerating the desktop artwork: Python 3 with Pillow and numpy, `rsvg-convert`, the Noto fonts
+
+</details>
 
 ```bash
-chmod +x build.sh
-./build.sh
+git clone https://github.com/mardner4ik/HamixOS.git
+cd HamixOS
+./build.sh                                  # kernel, modules, apps, live image, ISO
+./build.sh aarch64                          # or riscv64
+python3 tools/nook-assets/generate.py       # icons, Nook Icons, fonts, wallpapers
 ```
 
-This produces `hamix_os.iso`.
+`HAMIX_EXTRA=/some/dir ./build.sh` copies a directory on top of the live root
+filesystem — handy for videos, test files or prebuilt Linux packages.
 
-## Running
+## 💻 Hardware
 
-### QEMU (development)
-```bash
-qemu-system-x86_64 \
-    -cdrom hamix_os.iso \
-    -m 256M \
-    -serial stdio \
-    -vga std
+| | Supported |
+|---|---|
+| **Graphics** | Intel GMA X3000/X3100/4500MHD (`intel-gma`), Intel HD 2000 – UHD 630 (`intel-display`), virtio-gpu, any UEFI/VBE framebuffer |
+| **Network** | Intel e1000 and e1000e (I217/I218/I219), Marvell Yukon-2, Qualcomm Atheros AR9285 Wi-Fi, virtio-net |
+| **Storage** | AHCI SATA, IDE, virtio-blk |
+| **Input** | PS/2 keyboard and touchpad, USB HID over xHCI/UHCI, virtio-input |
+| **Sound** | Intel HDA, AC'97 |
+
+Tested on a Samsung R428 and a Lenovo ThinkPad L560, and in QEMU on x86_64, aarch64 and riscv64.
+
+## 📚 Documentation
+
+| | |
+|---|---|
+| [INSTALL](docs/INSTALL.md) | installing to a disk and the boot process |
+| [HSH](docs/HSH.md) · [COMMANDS](docs/COMMANDS.md) | the shell and the command registry |
+| [HEXT](docs/HEXT.md) · [HXINIT](docs/HXINIT.md) | filesystem and system startup |
+| [XORG](docs/XORG.md) | Nook and the window protocol |
+| [MODULES](docs/MODULES.md) · [KPI_ROADMAP](docs/KPI_ROADMAP.md) | driver modules and the kernel programming interface |
+| [NETWORK](docs/NETWORK.md) · [AUDIO](docs/AUDIO.md) · [VIDEO](docs/VIDEO.md) | networking, sound, video |
+| [LINUXULATOR](docs/LINUXULATOR.md) · [PANTRY](docs/PANTRY.md) | running Linux programs and installing packages |
+| [PORTING](docs/PORTING.md) | the aarch64 and riscv64 ports |
+| [CHANGES](CHANGES.md) | release notes |
+
+## 🗂 Repository
+
+```
+kernel/        the kernel: memory, scheduler, syscalls, VFS, drivers, Linux ABI
+drivers/       loadable driver modules (Rust and Linux C drivers)
+apps/          native programs: hsh, Nook (hxserver), hxwayland, Files, Terminal, …
+libs/ sdk/     shared crates: GUI toolkit, codecs, filesystem, KPI and app SDKs
+overlay/       files copied into the root filesystem: themes, icons, wallpapers
+tools/         asset generator, Linux sysroot and test helpers
 ```
 
-### Ventoy (real hardware)
-1. Install Ventoy on USB stick
-2. Copy `hamix_os.iso` to the Ventoy partition
-3. Boot — HamixOS will appear in the Ventoy menu
+## 📄 License
 
-## Login
+HamixOS is released under the **GNU GPLv3**. Bundled third-party code keeps its
+own license: smoltcp (0BSD), the Linux e1000e driver (GPL-2.0), Atheros HAL
+tables (ISC), rust_h264 (MIT/Apache-2.0), shiguredo_mp4 (Apache-2.0), the
+Symphonia AAC decoder (MPL-2.0). Wallpaper photographs are from Wikimedia
+Commons, credits in `overlay/usr/share/wallpapers/CREDITS`.
 
-Default accounts, backed by real `/etc/passwd` + `/etc/shadow` files in the
-VFS (see [`docs/PERMISSIONS.md`](docs/PERMISSIONS.md)):
-
-| User   | Password | uid  | sudoer |
-|--------|----------|------|--------|
-| `root` | `hamix`  | 0    | always |
-| `user` | `user`   | 1000 | yes (listed in `/etc/sudoers`) |
-
-Password is hidden while typing (Unix behavior). Change either password after
-first boot with `passwd`.
-
-## Shell: hsh
-
-HamixOS ships with its own shell, **hsh** (`kernel/src/hsh/mod.rs`). It owns the
-login prompt and command loop; the VGA text rendering itself lives in the
-separate `drivers::tty` / `drivers::video::text_mode` driver. hsh supports
-command history navigable with the Up/Down arrow keys. The prompt reflects the
-real current directory (`user@hamix:/some/path$`, collapsing the user's home
-directory to `~` the way bash does).
-
-hsh is still a module compiled into the kernel binary, not a standalone
-`/bin/hsh` executable loaded from rootfs -- see
-[`docs/USERSPACE_ROADMAP.md`](docs/USERSPACE_ROADMAP.md) for exactly what is
-missing to make that possible and the order in which it gets built.
-
-| Command       | Description                      |
-|---------------|----------------------------------|
-| `help`        | List all commands                |
-| `clear`       | Clear the screen                 |
-| `echo <text>` | Print text                       |
-| `uname [-a]`  | Kernel/OS name                   |
-| `whoami`      | Current user (or `root` under `sudo`) |
-| `id`          | Show current uid/euid            |
-| `meminfo`     | RAM usage (free/used/total)      |
-| `uptime`      | System uptime in seconds         |
-| `pwd`         | Current directory                |
-| `ls [path]`   | List directory entries (real in-RAM VFS) |
-| `cd <path>`   | Change directory                 |
-| `cat <path>`  | Print file contents              |
-| `mkdir <p>`   | Create a directory                |
-| `touch <p>`   | Create an empty file             |
-| `rm <path>`   | Remove a file or empty directory |
-| `chmod <mode> <p>` | Change permission bits (octal, e.g. `755`) |
-| `chown <user> <p>` | Change file owner (root only)    |
-| `tree`        | Recursive directory listing from cwd |
-| `echo a > f`  | Write/append output to a file    |
-| `fb <color>`  | Fill the linear framebuffer (`intel-graphics-driver`) |
-| `gpuinfo`     | Graphics chipset and framebuffer information |
-| `drivers`     | List registered kernel drivers and their status |
-| `diskls`      | List root dir of the ext4 disk image module |
-| `diskcat <p>` | Read a file straight off the ext4 disk image |
-| `hostname`    | System hostname                  |
-| `cpuinfo`     | CPU architecture info             |
-| `sudo <cmd>`  | Run a command as root (see `docs/PERMISSIONS.md`) |
-| `passwd [user]` | Change a password               |
-| `useradd <name>` | Create a new user (root only)  |
-| `version`     | HamixOS version                  |
-| `history`     | Show command history              |
-| `logout`      | Log out, return to login prompt  |
-| `reboot`      | Reboot the machine (root only, or via `sudo`) |
-| `halt`        | Halt the system (root only, or via `sudo`) |
-
-## Filesystem (`kernel/src/fs`)
-
-HamixOS boots as a **live image**: `build.sh` packs a real FHS-style tree
-(`/bin /sbin /etc /dev /proc /sys /tmp /var /usr /home /root /lib ...`) into
-`initramfs.tar` and GRUB hands it to the kernel as a multiboot2 module. At
-boot the kernel un-tars it straight into an in-RAM filesystem (`fs::Vfs`) —
-nothing is read from optical/USB media again after that point. `/etc/passwd`,
-`/etc/hostname`, `/etc/os-release` are real files you can `cat`; `/proc/uptime`,
-`/proc/meminfo`, `/proc/version`, `/proc/cpuinfo` are generated live from
-kernel state on every read; `/dev/null`, `/dev/zero`, `/dev/console`,
-`/dev/random` are real (if minimal) device nodes.
-
-A second module, `disk.img`, is a genuine **ext4** filesystem image built with
-`mkfs.ext4 -d rootfs/` when e2fsprogs is available. `kernel/src/fs/ext4.rs` is
-a real, from-scratch read-only ext4 driver (superblock, group descriptors,
-extent-tree block mapping, linear directory parsing) you can browse with
-`diskls` / `diskcat`. It does not do journal replay, htree lookups, or
-`metadata_csum`/64-bit group descriptors, so `build.sh` disables those
-features when formatting.
-
-## Video: `intel-graphics-driver`
-
-Video drivers no longer live as loose files inside the kernel tree. Anything
-that draws pixels on real Intel graphics hardware lives in
-[`drivers/intel-graphics-driver`](drivers/intel-graphics-driver/README.md),
-a standalone crate with its own `Cargo.toml`, pulled into the kernel as a
-normal workspace dependency. It currently drives the linear framebuffer that
-GRUB/VBE hands off via the multiboot2 framebuffer tag for the **Intel Mobile
-Series 4 Express Chipset Family** (GMA 4500MHD, e.g. the graphics core paired
-with an Intel Celeron T3100) — the practical way to get pixels on that
-hardware without writing a full mode-setting driver. It is built to grow into
-more chipsets over time; see the crate's own README for its roadmap.
-
-The kernel only talks to this crate through a thin adapter,
-`kernel/src/drivers/video/intel_graphics.rs`, which reads the framebuffer
-address/pitch/resolution GRUB reported and hands it to the driver — no raw
-pixel math lives in the kernel anymore. `fb <red|green|blue|black|gradient>`
-and `gpuinfo` in `hsh` both go through this adapter.
-
-### `vellum`: the first HamixOS graphics library
-
-Drawing primitives (`Color`, `Point`, `Rect`, and a `Canvas` trait with
-`fill`/`fill_rect`/`horizontal_gradient`) live in
-[`libs/vellum`](libs/vellum/README.md), a small `no_std`, allocation-free
-library that is completely hardware-agnostic. `intel-graphics-driver`
-implements `vellum::Canvas` for its `Framebuffer` type to get all of its
-drawing operations from it. This is the first of what's meant to become a
-small stack of HamixOS graphics libraries — `vellum` stays primitives-only
-for now and grows one stage at a time (see its README for the roadmap)
-rather than trying to become a full 2D/3D stack in one step.
-
-See [`docs/GRAPHICS_ROADMAP.md`](docs/GRAPHICS_ROADMAP.md) for the full plan
-behind this three-layer split (`vellum` → driver crates → kernel adapters)
-and where it's headed next.
-
-### Driver registry
-
-`kernel/src/drivers/video/registry.rs` defines a small `VideoDriver` trait
-(`name`, `version`, `is_ready`, `resolution`, `kind`) that every video driver
-— text-mode console included — implements, and a static registry of all of
-them. `drivers` in `hsh` lists every registered driver with its version and
-live status, the same idea as `lsmod`, and is the first piece of what should
-grow into a general kernel driver registry (not just video) as more driver
-classes are added.
-
-That resolution is entirely up to GRUB, not to this driver, and two things
-have to be right for it to match the real panel instead of falling back to a
-low default:
-
-1. The multiboot2 header in `kernel/src/main.rs` has to *ask* for a
-   framebuffer at all (tag type 5). Without it, GRUB has no signal that the
-   kernel wants graphics mode and may hand back nothing or a text-mode
-   default.
-2. `isoroot/boot/grub/grub.cfg` has to actually set the video mode with
-   `set gfxpayload=keep` after loading a driver that can talk to the real
-   hardware. `video_bochs`/`video_cirrus` only work against the *emulated*
-   VGA adapters QEMU/VirtualBox/Bochs present — they do nothing on a real
-   Intel GMA chip, so a config that only loads those two silently falls
-   back to a low default resolution on real hardware while looking correct
-   under QEMU. `insmod all_video` (plus `vbe` and, under UEFI, `efi_gop`)
-   is what actually detects and drives the T3100's GPU.
-
-Both are now in place: the header requests a framebuffer, and `grub.cfg`
-loads the real-hardware video drivers before setting `gfxpayload=keep`.
-
-## Syscalls & musl
-
-`kernel/src/syscall/mod.rs` implements the real Linux x86_64 syscall ABI
-(`write=1`, `exit=60`, etc. — the numbers musl's syscall stubs use) and wires
-`SYSCALL`/`SYSRET` (`IA32_STAR/LSTAR/FMASK`) to a dispatcher backed by the VFS
-above. See `docs/MUSL.md` for the exact syscall table, how to build a static
-musl binary against it, and — importantly — what's still missing before a
-loaded ELF binary can actually reach it (there's no ELF loader or ring-3
-switch yet; that's the next milestone).
-
-### Developer tools
-
-| Command                     | Description                              |
-|------------------------------|-------------------------------------------|
-| `dmesg`                      | Show the kernel boot log                  |
-| `hexdump <addr> [len]`       | Dump raw memory as hex + ASCII            |
-| `inport <port>`              | Read a byte from an I/O port              |
-| `outport <port> <val>`       | Write a byte to an I/O port               |
-| `regs`                       | Dump CR0 / CR3 / CR4 control registers    |
-| `alloctest <bytes>`          | Exercise the kernel heap allocator        |
-| `crash <div0\|bp\|ud\|pf>`   | Trigger a CPU exception to test the IDT   |
-
-## Future Plans
-
-### ARM Support (armv7, aarch64)
-Planned for future releases. The kernel architecture is designed to be modular, allowing for HAL layer expansion to support ARM processors.
-
-## Boot Process
-
-1. GRUB2 loads kernel at 1MB via Multiboot2
-2. `_start` runs in 32-bit protected mode (GRUB entry), sets up identity paging
-   for the first 4GB and switches to 64-bit Long Mode
-3. `rust_main` copies the Multiboot2 info structure into a stack buffer
-   *before* BSS is zeroed, so it can never be clobbered by the kernel's own
-   `.bss` layout, then zeroes BSS and loads GDT/TSS
-4. IDT installed, PIC remapped (IRQ0=timer, IRQ1=keyboard) — interrupts stay
-   masked off at the CPU level until every subsystem below has finished
-5. Multiboot2 tags parsed from the safe stack copy: memory map
-6. Physical frame allocator initialized from the memory map
-7. Kernel heap initialized (4MB static arena)
-8. PS/2 keyboard driver registered
-9. SYSCALL MSRs configured, PIT configured at 100Hz
-10. Interrupts enabled, login prompt displayed
-
-## Design Decisions
-
-- **No external crates** except `spin` (for `Mutex`) and the in-workspace
-  `intel-graphics-driver` / `vellum` crates. All boot parsing is custom.
-- **SSE enabled**: CR4.OSFXSR/OSXMMEXCPT are set during boot because the compiler emits SSE instructions (e.g. in `memcpy`/`memset` and `x86-interrupt` handlers) even for a "soft-float" target; leaving them off causes `#UD` on first use.
-- **No red zone**: disabled for kernel interrupt safety.
-- **Static heap**: 4MB compile-time arena, backed by an address-ordered
-  free-list allocator with block coalescing — no `mmap`, no page allocator
-  needed for the heap yet.
-- **Text-mode console**: `drivers::video::text_mode` writes directly to the
-  VGA buffer at `0xB8000` and drives the hardware cursor; `drivers::tty`
-  layers colored output and `core::fmt::Write` on top; `hsh` (login + shell)
-  is a separate module built on top of that.
-- **Interrupts stay off during boot**: `sti` is only executed once in
-  `rust_main`, after every subsystem (GDT/IDT/memory/keyboard/syscall/task)
-  has finished initializing, to avoid handling IRQs against a half-built
-  kernel.
-
-## Fixed in this update
-
-- **Kernel panic on allocation** (`allocation failed: Layout { size, align }`):
-  the heap allocator returned freed blocks to the free list smaller than what
-  it had actually taken from it (it dropped the block header and alignment
-  padding on every `dealloc`), and never coalesced adjacent free blocks. Under
-  normal shell use the heap fragmented until a small allocation had nowhere
-  left to go. `memory::heap` was rewritten as an address-ordered, coalescing
-  allocator that reclaims the exact block it handed out — see
-  `kernel/src/memory/heap.rs`.
-- **Cursor stuck at the top-left corner**: the VGA text driver wrote
-  characters into the frame buffer but never moved the hardware text cursor
-  (VGA CRT controller, ports `0x3D4`/`0x3D5`). It now updates the hardware
-  cursor after every write, so it tracks the current column/row like a normal
-  terminal.
-- **Colors were dead code**: `drivers::tty`'s color constants and
-  `*_colored` functions existed but were wired to a single hardcoded
-  attribute byte, so every color argument was silently ignored. They now map
-  to real VGA 16-color attribute bytes.
-- **Panic screen**: kernel panics now render on a dedicated red full-screen
-  panic display — "KERNEL PANIC" centered near the top, the panic reason
-  word-wrapped and centered below it — instead of a plain scrolling text
-  line. It's drawn with direct VGA writes and no heap allocation, so it also
-  renders correctly for the "heap exhausted" class of panics that caused it.
-- **Multiboot info could be clobbered**: `rust_main` now snapshots the
-  Multiboot2 info structure to a stack buffer before zeroing `.bss`, so the
-  boot-time memory map can never be corrupted by the kernel's own BSS layout
-  landing on top of it.
-- **Interrupts enabled too early**: the PIC/PIT/keyboard IRQs were unmasked
-  and `sti` executed midway through `idt::init()`, before memory, keyboard,
-  and task subsystems existed. Interrupts now stay masked at the CPU level
-  until the entire boot sequence completes.
-
-## Future Roadmap
-
-- [ ] VFS (virtual filesystem)
-- [ ] ext2 / FAT32 driver
-- [ ] ATA/SATA disk driver
-- [ ] Process management (fork/exec)
-- [ ] Ring 3 user space
-- [ ] Persistent user database in `/etc/passwd`
-- [ ] ACPI power management
-- [ ] Network stack (RTL8139/e1000)
-- [ ] x86 (32-bit) support
-- [ ] ARM support (armv7, aarch64) — planned for future releases
-- [ ] PCI bus driver, used to autodetect the chipset in `intel-graphics-driver`
-- [ ] More `intel-graphics-driver` chipsets (GMA 950, GMA 3100, HD Graphics)
-- [ ] `vellum` stage 2: line/circle rasterization, bitmap fonts
-- [ ] General (non-video) driver registry, extending `drivers::video::registry`
+<div align="center">
+<sub>Made with 🦀 and Rust</sub>
+</div>

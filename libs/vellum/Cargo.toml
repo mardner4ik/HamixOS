@@ -1,7 +1,8 @@
 [package]
 name = "vellum"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "HamixOS 2D graphics primitives library"
+description = "HamixOS 2D graphics library: anti-aliased shapes, images and fonts"
 
 [dependencies]
+mini_png = { path = "../mini_png" }

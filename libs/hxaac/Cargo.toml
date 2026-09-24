@@ -1,0 +1,12 @@
+[package]
+name = "hxaac"
+version = "0.1.0"
+edition = "2021"
+description = "AAC-LC audio decoding for HamixOS (adapted from Symphonia's AAC decoder)"
+license = "MPL-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libm = "0.2"

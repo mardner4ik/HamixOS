@@ -1,0 +1,4 @@
+VERSION=v6.6
+PATH_IN_TREE=drivers/net/ethernet/intel/e1000e
+FILES="80003es2lan.c 80003es2lan.h 82571.c 82571.h defines.h e1000.h e1000e_trace.h hw.h ich8lan.c ich8lan.h mac.c mac.h manage.c manage.h netdev.c nvm.c nvm.h param.c phy.c phy.h regs.h"
+REMOVED_FILES="ethtool.c ptp.c"

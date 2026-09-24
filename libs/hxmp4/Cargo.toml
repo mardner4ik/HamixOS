@@ -1,0 +1,11 @@
+[package]
+name = "hxmp4"
+version = "0.1.0"
+edition = "2021"
+description = "MP4 (ISO BMFF) reading for HamixOS, built on the vendored shiguredo_mp4 library"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+shiguredo_mp4 = { path = "../shiguredo_mp4" }

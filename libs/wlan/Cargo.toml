@@ -1,0 +1,7 @@
+[package]
+name = "wlan"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS IEEE 802.11 station stack: frames, WPA2-PSK (CCMP) and the connection state machine"
+
+[dependencies]

@@ -1,0 +1,11 @@
+[package]
+name = "yukon"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable network module for Marvell Yukon-2 Ethernet controllers (88E8040 and relatives)"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

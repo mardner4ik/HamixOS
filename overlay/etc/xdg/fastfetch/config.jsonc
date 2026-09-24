@@ -1,0 +1,48 @@
+{
+    "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+    "logo": {
+        "type": "file",
+        "source": "/usr/share/hamix/fastfetch/hamix.txt",
+        "color": {
+            "1": "38;5;69",
+            "2": "38;5;135"
+        },
+        "padding": {
+            "top": 1,
+            "right": 3
+        }
+    },
+    "display": {
+        "separator": "  ",
+        "color": {
+            "keys": "38;5;69",
+            "title": "38;5;135"
+        }
+    },
+    "modules": [
+        "title",
+        "separator",
+        "os",
+        "host",
+        "kernel",
+        "uptime",
+        "packages",
+        "shell",
+        "display",
+        "de",
+        "wm",
+        "theme",
+        "icons",
+        "font",
+        "cursor",
+        "terminal",
+        "cpu",
+        "gpu",
+        "memory",
+        "disk",
+        "localip",
+        "battery",
+        "break",
+        "colors"
+    ]
+}
