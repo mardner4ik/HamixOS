@@ -710,6 +710,9 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
                 failed = true;
                 msg_flags |= MSG_CTRUNC;
             } else {
+                if flags & MSG_CMSG_CLOEXEC != 0 {
+                    crate::syscall::set_cloexec(n as u64, true);
+                }
                 numbers.push(n as i32);
             }
         }
