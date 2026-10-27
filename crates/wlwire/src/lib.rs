@@ -107,19 +107,30 @@ impl Message {
 pub struct Reader<'a> {
     data: &'a [u8],
     pos: usize,
+    valid: bool,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self { data, pos: 0, valid: true }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.data.len().saturating_sub(self.pos)
     }
 
     pub fn u32(&mut self) -> u32 {
         let Some(end) = self.pos.checked_add(4) else {
+            self.valid = false;
             self.pos = self.data.len();
             return 0;
         };
         let Some(bytes) = self.data.get(self.pos..end) else {
+            self.valid = false;
             self.pos = self.data.len();
             return 0;
         };
@@ -145,23 +156,52 @@ impl<'a> Reader<'a> {
 
     pub fn string(&mut self) -> String {
         let len = self.u32() as usize;
-        if len == 0 {
+        if !self.valid || len == 0 {
             return String::new();
         }
         let start = self.pos;
-        let end = start.saturating_add(len).min(self.data.len());
+        let Some(end) = start.checked_add(len) else {
+            self.valid = false;
+            self.pos = self.data.len();
+            return String::new();
+        };
+        let Some(padded_end) = len.checked_add(3).map(|n| start.saturating_add(n & !3)) else {
+            self.valid = false;
+            self.pos = self.data.len();
+            return String::new();
+        };
+        if end > self.data.len() || padded_end > self.data.len() || self.data[end - 1] != 0 {
+            self.valid = false;
+            self.pos = self.data.len();
+            return String::new();
+        }
         let raw = &self.data[start..end];
-        let text = String::from_utf8_lossy(raw.strip_suffix(&[0]).unwrap_or(raw)).into_owned();
-        self.pos = start.saturating_add(len.saturating_add(3) & !3).min(self.data.len());
-        text
+        self.pos = padded_end;
+        String::from_utf8_lossy(&raw[..raw.len() - 1]).into_owned()
     }
 
     pub fn array(&mut self) -> Vec<u8> {
         let len = self.u32() as usize;
+        if !self.valid {
+            return Vec::new();
+        }
         let start = self.pos;
-        let end = start.saturating_add(len).min(self.data.len());
-        let bytes = self.data[start..end].to_vec();
-        self.pos = start.saturating_add(len.saturating_add(3) & !3).min(self.data.len());
-        bytes
+        let Some(end) = start.checked_add(len) else {
+            self.valid = false;
+            self.pos = self.data.len();
+            return Vec::new();
+        };
+        let Some(padded_end) = len.checked_add(3).map(|n| start.saturating_add(n & !3)) else {
+            self.valid = false;
+            self.pos = self.data.len();
+            return Vec::new();
+        };
+        if end > self.data.len() || padded_end > self.data.len() {
+            self.valid = false;
+            self.pos = self.data.len();
+            return Vec::new();
+        }
+        self.pos = padded_end;
+        self.data[start..end].to_vec()
     }
 }
