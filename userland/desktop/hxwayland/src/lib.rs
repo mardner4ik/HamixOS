@@ -278,28 +278,24 @@ impl Bridge {
             }
         }
         loop {
-            let message = {
+            let (header, message) = {
                 let Some(client) = self.clients.get_mut(&cid) else {
                     return;
                 };
-                if client.inbuf.len() < 8 {
+                if client.inbuf.len() < wlwire::HEADER_SIZE {
                     break;
                 }
-                let word = u32::from_le_bytes(client.inbuf[4..8].try_into().unwrap());
-                let size = (word >> 16) as usize;
-                if size < 8 {
+                let Some(header) = wlwire::decode_header(&client.inbuf) else {
                     client.dead = true;
                     break;
-                }
-                if client.inbuf.len() < size {
+                };
+                if client.inbuf.len() < header.size {
                     break;
                 }
-                let msg: Vec<u8> = client.inbuf.drain(..size).collect();
-                msg
+                let msg: Vec<u8> = client.inbuf.drain(..header.size).collect();
+                (header, msg)
             };
-            let object = u32::from_le_bytes(message[0..4].try_into().unwrap());
-            let opcode = (u32::from_le_bytes(message[4..8].try_into().unwrap()) & 0xFFFF) as u16;
-            self.dispatch(cid, object, opcode, &message[8..]);
+            self.dispatch(cid, header.object, header.opcode, &message[wlwire::HEADER_SIZE..]);
         }
     }
 
