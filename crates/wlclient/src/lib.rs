@@ -12,6 +12,8 @@ pub const DISPLAY: u32 = 1;
 
 const MAX_INPUT_BUFFER: usize = 1 << 20;
 const MAX_PENDING_EVENTS: usize = 4096;
+const MAX_PENDING_EVENT_BYTES: usize = 1 << 20;
+const MAX_PENDING_FDS: usize = 256;
 const MAX_OUTPUT_BUFFER: usize = 1 << 20;
 const FD_SEND_TIMEOUT_MS: u64 = 5000;
 const AF_UNIX: c_int = 1;
@@ -96,6 +98,7 @@ pub struct Connection {
     input: Vec<u8>,
     output: Vec<u8>,
     events: VecDeque<Event>,
+    queued_event_bytes: usize,
     received_fds: VecDeque<i32>,
     alive: bool,
 }
@@ -125,6 +128,7 @@ impl Connection {
             input: Vec::new(),
             output: Vec::new(),
             events: VecDeque::new(),
+            queued_event_bytes: 0,
             received_fds: VecDeque::new(),
             alive: true,
         })
@@ -276,7 +280,7 @@ impl Connection {
                 }
             }
             self.received_fds.extend(collect_received(&control, msg.controllen));
-            if msg.flags & MSG_CTRUNC != 0 {
+            if msg.flags & MSG_CTRUNC != 0 || self.received_fds.len() > MAX_PENDING_FDS {
                 self.alive = false;
                 break;
             }
@@ -295,13 +299,16 @@ impl Connection {
                 if self.input.len() < header.size {
                     break;
                 }
-                if self.events.len() >= MAX_PENDING_EVENTS {
+                if self.events.len() >= MAX_PENDING_EVENTS
+                    || self.queued_event_bytes.saturating_add(header.size) > MAX_PENDING_EVENT_BYTES
+                {
                     self.alive = false;
                     self.input.clear();
                     break;
                 }
                 let body = self.input[wlwire::HEADER_SIZE..header.size].to_vec();
                 self.input.drain(..header.size);
+                self.queued_event_bytes += header.size;
                 self.events.push_back(Event { object: header.object, opcode: header.opcode, body });
             }
             if !self.alive {
@@ -310,8 +317,14 @@ impl Connection {
         }
     }
 
+    fn pop_event(&mut self) -> Option<Event> {
+        let event = self.events.pop_front()?;
+        self.queued_event_bytes = self.queued_event_bytes.saturating_sub(event.body.len() + wlwire::HEADER_SIZE);
+        Some(event)
+    }
+
     pub fn next(&mut self) -> Option<Event> {
-        self.events.pop_front()
+        self.pop_event()
     }
 
     pub fn take_fd(&mut self) -> Option<i32> {
@@ -319,18 +332,18 @@ impl Connection {
     }
 
     pub fn dispatch_pending(&mut self, timeout_ms: i64) -> Option<Event> {
-        if let Some(e) = self.events.pop_front() {
+        if let Some(e) = self.pop_event() {
             return Some(e);
         }
         self.flush();
         self.read();
-        if let Some(e) = self.events.pop_front() {
+        if let Some(e) = self.pop_event() {
             return Some(e);
         }
         if timeout_ms != 0 && self.wait(timeout_ms) {
             self.read();
         }
-        self.events.pop_front()
+        self.pop_event()
     }
 
     pub fn sync(&mut self) -> u32 {
@@ -344,7 +357,7 @@ impl Connection {
         let deadline = now_ms() + 5000;
         loop {
             self.flush();
-            while let Some(e) = self.events.pop_front() {
+            while let Some(e) = self.pop_event() {
                 if e.object == callback && e.opcode == 0 {
                     return Ok(());
                 }
