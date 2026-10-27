@@ -967,12 +967,12 @@ hxboot має працювати з ним краще, ніж GRUB:
 - Ворота: усі boot-тести; старт GTK-програми ≥ 2× швидше в QEMU 1 CPU
 
 ### W1. Nook Wayland: ядро протоколу (2 тижні)
-- [~] `crates/wlwire` і `crates/wlclient`: спільний `no_std` encoder/reader/header decoder із
+- [x] `crates/wlwire` і `crates/wlclient`: спільний `no_std` encoder/reader/header decoder із
       перевіркою рядків, масивів і граничного розміру кадру; окремий
       від hxproto неблокувальний POSIX-транспорт, запит `wl_display.get_registry` і події
-      `wl_registry.global`/`global_remove`; черга отриманих fd із CLOEXEC, завершення
+      `wl_registry.global`/`global_remove`, `wl_display.delete_id`/`error`; черга отриманих fd із CLOEXEC, завершення
       часткового передавання fd, обмежена вихідна черга з backpressure, ліміти SHM
-      (16 384 px / 128 МіБ), автоматичне звільнення локального SHM-відображення та обмежені
+      (16 384 px / 128 МіБ), захист від усічення (`F_SEAL_SHRINK`), автоматичне звільнення локального SHM-відображення та обмежені
       вхідний буфер і черга подій; нативний frontend hxserver ще попереду
 - [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені
 - [ ] `Source::Wayland` у вікнах сцени; композиція прямо з пулу клієнта; release при заміні
