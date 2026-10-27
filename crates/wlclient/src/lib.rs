@@ -67,7 +67,7 @@ pub fn socket_path() -> Option<String> {
 }
 
 pub fn available() -> bool {
-    socket_path().map(|p| posix::exists(&p)).unwrap_or(false)
+    socket_path().filter(|p| p.len() <= 107).map(|p| posix::exists(&p)).unwrap_or(false)
 }
 
 pub fn now_ms() -> u64 {
@@ -100,6 +100,9 @@ pub struct Connection {
 impl Connection {
     pub fn connect() -> Result<Connection, &'static str> {
         let path = socket_path().ok_or("XDG_RUNTIME_DIR is not set")?;
+        if path.len() > 107 {
+            return Err("the Wayland socket path is too long");
+        }
         let fd = unsafe { socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0) };
         if fd < 0 {
             return Err("cannot create a socket");
