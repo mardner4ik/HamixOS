@@ -78,6 +78,10 @@ pub fn now_ms() -> u64 {
     posix::now_ms()
 }
 
+pub fn close_fd(fd: i32) {
+    unsafe { close(fd) };
+}
+
 pub use wlwire::{Message, Reader};
 
 pub struct Event {
