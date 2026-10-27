@@ -25,7 +25,11 @@ struct Segment {
     len: u64,
     refs: u32,
     owner: Pid,
+    seals: u32,
 }
+
+const F_SEAL_SHRINK: u32 = 0x0002;
+const EPERM: i64 = -1;
 
 static SERVICES: Mutex<BTreeMap<String, Pid>> = Mutex::new(BTreeMap::new());
 static SEGMENTS: Mutex<BTreeMap<u32, Segment>> = Mutex::new(BTreeMap::new());
@@ -107,7 +111,7 @@ pub fn shm_create(owner: Pid, len: u64) -> i64 {
         }
     }
     let id = NEXT_SEGMENT.fetch_add(1, Ordering::Relaxed);
-    without_interrupts(|| SEGMENTS.lock().insert(id, Segment { frames, len, refs: 0, owner }));
+    without_interrupts(|| SEGMENTS.lock().insert(id, Segment { frames, len, refs: 0, owner, seals: 0 }));
     id as i64
 }
 
@@ -148,7 +152,7 @@ pub fn shm_map(pid: Pid, id: u32) -> Result<(u64, u64), i64> {
 
 pub fn memfd_create(owner: Pid) -> u32 {
     let id = NEXT_SEGMENT.fetch_add(1, Ordering::Relaxed);
-    without_interrupts(|| SEGMENTS.lock().insert(id, Segment { frames: Vec::new(), len: 0, refs: 1, owner }));
+    without_interrupts(|| SEGMENTS.lock().insert(id, Segment { frames: Vec::new(), len: 0, refs: 1, owner, seals: 0 }));
     id
 }
 
@@ -166,6 +170,17 @@ pub fn release(id: u32) {
 
 pub fn shm_len(id: u32) -> Option<u64> {
     without_interrupts(|| SEGMENTS.lock().get(&id).map(|s| s.len))
+}
+
+pub fn shm_add_seals(id: u32, seals: u32) -> i64 {
+    if seals & !F_SEAL_SHRINK != 0 { return EINVAL; }
+    without_interrupts(|| match SEGMENTS.lock().get_mut(&id) {
+        Some(segment) => { segment.seals |= seals; 0 }, None => ENOENT,
+    })
+}
+
+pub fn shm_seals(id: u32) -> Option<u32> {
+    without_interrupts(|| SEGMENTS.lock().get(&id).map(|segment| segment.seals))
 }
 
 pub fn shm_set_len(id: u32, len: u64) -> i64 {
@@ -189,11 +204,12 @@ pub fn shm_set_len(id: u32, len: u64) -> i64 {
             }
         }
     }
-    let leftover = without_interrupts(|| {
+    let (leftover, error) = without_interrupts(|| {
         let mut segments = SEGMENTS.lock();
         let Some(segment) = segments.get_mut(&id) else {
-            return extra;
+            return (extra, ENOENT);
         };
+        if segment.len > len && segment.seals & F_SEAL_SHRINK != 0 { return (extra, EPERM); }
         if segment.len > len {
             let keep = len as usize;
             for (i, f) in segment.frames.iter().enumerate() {
@@ -208,12 +224,12 @@ pub fn shm_set_len(id: u32, len: u64) -> i64 {
         }
         segment.frames.extend(extra);
         segment.len = len;
-        Vec::new()
+        (Vec::new(), 0)
     });
     for f in leftover {
         frame::free_frame(f);
     }
-    0
+    error
 }
 
 pub fn shm_io(id: u32, offset: u64, buf: &mut [u8], write: bool) -> Result<usize, i64> {

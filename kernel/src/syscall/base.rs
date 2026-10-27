@@ -521,7 +521,14 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             set_nonblock(fd, arg & 0o4000 != 0);
             0
         }
-        F_ADD_SEALS | F_GET_SEALS if matches!(kind, Target::Memfd(..)) => 0,
+        F_ADD_SEALS => match kind {
+            Target::Memfd(id, _) => crate::task::ipc::shm_add_seals(id, arg as u32) as i64,
+            _ => EINVAL,
+        },
+        F_GET_SEALS => match kind {
+            Target::Memfd(id, _) => crate::task::ipc::shm_seals(id).map(|seals| seals as i64).unwrap_or(EBADF),
+            _ => EINVAL,
+        },
         F_GETFD => task::with_current(|t| crate::syscall::fd_flag(&t.cloexec, fd)) as i64,
         F_SETFD => {
             crate::syscall::set_cloexec(fd, arg & 1 != 0);
