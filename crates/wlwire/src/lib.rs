@@ -22,7 +22,7 @@ pub fn decode_header(data: &[u8]) -> Option<Header> {
     let object = u32::from_le_bytes(data[0..4].try_into().ok()?);
     let word = u32::from_le_bytes(data[4..8].try_into().ok()?);
     let size = (word >> 16) as usize;
-    if size < HEADER_SIZE || size > MAX_MESSAGE_SIZE {
+    if size < HEADER_SIZE || size > MAX_MESSAGE_SIZE || size & 3 != 0 {
         return None;
     }
     Some(Header { object, opcode: word as u16, size })

@@ -194,9 +194,14 @@ unsafe extern "C" {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn copy_code(page: &mut [u8; PAGE], offset: usize, start: *const u8, end: *const u8) {
-    let len = end as usize - start as usize;
-    unsafe { core::ptr::copy_nonoverlapping(start, page.as_mut_ptr().add(offset), len) };
+fn copy_code(page: &mut [u8; PAGE], offset: usize, limit: usize, start: *const u8, end: *const u8) -> Option<usize> {
+    let len = (end as usize).checked_sub(start as usize)?;
+    if offset > limit || len > limit - offset {
+        return None;
+    }
+    let target = page.get_mut(offset..offset + len)?;
+    unsafe { core::ptr::copy_nonoverlapping(start, target.as_mut_ptr(), len) };
+    Some(len)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -255,7 +260,7 @@ fn symbol(page: &mut [u8; PAGE], offset: usize, name: u32, value: u64, size: u64
 }
 
 #[cfg(target_arch = "x86_64")]
-fn image() -> [u8; PAGE] {
+fn image() -> Option<[u8; PAGE]> {
     let mut page = [0u8; PAGE];
     page[0..4].copy_from_slice(b"\x7fELF");
     page[4] = 2;
@@ -305,14 +310,10 @@ fn image() -> [u8; PAGE] {
     let time_end = &raw const hx_vdso_time_end;
     let getcpu_start = &raw const hx_vdso_getcpu_start;
     let getcpu_end = &raw const hx_vdso_getcpu_end;
-    let clock_len = clock_end as usize - clock_start as usize;
-    let gettimeofday_len = gettimeofday_end as usize - gettimeofday_start as usize;
-    let time_len = time_end as usize - time_start as usize;
-    let getcpu_len = getcpu_end as usize - getcpu_start as usize;
-    copy_code(&mut page, CLOCK_CODE, clock_start, clock_end);
-    copy_code(&mut page, GETTIMEOFDAY_CODE, gettimeofday_start, gettimeofday_end);
-    copy_code(&mut page, TIME_CODE, time_start, time_end);
-    copy_code(&mut page, GETCPU_CODE, getcpu_start, getcpu_end);
+    let clock_len = copy_code(&mut page, CLOCK_CODE, GETTIMEOFDAY_CODE, clock_start, clock_end)?;
+    let gettimeofday_len = copy_code(&mut page, GETTIMEOFDAY_CODE, TIME_CODE, gettimeofday_start, gettimeofday_end)?;
+    let time_len = copy_code(&mut page, TIME_CODE, GETCPU_CODE, time_start, time_end)?;
+    let getcpu_len = copy_code(&mut page, GETCPU_CODE, PAGE, getcpu_start, getcpu_end)?;
     symbol(&mut page, 0x358, 1, CLOCK_CODE as u64, clock_len as u64);
     symbol(&mut page, 0x370, 22, GETTIMEOFDAY_CODE as u64, gettimeofday_len as u64);
     symbol(&mut page, 0x388, 42, TIME_CODE as u64, time_len as u64);
@@ -327,7 +328,7 @@ fn image() -> [u8; PAGE] {
     put32(&mut page, 0x3d8, 4);
     put32(&mut page, 0x3dc, 0);
 
-    page
+    Some(page)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -335,7 +336,9 @@ pub fn install(aspace: &mut AddressSpace) -> bool {
     if aspace.occupied(BASE) || aspace.occupied(VVAR) || !aspace.alloc_range(BASE, PAGE_SIZE) {
         return false;
     }
-    let page = image();
+    let Some(page) = image() else {
+        return false;
+    };
     if !aspace.write_bytes(BASE, &page) {
         return false;
     }
