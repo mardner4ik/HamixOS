@@ -352,6 +352,12 @@ impl Connection {
         id
     }
 
+    pub fn get_registry(&mut self) -> u32 {
+        let id = self.new_id();
+        self.send(Message::new(DISPLAY, 1).uint(id).finish());
+        id
+    }
+
     pub fn roundtrip(&mut self, mut handle: impl FnMut(&mut Connection, Event)) -> Result<(), &'static str> {
         let callback = self.sync();
         let deadline = now_ms() + 5000;
