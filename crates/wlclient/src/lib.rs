@@ -394,7 +394,16 @@ impl ShmBuffer {
     pub fn destroy(self, conn: &mut Connection) {
         conn.send(Message::new(self.id, 0).finish());
         conn.send(Message::new(self.pool, 1).finish());
-        unsafe { munmap(self.addr as *mut c_void, self.bytes) };
+    }
+}
+
+impl Drop for ShmBuffer {
+    fn drop(&mut self) {
+        if !self.addr.is_null() && self.bytes != 0 {
+            unsafe { munmap(self.addr as *mut c_void, self.bytes) };
+            self.addr = core::ptr::null_mut();
+            self.bytes = 0;
+        }
     }
 }
 
