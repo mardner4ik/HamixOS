@@ -982,20 +982,53 @@ pub fn lazy_fault(addr: u64) -> bool {
         count += 1;
     }
     let file_offset = region.offset + (page - region.start);
-    let data = if region.node != paging::ANON_NODE && file_offset < region.file_len {
-        read_file(region.node, file_offset, (count * PAGE_SIZE).min(region.file_len - file_offset)).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    if region.node != paging::ANON_NODE {
+        let mut any = false;
+        for i in 0..count {
+            let virt = page + i * PAGE_SIZE;
+            let offset = file_offset + i * PAGE_SIZE;
+            let lazy = task::with_current(|t| t.aspace.as_ref().and_then(|a| a.lazy_at(virt)));
+            let Some((index, _)) = lazy else {
+                continue;
+            };
+            if offset >= region.file_len {
+                any |= task::with_current(|t| t.aspace.as_mut().map(|a| a.fill_lazy(virt, index, &[])).unwrap_or(false));
+                continue;
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                let cached = crate::memory::page_cache::get_or_load(region.node, offset, |page_data| {
+                    let Ok(data) = read_file(region.node, offset, PAGE_SIZE) else {
+                        return false;
+                    };
+                    page_data[..data.len()].copy_from_slice(&data);
+                    true
+                });
+                if let Some(phys) = cached {
+                    any |= task::with_current(|t| t.aspace.as_mut().map(|a| a.fill_lazy_shared(virt, index, phys, region.private)).unwrap_or_else(|| {
+                        crate::memory::frame::free_frame(phys);
+                        false
+                    }));
+                } else {
+                    any |= task::with_current(|t| t.aspace.as_mut().map(|a| a.fill_lazy(virt, index, &[])).unwrap_or(false));
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                let data = read_file(region.node, offset, PAGE_SIZE).unwrap_or_default();
+                any |= task::with_current(|t| t.aspace.as_mut().map(|a| a.fill_lazy(virt, index, &data)).unwrap_or(false));
+            }
+        }
+        paging::flush_tlb();
+        return any || task::with_current(|t| t.aspace.as_ref().map(|a| a.translate(page).is_some()).unwrap_or(false));
+    }
     let filled = task::with_current(|t| {
         let Some(aspace) = t.aspace.as_mut() else {
             return false;
         };
         let mut any = false;
         for i in 0..count {
-            let from = ((i * PAGE_SIZE) as usize).min(data.len());
-            let to = (((i + 1) * PAGE_SIZE) as usize).min(data.len());
-            any |= aspace.fill_lazy(page + i * PAGE_SIZE, index, &data[from..to]);
+            any |= aspace.fill_lazy(page + i * PAGE_SIZE, index, &[]);
         }
         any || aspace.translate(page).is_some()
     });
@@ -1072,7 +1105,7 @@ pub fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, offset: u6
         };
         let aspace = t.aspace.as_mut().ok_or(ENOMEM)?;
         let ok = match lazy_file {
-            Some((node, file_len)) => aspace.map_lazy(base, size, paging::LazyRegion { node, start: base, offset, file_len }),
+            Some((node, file_len)) => aspace.map_lazy(base, size, paging::LazyRegion { node, start: base, offset, file_len, private: flags & MAP_SHARED == 0 }),
             None => aspace.map_zero(base, size),
         };
         if !ok {

@@ -1,6 +1,7 @@
 pub mod aspace;
 pub mod frame;
 mod heap;
+pub mod page_cache;
 pub mod vmalloc;
 #[cfg(target_arch = "x86_64")]
 mod multiboot;

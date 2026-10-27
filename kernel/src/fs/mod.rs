@@ -561,7 +561,7 @@ impl Vfs {
         if append {
             self.make_resident(id);
         }
-        match &mut self.nodes[id].kind {
+        let result = match &mut self.nodes[id].kind {
             NodeKind::File(body) => {
                 if append {
                     body.bytes.extend_from_slice(data);
@@ -577,7 +577,11 @@ impl Vfs {
             }
             NodeKind::Device(_) => Ok(()),
             _ => Err("cannot write to this node"),
+        };
+        if result.is_ok() {
+            crate::memory::page_cache::invalidate(id);
         }
+        result
     }
 
     pub fn list(&self, cwd: usize, path: &str) -> Result<Vec<(String, bool)>, &'static str> {
@@ -754,7 +758,7 @@ impl Vfs {
         }
         self.make_resident(id);
         self.touch(id, DIRTY_DATA);
-        match &mut self.nodes[id].kind {
+        let result = match &mut self.nodes[id].kind {
             NodeKind::File(body) => {
                 let buf = &mut body.bytes;
                 reserve_body(buf, pos.max(pos + data.len()))?;
@@ -770,7 +774,11 @@ impl Vfs {
             }
             NodeKind::Device(_) => Ok(()),
             _ => Err("cannot write to this node"),
+        };
+        if result.is_ok() {
+            crate::memory::page_cache::invalidate(id);
         }
+        result
     }
 
     pub fn set_len(&mut self, id: usize, len: usize, uid: u32) -> Result<(), &'static str> {
@@ -779,7 +787,7 @@ impl Vfs {
         }
         self.make_resident(id);
         self.touch(id, DIRTY_DATA);
-        match &mut self.nodes[id].kind {
+        let result = match &mut self.nodes[id].kind {
             NodeKind::File(body) => {
                 if len < body.bytes.len() / 2 {
                     body.bytes.truncate(len);
@@ -794,7 +802,11 @@ impl Vfs {
             }
             NodeKind::Device(_) => Ok(()),
             _ => Err("not a regular file"),
+        };
+        if result.is_ok() {
+            crate::memory::page_cache::invalidate(id);
         }
+        result
     }
 
     pub fn link_target(&mut self, id: usize) -> Option<String> {
@@ -830,7 +842,7 @@ impl Vfs {
             return Err("permission denied");
         }
         self.touch(id, DIRTY_DATA);
-        match &mut self.nodes[id].kind {
+        let result = match &mut self.nodes[id].kind {
             NodeKind::File(body) => {
                 body.adopt(Vec::new());
                 body.detach();
@@ -838,7 +850,11 @@ impl Vfs {
             }
             NodeKind::Device(_) => Ok(()),
             _ => Err("not a regular file"),
+        };
+        if result.is_ok() {
+            crate::memory::page_cache::invalidate(id);
         }
+        result
     }
 
     pub fn list_detailed(&self, cwd: usize, path: &str) -> Result<Vec<(String, usize)>, &'static str> {

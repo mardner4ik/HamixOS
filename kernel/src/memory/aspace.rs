@@ -16,6 +16,7 @@ pub struct LazyRegion {
     pub start: u64,
     pub offset: u64,
     pub file_len: u64,
+    pub private: bool,
 }
 
 pub fn is_user_range(addr: u64, len: u64) -> bool {
@@ -109,7 +110,7 @@ impl AddressSpace {
     }
 
     pub fn map_lazy(&mut self, start: u64, len: u64, region: LazyRegion) -> bool {
-        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len) {
+        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len && r.private == region.private) {
             Some(i) => i,
             None => {
                 self.lazy.push(region);
@@ -137,7 +138,7 @@ impl AddressSpace {
     }
 
     pub fn map_zero(&mut self, start: u64, len: u64) -> bool {
-        self.map_lazy(start, len, LazyRegion { node: ANON_NODE, start: 0, offset: 0, file_len: 0 })
+        self.map_lazy(start, len, LazyRegion { node: ANON_NODE, start: 0, offset: 0, file_len: 0, private: true })
     }
 
     pub fn occupied(&self, virt: u64) -> bool {
@@ -173,7 +174,29 @@ impl AddressSpace {
             let n = data.len().min(PAGE_SIZE as usize);
             core::ptr::copy_nonoverlapping(data.as_ptr(), phys as *mut u8, n);
             pte::sync_code(phys as u64, PAGE_SIZE);
-            *slot = pte::user_page(phys as u64, true, false);
+            *slot = pte::user_page_prot(phys as u64, true, pte::prot_of(*slot));
+        }
+        pte::barrier();
+        true
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    pub fn fill_lazy_shared(&mut self, virt: u64, index: usize, phys: usize, private: bool) -> bool {
+        unsafe {
+            let Some(slot) = self.entry(virt, false) else {
+                frame::free_frame(phys);
+                return false;
+            };
+            if pte::valid(*slot) || !pte::is_lazy(*slot) || pte::lazy_index(*slot) != index {
+                frame::free_frame(phys);
+                return false;
+            }
+            let prot = pte::prot_of(*slot);
+            let mut entry = pte::user_page_prot(phys as u64, true, prot);
+            if private && prot & pte::PROT_WRITE != 0 {
+                entry = pte::make_cow(entry);
+            }
+            *slot = entry;
         }
         pte::barrier();
         true
