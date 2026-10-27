@@ -114,6 +114,17 @@ impl Event {
         let name = reader.uint();
         (reader.is_valid() && reader.remaining() == 0).then_some(name)
     }
+
+    pub fn display_error(&self) -> Option<DisplayError> {
+        if self.object != DISPLAY || self.opcode != 0 {
+            return None;
+        }
+        let mut reader = self.reader();
+        let object = reader.uint();
+        let code = reader.uint();
+        let message = reader.string();
+        (reader.is_valid() && reader.remaining() == 0).then_some(DisplayError { object, code, message })
+    }
 }
 
 pub struct RegistryGlobal {
@@ -130,6 +141,12 @@ impl RegistryGlobal {
         }
         Some(conn.bind(registry, self.name, &self.interface, version))
     }
+}
+
+pub struct DisplayError {
+    pub object: u32,
+    pub code: u32,
+    pub message: String,
 }
 
 pub struct Connection {
