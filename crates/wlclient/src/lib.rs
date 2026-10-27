@@ -10,6 +10,8 @@ mod posix;
 
 pub const DISPLAY: u32 = 1;
 
+const MAX_INPUT_BUFFER: usize = 1 << 20;
+const MAX_PENDING_EVENTS: usize = 4096;
 const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = 1;
 const SOCK_CLOEXEC: c_int = 0o2000000;
@@ -214,25 +216,43 @@ impl Connection {
                 break;
             }
             if n < 0 {
-                if posix::errno() == EINTR {
-                    continue;
+                match posix::errno() {
+                    EINTR => continue,
+                    EAGAIN => break,
+                    _ => {
+                        self.alive = false;
+                        break;
+                    }
                 }
-                break;
             }
             close_received(&control, msg.controllen);
-            self.input.extend_from_slice(&buf[..n as usize]);
-        }
-        while self.input.len() >= wlwire::HEADER_SIZE {
-            let Some(header) = wlwire::decode_header(&self.input) else {
+            if self.input.len().saturating_add(n as usize) > MAX_INPUT_BUFFER {
+                self.alive = false;
                 self.input.clear();
                 break;
-            };
-            if self.input.len() < header.size {
+            }
+            self.input.extend_from_slice(&buf[..n as usize]);
+            while self.input.len() >= wlwire::HEADER_SIZE {
+                let Some(header) = wlwire::decode_header(&self.input) else {
+                    self.alive = false;
+                    self.input.clear();
+                    break;
+                };
+                if self.input.len() < header.size {
+                    break;
+                }
+                if self.events.len() >= MAX_PENDING_EVENTS {
+                    self.alive = false;
+                    self.input.clear();
+                    break;
+                }
+                let body = self.input[wlwire::HEADER_SIZE..header.size].to_vec();
+                self.input.drain(..header.size);
+                self.events.push_back(Event { object: header.object, opcode: header.opcode, body });
+            }
+            if !self.alive {
                 break;
             }
-            let body = self.input[wlwire::HEADER_SIZE..header.size].to_vec();
-            self.input.drain(..header.size);
-            self.events.push_back(Event { object: header.object, opcode: header.opcode, body });
         }
     }
 
