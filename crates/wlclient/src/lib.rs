@@ -125,6 +125,19 @@ impl Event {
         let message = reader.string();
         (reader.is_valid() && reader.remaining() == 0).then_some(DisplayError { object, code, message })
     }
+
+    pub fn display_delete_id(&self) -> Option<u32> {
+        if self.object != DISPLAY || self.opcode != 1 {
+            return None;
+        }
+        let mut reader = self.reader();
+        let id = reader.uint();
+        (reader.is_valid() && reader.remaining() == 0).then_some(id)
+    }
+
+    pub fn buffer_release(&self, buffer: u32) -> bool {
+        self.object == buffer && self.opcode == 0 && self.body.is_empty()
+    }
 }
 
 pub struct RegistryGlobal {
