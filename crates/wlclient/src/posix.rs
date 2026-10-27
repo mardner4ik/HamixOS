@@ -4,6 +4,9 @@ use core::ffi::{c_char, c_int, c_long};
 
 const O_RDONLY: c_int = 0;
 const O_CLOEXEC: c_int = 0o2000000;
+const O_NONBLOCK: c_int = 0o4000;
+const F_GETFL: c_int = 3;
+const F_SETFL: c_int = 4;
 const POLLIN: i16 = 1;
 const POLLOUT: i16 = 4;
 
@@ -33,6 +36,7 @@ unsafe extern "C" {
     fn getenv(name: *const c_char) -> *const c_char;
     fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
     fn __errno_location() -> *mut c_int;
+    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
 }
 
 pub fn errno() -> i32 {
@@ -84,11 +88,19 @@ pub fn socket_address(path: &str) -> (SockaddrUn, u32) {
     (addr, (2 + len + 1) as u32)
 }
 
-pub fn wait_readable(fds: &[i32], timeout_ms: i64) -> Vec<bool> {
-    let mut pollfds: Vec<Pollfd> = fds.iter().map(|&fd| Pollfd { fd, events: POLLIN, revents: 0 }).collect();
-    let ptr = if pollfds.is_empty() { core::ptr::null_mut() } else { pollfds.as_mut_ptr() };
-    unsafe { poll(ptr, pollfds.len() as u64, timeout_ms.clamp(-1, i32::MAX as i64) as i32) };
-    pollfds.iter().map(|fd| fd.revents & (POLLIN | 0x8 | 0x10) != 0).collect()
+pub fn set_nonblocking(fd: i32) -> bool {
+    let flags = unsafe { fcntl(fd, F_GETFL) };
+    flags >= 0 && unsafe { fcntl(fd, F_SETFL, flags | O_NONBLOCK) } == 0
+}
+
+pub fn wait_connection(fd: i32, writable: bool, timeout_ms: i64) -> bool {
+    let mut events = POLLIN;
+    if writable {
+        events |= POLLOUT;
+    }
+    let mut pollfd = Pollfd { fd, events, revents: 0 };
+    (unsafe { poll(&mut pollfd, 1, timeout_ms.clamp(-1, i32::MAX as i64) as i32) }) > 0
+        && pollfd.revents & (POLLIN | POLLOUT | 0x8 | 0x10) != 0
 }
 
 pub fn wait_writable(fd: i32, timeout_ms: i32) -> bool {

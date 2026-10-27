@@ -107,6 +107,10 @@ impl Connection {
             unsafe { close(fd) };
             return Err("cannot connect to the Wayland compositor");
         }
+        if !posix::set_nonblocking(fd) {
+            unsafe { close(fd) };
+            return Err("cannot make the Wayland connection nonblocking");
+        }
         Ok(Connection { fd, next_id: 2, input: Vec::new(), output: Vec::new(), events: VecDeque::new(), alive: true })
     }
 
@@ -136,16 +140,18 @@ impl Connection {
             if n < 0 {
                 match posix::errno() {
                     EINTR => continue,
-                    EAGAIN => {
-                        posix::wait_readable(&[], 1);
-                        continue;
-                    }
+                    EAGAIN => break,
                     _ => {
                         self.alive = false;
                         self.output.clear();
                         return;
                     }
                 }
+            }
+            if n == 0 {
+                self.alive = false;
+                self.output.clear();
+                return;
             }
             self.output.drain(..n as usize);
         }
@@ -201,7 +207,7 @@ impl Connection {
     }
 
     pub fn wait(&self, timeout_ms: i64) -> bool {
-        posix::wait_readable(&[self.fd], timeout_ms).first().copied().unwrap_or(false)
+        posix::wait_connection(self.fd, !self.output.is_empty(), timeout_ms)
     }
 
     pub fn read(&mut self) {
