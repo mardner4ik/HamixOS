@@ -90,6 +90,32 @@ impl Event {
     pub fn reader(&self) -> Reader<'_> {
         Reader::new(&self.body)
     }
+
+    pub fn registry_global(&self) -> Option<RegistryGlobal> {
+        if self.opcode != 0 {
+            return None;
+        }
+        let mut reader = self.reader();
+        let name = reader.uint();
+        let interface = reader.string();
+        let version = reader.uint();
+        (reader.is_valid() && reader.remaining() == 0).then_some(RegistryGlobal { name, interface, version })
+    }
+
+    pub fn registry_remove(&self) -> Option<u32> {
+        if self.opcode != 1 {
+            return None;
+        }
+        let mut reader = self.reader();
+        let name = reader.uint();
+        (reader.is_valid() && reader.remaining() == 0).then_some(name)
+    }
+}
+
+pub struct RegistryGlobal {
+    pub name: u32,
+    pub interface: String,
+    pub version: u32,
 }
 
 pub struct Connection {
