@@ -2,8 +2,10 @@
 
 ## From the desktop
 
-Boot the ISO ("HamixOS 0.4 Live"), log in as `user` / `user`, run `startx` and
-double-click **Install HamixOS**. The installer asks for:
+Boot the live ISO and sign in at the graphical login screen as `user` / `user`.
+The default Nook session starts automatically. If you logged in on a text
+console instead, run `startx` to start Nook, then double-click **Install
+HamixOS**. The installer asks for:
 
 1. the disk (SATA/AHCI or IDE; the whole disk is erased),
 2. the user name and password, whether the user is an administrator (sudo),
@@ -15,7 +17,7 @@ double-click **Install HamixOS**. The installer asks for:
 ## What happens
 
 `hxinstall` writes a `KEY=value` file to `/tmp` (mode 600) and runs
-`hsh /usr/share/hamix/install.sh <file>`. The script prints `@step`,
+`bash /usr/share/hamix/install.sh <file>`. The script prints `@step`,
 `@detail`, `@error` and `@done` lines that the window turns into progress.
 Everything it does is available in the shell:
 

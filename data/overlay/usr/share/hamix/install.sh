@@ -70,8 +70,8 @@ fi
 chpasswd --root $TARGET root "$ROOT_PASSWORD" || fail "cannot set the root password"
 hostname --root $TARGET $HOSTNAME
 setconf $TARGET/etc/hamix/login.conf autostart_desktop $AUTOSTART
-setconf $TARGET/etc/os-release PRETTY_NAME "\"HamixOS 0.6\""
-echo "Welcome to HamixOS. Type help for the list of commands, startx for the desktop." > $TARGET/etc/motd
+setconf $TARGET/etc/os-release PRETTY_NAME "\"HamixOS 0.6.1\""
+echo "Welcome to HamixOS. On a text console, type startx for Nook; type help for shell commands." > $TARGET/etc/motd
 
 echo "@step 5 Installing the boot loader"
 bootinstall $DISK --root $TARGET || fail "cannot install the boot loader"
