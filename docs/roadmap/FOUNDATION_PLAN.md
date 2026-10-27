@@ -971,7 +971,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 - [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені
 - [ ] `Source::Wayland` у вікнах сцени; композиція прямо з пулу клієнта; release при заміні
 - [ ] Рамка Nook через `zxdg_decoration_manager_v1`; CSD-клієнти без рамки
-- [ ] Frame-колбеки за видимістю
+- [~] Frame-колбеки: відкладення до позиціювання і фільтр поверхонь поза виходом; повне врахування оклюзії ще потрібне
 - Ворота: foot, GTK3-Wayland, hxtoolkit-Wayland у Nook без `hxwayland`; `native-wayland-zero-copy`
 
 ### W2. Nook Wayland: оболонка і робочий стіл (1 тиждень)

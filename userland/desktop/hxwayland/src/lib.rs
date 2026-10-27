@@ -1315,6 +1315,17 @@ impl Bridge {
         }
     }
 
+    fn surface_visible(surface: &Surface, placed: &BTreeMap<u32, (i32, i32)>, screen: (u32, u32)) -> bool {
+        let Some(window) = surface.window.as_ref() else {
+            return false;
+        };
+        let Some(&(x, y)) = placed.get(&window.id) else {
+            return false;
+        };
+        let (w, h) = (window.width.min(i32::MAX as u32) as i32, window.height.min(i32::MAX as u32) as i32);
+        w > 0 && h > 0 && x < screen.0 as i32 && y < screen.1 as i32 && x.saturating_add(w) > 0 && y.saturating_add(h) > 0
+    }
+
     fn flush_frames(&mut self) {
         let now = sys::uptime_ms();
         if now.saturating_sub(self.last_frame) < FRAME_MS {
@@ -1322,27 +1333,28 @@ impl Bridge {
         }
         self.last_frame = now;
         let time = self.now();
-        let ids: Vec<u32> = self.clients.keys().copied().collect();
-        let mut callbacks: Vec<u32> = Vec::new();
-        for cid in ids {
-            callbacks.clear();
-            match self.clients.get_mut(&cid) {
-                Some(client) => {
-                    for surface in client.surfaces.values_mut() {
-                        callbacks.append(&mut surface.frames);
-                    }
+        let placed = &self.placed;
+        let screen = self.screen;
+        let mut callbacks: Vec<(u32, u32)> = Vec::new();
+        for (cid, client) in self.clients.iter_mut() {
+            for surface in client.surfaces.values_mut() {
+                if Self::surface_visible(surface, placed, screen) {
+                    callbacks.extend(core::mem::take(&mut surface.frames).into_iter().map(|callback| (*cid, callback)));
                 }
-                None => continue,
             }
-            for callback in core::mem::take(&mut callbacks) {
-                self.post(cid, Message::new(callback, 0).u32(time).finish());
-                self.destroy(cid, callback);
-            }
+        }
+        for (cid, callback) in callbacks {
+            self.post(cid, Message::new(callback, 0).u32(time).finish());
+            self.destroy(cid, callback);
         }
     }
 
     fn frames_waiting(&self) -> bool {
-        self.clients.values().any(|c| c.surfaces.values().any(|s| !s.frames.is_empty()))
+        let placed = &self.placed;
+        let screen = self.screen;
+        self.clients.values().any(|client| {
+            client.surfaces.values().any(|surface| !surface.frames.is_empty() && Self::surface_visible(surface, placed, screen))
+        })
     }
 
     fn server_event(&mut self, event: Event) {
