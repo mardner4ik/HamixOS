@@ -49,6 +49,47 @@ core::arch::global_asm!(
     "hx_vdso_clock_end:",
     ".global hx_vdso_gettimeofday_start",
     "hx_vdso_gettimeofday_start:",
+    "mov %rdi, %r11",
+    "mov %rsi, %r9",
+    "movabs $0x0000009ffffff000, %r8",
+    "mov 8(%r8), %rcx",
+    "lfence",
+    "rdtsc",
+    "shl $32, %rdx",
+    "or %rdx, %rax",
+    "sub %rcx, %rax",
+    "mov 16(%r8), %rcx",
+    "test %rcx, %rcx",
+    "jz 5f",
+    "mov $1000000, %r10",
+    "mul %r10",
+    "div %rcx",
+    "mov 24(%r8), %rcx",
+    "test %rcx, %rcx",
+    "jz 5f",
+    "imul $1000000000, %rcx, %rcx",
+    "add %rcx, %rax",
+    "xor %edx, %edx",
+    "mov $1000000000, %rcx",
+    "div %rcx",
+    "test %r11, %r11",
+    "jz 6f",
+    "mov %rax, (%r11)",
+    "mov %rdx, %rax",
+    "xor %edx, %edx",
+    "mov $1000, %rcx",
+    "div %rcx",
+    "mov %rax, 8(%r11)",
+    "6:",
+    "test %r9, %r9",
+    "jz 7f",
+    "movq $0, (%r9)",
+    "7:",
+    "xor %eax, %eax",
+    "ret",
+    "5:",
+    "mov %r11, %rdi",
+    "mov %r9, %rsi",
     "mov $96, %eax",
     "syscall",
     "ret",
@@ -56,6 +97,35 @@ core::arch::global_asm!(
     "hx_vdso_gettimeofday_end:",
     ".global hx_vdso_time_start",
     "hx_vdso_time_start:",
+    "mov %rdi, %r11",
+    "movabs $0x0000009ffffff000, %r8",
+    "mov 8(%r8), %rcx",
+    "lfence",
+    "rdtsc",
+    "shl $32, %rdx",
+    "or %rdx, %rax",
+    "sub %rcx, %rax",
+    "mov 16(%r8), %rcx",
+    "test %rcx, %rcx",
+    "jz 8f",
+    "mov $1000000, %r10",
+    "mul %r10",
+    "div %rcx",
+    "mov 24(%r8), %rcx",
+    "test %rcx, %rcx",
+    "jz 8f",
+    "imul $1000000000, %rcx, %rcx",
+    "add %rcx, %rax",
+    "xor %edx, %edx",
+    "mov $1000000000, %rcx",
+    "div %rcx",
+    "test %r11, %r11",
+    "jz 9f",
+    "mov %rax, (%r11)",
+    "9:",
+    "ret",
+    "8:",
+    "mov %r11, %rdi",
     "mov $201, %eax",
     "syscall",
     "ret",
@@ -80,7 +150,7 @@ const CLOCK_CODE: usize = 0x500;
 const GETTIMEOFDAY_CODE: usize = 0x600;
 
 #[cfg(target_arch = "x86_64")]
-const TIME_CODE: usize = 0x610;
+const TIME_CODE: usize = 0x700;
 
 #[cfg(target_arch = "x86_64")]
 static VVAR_FRAME: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -205,12 +275,14 @@ fn image() -> [u8; PAGE] {
     let time_start = &raw const hx_vdso_time_start;
     let time_end = &raw const hx_vdso_time_end;
     let clock_len = clock_end as usize - clock_start as usize;
+    let gettimeofday_len = gettimeofday_end as usize - gettimeofday_start as usize;
+    let time_len = time_end as usize - time_start as usize;
     copy_code(&mut page, CLOCK_CODE, clock_start, clock_end);
     copy_code(&mut page, GETTIMEOFDAY_CODE, gettimeofday_start, gettimeofday_end);
     copy_code(&mut page, TIME_CODE, time_start, time_end);
     symbol(&mut page, 0x358, 1, CLOCK_CODE as u64, clock_len as u64);
-    symbol(&mut page, 0x370, 22, GETTIMEOFDAY_CODE as u64, 8);
-    symbol(&mut page, 0x388, 42, TIME_CODE as u64, 8);
+    symbol(&mut page, 0x370, 22, GETTIMEOFDAY_CODE as u64, gettimeofday_len as u64);
+    symbol(&mut page, 0x388, 42, TIME_CODE as u64, time_len as u64);
 
     put32(&mut page, 0x3c0, 1);
     put32(&mut page, 0x3c4, 4);
