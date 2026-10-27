@@ -21,6 +21,7 @@ pub mod pipe;
 pub mod pty;
 pub mod registry;
 pub mod switch;
+pub mod vdso;
 
 pub type Pid = u32;
 

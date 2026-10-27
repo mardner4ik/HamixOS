@@ -107,6 +107,7 @@ const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 const AT_HWCAP2: u64 = 26;
 const AT_EXECFN: u64 = 31;
+const AT_SYSINFO_EHDR: u64 = 33;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -402,7 +403,7 @@ fn build_stack(aspace: &mut AddressSpace, spec: &StackSpec, main: &Loaded, elf: 
     let at = |off: usize| blob_start + off as u64;
     let phdr = main.phdr.unwrap_or_else(|| at(phdr_off.unwrap_or(0)));
 
-    let auxv: [(u64, u64); 18] = [
+    let mut auxv: Vec<(u64, u64)> = alloc::vec![
         (AT_PHDR, phdr),
         (AT_PHENT, core::mem::size_of::<Elf64ProgramHeader>() as u64),
         (AT_PHNUM, main.phnum),
@@ -422,6 +423,8 @@ fn build_stack(aspace: &mut AddressSpace, spec: &StackSpec, main: &Loaded, elf: 
         (AT_CLKTCK, 100),
         (AT_EXECFN, at(execfn_off)),
     ];
+    #[cfg(target_arch = "x86_64")]
+    auxv.push((AT_SYSINFO_EHDR, crate::task::vdso::BASE));
 
     let mut words: Vec<u64> = Vec::with_capacity(4 + offsets.len() + 2 * (auxv.len() + 1));
     words.push(spec.args.len() as u64);
@@ -462,6 +465,9 @@ pub(super) fn assemble(main: &Elf, main_bias: u64, interp: Option<(&Elf, u64)>, 
             }
             None => (loaded.entry, 0),
         };
+        if !crate::task::vdso::install(&mut aspace) {
+            return Err("out of memory mapping vDSO");
+        }
         let sp = build_stack(&mut aspace, spec, &loaded, main, interp_base)?;
         if !map_trampoline(&mut aspace) {
             return Err("out of memory");
