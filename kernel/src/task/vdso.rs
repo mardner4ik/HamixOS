@@ -131,6 +131,29 @@ core::arch::global_asm!(
     "ret",
     ".global hx_vdso_time_end",
     "hx_vdso_time_end:",
+    ".global hx_vdso_getcpu_start",
+    "hx_vdso_getcpu_start:",
+    "movabs $0x0000009ffffff000, %r8",
+    "cmpq $0, 32(%r8)",
+    "je 10f",
+    "rdtscp",
+    "lfence",
+    "test %rdi, %rdi",
+    "jz 11f",
+    "mov %ecx, (%rdi)",
+    "11:",
+    "test %rsi, %rsi",
+    "jz 12f",
+    "movl $0, (%rsi)",
+    "12:",
+    "xor %eax, %eax",
+    "ret",
+    "10:",
+    "mov $309, %eax",
+    "syscall",
+    "ret",
+    ".global hx_vdso_getcpu_end",
+    "hx_vdso_getcpu_end:",
     options(att_syntax)
 );
 
@@ -153,6 +176,9 @@ const GETTIMEOFDAY_CODE: usize = 0x600;
 const TIME_CODE: usize = 0x700;
 
 #[cfg(target_arch = "x86_64")]
+const GETCPU_CODE: usize = 0x800;
+
+#[cfg(target_arch = "x86_64")]
 static VVAR_FRAME: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(target_arch = "x86_64")]
@@ -163,6 +189,8 @@ unsafe extern "C" {
     static hx_vdso_gettimeofday_end: u8;
     static hx_vdso_time_start: u8;
     static hx_vdso_time_end: u8;
+    static hx_vdso_getcpu_start: u8;
+    static hx_vdso_getcpu_end: u8;
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -185,6 +213,7 @@ fn shared_vvar() -> Option<usize> {
         data.add(1).write(base);
         data.add(2).write(khz);
         data.add(3).write(crate::drivers::rtc::boot_epoch());
+        data.add(4).write(crate::arch::x86_64::smp::rdtscp_supported() as u64);
     }
     match VVAR_FRAME.compare_exchange(0, frame, Ordering::Release, Ordering::Acquire) {
         Ok(_) => Some(frame),
@@ -261,12 +290,12 @@ fn image() -> [u8; PAGE] {
 
     dynamic(&mut page, 0x200, 4, 0x3c0);
     dynamic(&mut page, 0x210, 5, 0x300);
-    dynamic(&mut page, 0x220, 10, 54);
+    dynamic(&mut page, 0x220, 10, 68);
     dynamic(&mut page, 0x230, 6, 0x340);
     dynamic(&mut page, 0x240, 11, 24);
     dynamic(&mut page, 0x250, 0, 0);
 
-    let strings = b"\0__vdso_clock_gettime\0__vdso_gettimeofday\0__vdso_time\0";
+    let strings = b"\0__vdso_clock_gettime\0__vdso_gettimeofday\0__vdso_time\0__vdso_getcpu\0";
     page[0x300..0x300 + strings.len()].copy_from_slice(strings);
     let clock_start = &raw const hx_vdso_clock_start;
     let clock_end = &raw const hx_vdso_clock_end;
@@ -274,23 +303,29 @@ fn image() -> [u8; PAGE] {
     let gettimeofday_end = &raw const hx_vdso_gettimeofday_end;
     let time_start = &raw const hx_vdso_time_start;
     let time_end = &raw const hx_vdso_time_end;
+    let getcpu_start = &raw const hx_vdso_getcpu_start;
+    let getcpu_end = &raw const hx_vdso_getcpu_end;
     let clock_len = clock_end as usize - clock_start as usize;
     let gettimeofday_len = gettimeofday_end as usize - gettimeofday_start as usize;
     let time_len = time_end as usize - time_start as usize;
+    let getcpu_len = getcpu_end as usize - getcpu_start as usize;
     copy_code(&mut page, CLOCK_CODE, clock_start, clock_end);
     copy_code(&mut page, GETTIMEOFDAY_CODE, gettimeofday_start, gettimeofday_end);
     copy_code(&mut page, TIME_CODE, time_start, time_end);
+    copy_code(&mut page, GETCPU_CODE, getcpu_start, getcpu_end);
     symbol(&mut page, 0x358, 1, CLOCK_CODE as u64, clock_len as u64);
     symbol(&mut page, 0x370, 22, GETTIMEOFDAY_CODE as u64, gettimeofday_len as u64);
     symbol(&mut page, 0x388, 42, TIME_CODE as u64, time_len as u64);
+    symbol(&mut page, 0x3a0, 54, GETCPU_CODE as u64, getcpu_len as u64);
 
     put32(&mut page, 0x3c0, 1);
-    put32(&mut page, 0x3c4, 4);
+    put32(&mut page, 0x3c4, 5);
     put32(&mut page, 0x3c8, 1);
     put32(&mut page, 0x3cc, 0);
     put32(&mut page, 0x3d0, 2);
     put32(&mut page, 0x3d4, 3);
-    put32(&mut page, 0x3d8, 0);
+    put32(&mut page, 0x3d8, 4);
+    put32(&mut page, 0x3dc, 0);
 
     page
 }

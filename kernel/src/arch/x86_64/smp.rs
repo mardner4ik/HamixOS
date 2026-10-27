@@ -8,6 +8,7 @@ const AP_STACK_SIZE: usize = 64 * 1024;
 const AP_DF_STACK_SIZE: usize = 16 * 1024;
 const IA32_GS_BASE: u32 = 0xC000_0101;
 const IA32_KERNEL_GS_BASE: u32 = 0xC000_0102;
+const IA32_TSC_AUX: u32 = 0xC000_0103;
 
 #[repr(C)]
 pub struct PerCpu {
@@ -41,12 +42,21 @@ pub fn cpu_id() -> usize {
     id as usize
 }
 
+pub fn rdtscp_supported() -> bool {
+    let maximum = core::arch::x86_64::__cpuid(0x8000_0000).eax;
+    maximum >= 0x8000_0001
+        && core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 27) != 0
+}
+
 fn install_percpu(cpu: usize) {
     unsafe {
         let per = ((&raw mut PER_CPU) as *mut PerCpu).add(cpu);
         (*per).cpu = cpu as u64;
         write_msr(IA32_GS_BASE, per as u64);
         write_msr(IA32_KERNEL_GS_BASE, per as u64);
+        if rdtscp_supported() {
+            write_msr(IA32_TSC_AUX, cpu as u64);
+        }
     }
 }
 
