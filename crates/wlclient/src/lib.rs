@@ -6,7 +6,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ffi::{c_char, c_int, c_void};
-use hxproto::client::posix;
+mod posix;
 
 pub const DISPLAY: u32 = 1;
 
@@ -151,8 +151,11 @@ impl Connection {
 
     pub fn send_fd(&mut self, bytes: Vec<u8>, fd: i32) {
         self.flush();
+        if !self.alive || bytes.is_empty() {
+            return;
+        }
         let mut data = bytes;
-        let mut iov = Iovec { base: data.as_mut_ptr() as *mut c_void, len: data.len() };
+        let mut offset = 0usize;
         let mut control = [0u64; 3];
         let raw = control.as_mut_ptr() as *mut u8;
         unsafe {
@@ -161,9 +164,37 @@ impl Connection {
             core::ptr::write_unaligned(raw.add(12) as *mut i32, SCM_RIGHTS);
             core::ptr::write_unaligned(raw.add(16) as *mut i32, fd);
         }
-        let msg = Msghdr { name: core::ptr::null_mut(), namelen: 0, iov: &mut iov, iovlen: 1, control: raw as *mut c_void, controllen: 24, flags: 0 };
-        if unsafe { sendmsg(self.fd, &msg, MSG_NOSIGNAL) } < 0 {
-            self.alive = false;
+        loop {
+            let mut iov = Iovec { base: unsafe { data.as_mut_ptr().add(offset) } as *mut c_void, len: data.len() - offset };
+            let with_fd = offset == 0;
+            let msg = Msghdr {
+                name: core::ptr::null_mut(),
+                namelen: 0,
+                iov: &mut iov,
+                iovlen: 1,
+                control: if with_fd { raw as *mut c_void } else { core::ptr::null_mut() },
+                controllen: if with_fd { 24 } else { 0 },
+                flags: 0,
+            };
+            let sent = unsafe { sendmsg(self.fd, &msg, MSG_NOSIGNAL) };
+            if sent < 0 {
+                match posix::errno() {
+                    EINTR => continue,
+                    EAGAIN if posix::wait_writable(self.fd, -1) => continue,
+                    _ => {
+                        self.alive = false;
+                        return;
+                    }
+                }
+            }
+            if sent == 0 {
+                self.alive = false;
+                return;
+            }
+            offset += sent as usize;
+            if offset == data.len() {
+                return;
+            }
         }
     }
 
@@ -301,8 +332,13 @@ pub struct ShmBuffer {
 
 impl ShmBuffer {
     pub fn create(conn: &mut Connection, shm: u32, width: u32, height: u32, format: u32) -> Option<ShmBuffer> {
-        let bytes = width as usize * height as usize * 4;
-        if bytes == 0 {
+        const MAX_DIMENSION: u32 = 16_384;
+        const MAX_BYTES: usize = 128 << 20;
+        if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return None;
+        }
+        let bytes = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        if bytes > MAX_BYTES {
             return None;
         }
         let name = b"wlclient\0";
