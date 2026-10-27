@@ -967,7 +967,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 - Ворота: усі boot-тести; старт GTK-програми ≥ 2× швидше в QEMU 1 CPU
 
 ### W1. Nook Wayland: ядро протоколу (2 тижні)
-- [~] `crates/wlwire`: спільний `no_std` encoder/reader для hxwayland; підключити клієнт `wlclient`
+- [~] `crates/wlwire`: спільний `no_std` encoder/reader/header decoder для hxwayland і `wlclient`
 - [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені
 - [ ] `Source::Wayland` у вікнах сцени; композиція прямо з пулу клієнта; release при заміні
 - [ ] Рамка Nook через `zxdg_decoration_manager_v1`; CSD-клієнти без рамки

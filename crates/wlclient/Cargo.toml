@@ -1,0 +1,9 @@
+[package]
+name = "wlclient"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal no_std Wayland client wire layer for HamixOS (connection, messages, fd passing, shm buffers)"
+
+[dependencies]
+hxproto = { path = "../hxproto", features = ["client"] }
+wlwire = { path = "../wlwire" }
