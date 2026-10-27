@@ -30,6 +30,7 @@ pub fn decode_header(data: &[u8]) -> Option<Header> {
 
 pub struct Message {
     buf: Vec<u8>,
+    valid: bool,
 }
 
 impl Message {
@@ -37,7 +38,7 @@ impl Message {
         let mut buf = Vec::with_capacity(32);
         buf.extend_from_slice(&object.to_le_bytes());
         buf.extend_from_slice(&(opcode as u32).to_le_bytes());
-        Self { buf }
+        Self { buf, valid: true }
     }
 
     pub fn u32(mut self, value: u32) -> Self {
@@ -62,7 +63,10 @@ impl Message {
     }
 
     pub fn string(mut self, text: &str) -> Self {
-        let len = text.len() + 1;
+        let Some(len) = text.len().checked_add(1).filter(|len| *len <= u32::MAX as usize) else {
+            self.valid = false;
+            return self;
+        };
         self.buf.extend_from_slice(&(len as u32).to_le_bytes());
         self.buf.extend_from_slice(text.as_bytes());
         self.buf.push(0);
@@ -73,6 +77,10 @@ impl Message {
     }
 
     pub fn array(mut self, data: &[u8]) -> Self {
+        if data.len() > u32::MAX as usize {
+            self.valid = false;
+            return self;
+        }
         self.buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
         self.buf.extend_from_slice(data);
         while self.buf.len() % 4 != 0 {
@@ -81,11 +89,18 @@ impl Message {
         self
     }
 
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(self) -> Vec<u8> {
+        self.try_finish().unwrap_or_default()
+    }
+
+    pub fn try_finish(mut self) -> Option<Vec<u8>> {
+        if !self.valid || self.buf.len() < HEADER_SIZE || self.buf.len() > MAX_MESSAGE_SIZE || self.buf.len() & 3 != 0 {
+            return None;
+        }
         let size = self.buf.len() as u32;
         let opcode = u32::from_le_bytes(self.buf[4..8].try_into().unwrap());
         self.buf[4..8].copy_from_slice(&((size << 16) | (opcode & 0xffff)).to_le_bytes());
-        self.buf
+        Some(self.buf)
     }
 }
 
