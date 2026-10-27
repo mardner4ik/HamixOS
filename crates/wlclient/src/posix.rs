@@ -151,3 +151,9 @@ pub fn wait_writable(fd: i32, timeout_ms: i32) -> bool {
         attempted = true;
     }
 }
+
+pub fn seal_shrink(fd: i32) -> bool {
+    const F_ADD_SEALS: c_int = 1033;
+    const F_SEAL_SHRINK: c_int = 2;
+    unsafe { fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) == 0 }
+}

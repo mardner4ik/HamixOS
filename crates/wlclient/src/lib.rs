@@ -536,6 +536,7 @@ impl ShmBuffer {
             unsafe { close(fd) };
             return None;
         }
+        posix::seal_shrink(fd);
         let addr = unsafe { mmap(core::ptr::null_mut(), bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) };
         if addr.is_null() {
             unsafe { munmap(addr, bytes) };
