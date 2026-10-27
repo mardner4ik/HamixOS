@@ -118,10 +118,10 @@ user@hamix:~$ startx
 ### Boot firmware
 
 The x86_64 live ISO contains BIOS boot via `hxboot` and a UEFI El Torito entry via GRUB EFI.
-UEFI boot from optical media is available. UEFI boot through Ventoy has not been verified; writing
-the ISO directly to a USB stick with `dd` currently provides the BIOS path. Native `hxboot-efi`,
-UEFI installation to a disk, and hardware validation are still in progress. The aarch64 port has
-its own EFI stub and ESP image.
+The image structure is verified; booting it under OVMF and on hardware is still pending. UEFI boot
+through Ventoy has not been verified; writing the ISO directly to a USB stick with `dd` currently
+provides the BIOS path. Native `hxboot-efi` and UEFI installation to a disk are still in progress.
+The aarch64 port has its own EFI stub and ESP image.
 
 To start the x86_64 ISO in UEFI mode with QEMU, pass an OVMF firmware image:
 
@@ -187,7 +187,6 @@ Tested on a Samsung R428 and a Lenovo ThinkPad L560, and in QEMU on x86_64, aarc
 | [NETWORK](docs/architecture/NETWORK.md) · [AUDIO](docs/architecture/AUDIO.md) · [VIDEO](docs/architecture/VIDEO.md) | networking, sound, video |
 | [LINUXULATOR](docs/architecture/LINUXULATOR.md) · [PANTRY](docs/guides/PANTRY.md) | running Linux programs and installing packages |
 | [PORTING](docs/guides/PORTING.md) | the aarch64 and riscv64 ports |
-| [docs/README](docs/README.md) | the full documentation index, ADRs and the Hamix ABI reference |
 | [CHANGES](CHANGES.md) | release notes |
 
 ## 🗂 Repository
