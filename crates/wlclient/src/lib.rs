@@ -118,6 +118,16 @@ pub struct RegistryGlobal {
     pub version: u32,
 }
 
+impl RegistryGlobal {
+    pub fn bind(&self, conn: &mut Connection, registry: u32, requested_version: u32) -> Option<u32> {
+        let version = requested_version.min(self.version);
+        if version == 0 || !conn.alive() {
+            return None;
+        }
+        Some(conn.bind(registry, self.name, &self.interface, version))
+    }
+}
+
 pub struct Connection {
     fd: c_int,
     next_id: u32,
