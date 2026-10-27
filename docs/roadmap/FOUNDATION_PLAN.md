@@ -903,7 +903,9 @@ hxboot має працювати з ним краще, ніж GRUB:
       Ventoy, час до `_start` ≤ 300 мс
 
 ### B2. hxboot: UEFI, встановлена система, підпис (2 тижні)
-- [ ] `hxboot-efi` (GOP, файли ESP, вхід у ядро в 32-бітному режимі); OVMF-тести
+- [~] Перший x86_64 UEFI шлях: GRUB EFI у El Torito для ISO з hxboot, multiboot2 і GOP framebuffer;
+      OVMF-перевірка ще не запускалась. Далі: власний `hxboot-efi` (GOP, файли ESP, передача ядру
+      у 32-бітному режимі), запуск встановленої системи з ESP, пряме UEFI-завантаження з USB та OVMF-тести
 - [ ] `hxboot-install` замість `grub-install`; Hamix Install на hxboot
 - [ ] Підпис ядра й initfs Ed25519, перевірка в hxboot, тег вимірювань для ядра
 - [ ] Ventoy (UEFI): `BlockIo` віртуального CD, змінна `VentoyOsParam`, persistence та injection, NTFS-флешка

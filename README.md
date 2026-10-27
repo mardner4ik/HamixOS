@@ -82,7 +82,7 @@
 <td valign="top">
 
 ### 🧰 Native apps
-- **hsh** shell with scripts, pipes and background jobs
+- **bash** 5.2 built natively on hxlibc as the system shell; HamixOS commands (`sudo`, `fetch`, `lsblk`, `startx`, ...) are separate programs
 - Terminal, Files, Notes, Images, Videos (own H.264/AAC decoder), Calculator, Monitor, Settings
 - Graphical installer with a real bootloader setup
 - Networking on smoltcp: Ethernet, Wi-Fi (WPA2), DHCP, DNS
@@ -115,6 +115,20 @@ user@hamix:~$ startx
 
 4. Double-click **Install HamixOS** on the desktop to put the system on a disk.
 
+### Boot firmware
+
+The x86_64 live ISO contains BIOS boot via `hxboot` and a UEFI El Torito entry via GRUB EFI.
+UEFI boot from optical media is available. UEFI boot through Ventoy has not been verified; writing
+the ISO directly to a USB stick with `dd` currently provides the BIOS path. Native `hxboot-efi`,
+UEFI installation to a disk, and hardware validation are still in progress. The aarch64 port has
+its own EFI stub and ESP image.
+
+To start the x86_64 ISO in UEFI mode with QEMU, pass an OVMF firmware image:
+
+```bash
+cargo xtask run -- -bios /usr/share/edk2/x64/OVMF.4m.fd
+```
+
 > [!TIP]
 > Install Linux software with `pantry install <package>` — the package appears in the application menu with its icon a few seconds later.
 
@@ -123,9 +137,12 @@ user@hamix:~$ startx
 <details>
 <summary><b>Requirements</b></summary>
 
-- Rust nightly with `rust-src`
-- `grub-mkrescue`, `grub-mkimage` (i386-pc), `xorriso`, `gzip`
-- `clang` and `ld.lld` for the C driver modules
+- Linux: Rust nightly with `rust-src` (rustup); OpenBSD or any host without rustup: the packaged stable
+  `rustc`/`cargo` -- xtask enables nightly features with `RUSTC_BOOTSTRAP` and downloads `rust-src` itself
+- `clang`, `ld.lld`, `llvm-objcopy`, `curl`, `xz`, `mkfs.vfat`, `mmd`, `mcopy`, and `grub-mkstandalone`
+  (the hxboot BIOS and GRUB UEFI entries in the ISO)
+- optional: `grub-mkrescue` and `xorriso` for a GRUB-built ISO (`--loader grub`)
+- OpenBSD: `doas sh tools/openbsd/tune-build.sh` once (login class, SMT, `noatime`, packages)
 - for regenerating the desktop artwork: Python 3 with Pillow and numpy, `rsvg-convert`, the Noto fonts
 
 </details>
@@ -133,13 +150,18 @@ user@hamix:~$ startx
 ```bash
 git clone https://github.com/mardner4ik/HamixOS.git
 cd HamixOS
-./build.sh                                  # kernel, modules, apps, live image, ISO
-./build.sh aarch64                          # or riscv64
+cargo xtask build                           # kernel, modules, userland, live image, out/hamix_os.iso
+cargo xtask build --profile core            # hamix-core: the native system without the Linux layer
+cargo xtask build --arch aarch64            # or riscv64
+cargo xtask run                             # boot the image in QEMU
+cargo xtask test                            # boot tests from tests/boot in QEMU
+cargo xtask lint-layers                     # nothing native may depend on layers/linux
 python3 tools/nook-assets/generate.py       # icons, Nook Icons, fonts, wallpapers
 ```
 
-`HAMIX_EXTRA=/some/dir ./build.sh` copies a directory on top of the live root
-filesystem — handy for videos, test files or prebuilt Linux packages.
+Everything generated lands in `out/`. `--extra DIR` (or `HAMIX_EXTRA=DIR`) copies a
+directory on top of the live root filesystem — handy for videos, test files or
+prebuilt Linux packages. `./build.sh` is a thin wrapper around `cargo xtask build`.
 
 ## 💻 Hardware
 
@@ -157,25 +179,69 @@ Tested on a Samsung R428 and a Lenovo ThinkPad L560, and in QEMU on x86_64, aarc
 
 | | |
 |---|---|
-| [INSTALL](docs/INSTALL.md) | installing to a disk and the boot process |
-| [HSH](docs/HSH.md) · [COMMANDS](docs/COMMANDS.md) | the shell and the command registry |
-| [HEXT](docs/HEXT.md) · [HXINIT](docs/HXINIT.md) | filesystem and system startup |
-| [XORG](docs/XORG.md) | Nook and the window protocol |
-| [MODULES](docs/MODULES.md) · [KPI_ROADMAP](docs/KPI_ROADMAP.md) | driver modules and the kernel programming interface |
-| [NETWORK](docs/NETWORK.md) · [AUDIO](docs/AUDIO.md) · [VIDEO](docs/VIDEO.md) | networking, sound, video |
-| [LINUXULATOR](docs/LINUXULATOR.md) · [PANTRY](docs/PANTRY.md) | running Linux programs and installing packages |
-| [PORTING](docs/PORTING.md) | the aarch64 and riscv64 ports |
+| [INSTALL](docs/guides/INSTALL.md) | installing to a disk and the boot process |
+| [HSH](docs/guides/HSH.md) · [COMMANDS](docs/guides/COMMANDS.md) | the shell and the command registry |
+| [HEXT](docs/architecture/HEXT.md) · [HXINIT](docs/architecture/HXINIT.md) | filesystem and system startup |
+| [XORG](docs/architecture/XORG.md) | Nook and the window protocol |
+| [MODULES](docs/architecture/MODULES.md) · [KPI_ROADMAP](docs/roadmap/KPI_ROADMAP.md) | driver modules and the kernel programming interface |
+| [NETWORK](docs/architecture/NETWORK.md) · [AUDIO](docs/architecture/AUDIO.md) · [VIDEO](docs/architecture/VIDEO.md) | networking, sound, video |
+| [LINUXULATOR](docs/architecture/LINUXULATOR.md) · [PANTRY](docs/guides/PANTRY.md) | running Linux programs and installing packages |
+| [PORTING](docs/guides/PORTING.md) | the aarch64 and riscv64 ports |
+| [docs/README](docs/README.md) | the full documentation index, ADRs and the Hamix ABI reference |
 | [CHANGES](CHANGES.md) | release notes |
 
 ## 🗂 Repository
 
 ```
-kernel/        the kernel: memory, scheduler, syscalls, VFS, drivers, Linux ABI
-drivers/       loadable driver modules (Rust and Linux C drivers)
-apps/          native programs: hsh, Nook (hxserver), hxwayland, Files, Terminal, …
-libs/ sdk/     shared crates: GUI toolkit, codecs, filesystem, KPI and app SDKs
-overlay/       files copied into the root filesystem: themes, icons, wallpapers
-tools/         asset generator, Linux sysroot and test helpers
+kernel/          the kernel (see "Kernel" below)
+modules/         loadable driver modules (Rust and Linux C drivers)
+sdk/             kernel module SDKs (hamix_kpi, hamix_linuxkpi) and the ABI headers
+hxlibc/          the C library: the full mlibc source tree with sysdeps/hamix (builds libhxc.so, ld.hx),
+  rust/          Rust side of the libc: hxlibc-sys (FFI to libhxc.so + HamixOS call numbers)
+crates/          portable Rust libraries with no OS dependency, usable by the kernel, tools and any OS:
+                 hext (filesystem format), hxvt (terminal emulator core), wlan (802.11), hxproto (display
+                 protocol + POSIX client), hxtoolkit (UI toolkit), vellum (2D drawing), imago (PNG, JPEG, GIF, BMP, ICO, QOI, TGA, PNM, SVG), codecs
+userland/        HamixOS's own programs and system libraries, one folder per program or library:
+  apps/          Nook apps (hxterm, hxfiles, hxnotes, ...)
+  core/          commands: hxutils, pantry, hxctl, hed
+  desktop/       hxserver (Nook), hxsettings, hxwayland
+  services/      hxsvc (PID 1), hx-authd, hxsound
+  libs/          libraries that talk to HamixOS: hxstd (runtime), hxport, hxclient, libhxproto (C .so)
+ports/           third-party software built from upstream sources (HXBUILD recipes), same roles:
+  apps/          foot, dillo
+  core/          bash, busybox, curl, lua, sqlite
+  desktop/       Enlightenment, Xwayland, xkbcomp
+  services/      dbus
+  libs/          Unix libraries: glib, cairo, gtk3, mesa, wayland, libX11, ...
+vendor/          third-party Rust crates kept in the tree: smoltcp, rust_h264, shiguredo_mp4
+layers/linux/    the Linux compatibility layer: Alpine root (/linux), adapters, overlay
+data/            files of the native image: overlay (icons, wallpapers, themes, /etc), GRUB menu
+tests/           boot tests run by `cargo xtask test`, C tests of hxlibc and the ports
+tools/           xtask, mkhext, asset generator, KPI helpers
+docs/            documentation, see docs/README.md
+out/             build output (not in git)
+```
+
+Layering, as in Redox: `hxlibc` (like relibc) is the only way programs reach the kernel;
+`userland/libs` (like libredox) wraps it for Rust; `crates/` never call the OS directly.
+
+### Kernel
+
+```
+kernel/src/
+  arch/          x86_64 (GDT, IDT, LAPIC, IOAPIC, ACPI, SMP), aarch64, riscv64
+  memory/        frames, paging, kernel heap, vmalloc
+  task/          processes, threads, scheduler, ELF loading, pipes, IPC
+  syscall/       the POSIX system call layer: table.rs (numbers + dispatch), base (files),
+                 process, signal (+ sigframe/), misc, special; ext/ = HamixOS extensions
+  linux/         the Linux personality: syscalls.rs (asm-generic numbering), paths.rs and
+                 loader.rs (the /linux namespace), mod.rs (enable/disable)
+  fs/            VFS, hext, iso9660, tar, procfs, epoll
+  net/           TCP/IP (smoltcp), AF_UNIX, sockets, AF_INET glue, netlink
+  tty/           consoles and VTs (vt.rs), ptys (pty.rs), termios
+  drivers/       PCI, storage, input, USB, video (+ DRM), audio, IRQ routing
+  module/        loadable modules: ELF loader, relocations, the KPI
+  hxinit.rs      the ordered boot units shown on screen
 ```
 
 ## 📄 License
@@ -184,7 +250,7 @@ HamixOS is released under the **GNU GPLv3**. Bundled third-party code keeps its
 own license: smoltcp (0BSD), the Linux e1000e driver (GPL-2.0), Atheros HAL
 tables (ISC), rust_h264 (MIT/Apache-2.0), shiguredo_mp4 (Apache-2.0), the
 Symphonia AAC decoder (MPL-2.0). Wallpaper photographs are from Wikimedia
-Commons, credits in `overlay/usr/share/wallpapers/CREDITS`.
+Commons, credits in `data/overlay/usr/share/wallpapers/CREDITS`.
 
 <div align="center">
 <sub>Made with 🦀 and Rust</sub>

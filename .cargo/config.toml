@@ -7,3 +7,9 @@ strip = false
 
 [unstable]
 json-target-spec = true
+
+[alias]
+xtask = "run -q --manifest-path tools/xtask/Cargo.toml --target-dir target/xtask --target host-tuple --"
+
+[env]
+RUSTC_BOOTSTRAP = "1"
