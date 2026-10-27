@@ -17,6 +17,7 @@ pub struct LazyRegion {
     pub offset: u64,
     pub file_len: u64,
     pub private: bool,
+    pub prot: u8,
 }
 
 pub fn is_user_range(addr: u64, len: u64) -> bool {
@@ -110,7 +111,7 @@ impl AddressSpace {
     }
 
     pub fn map_lazy(&mut self, start: u64, len: u64, region: LazyRegion) -> bool {
-        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len && r.private == region.private) {
+        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len && r.private == region.private && r.prot == region.prot) {
             Some(i) => i,
             None => {
                 self.lazy.push(region);
@@ -130,7 +131,7 @@ impl AddressSpace {
                 if pte::valid(*slot) && pte::owned(*slot) {
                     frame::free_frame(pte::addr(*slot) as usize);
                 }
-                *slot = pte::lazy(index);
+                *slot = pte::lazy_prot(index, region.prot);
             }
             page += PAGE_SIZE;
         }
@@ -138,7 +139,7 @@ impl AddressSpace {
     }
 
     pub fn map_zero(&mut self, start: u64, len: u64) -> bool {
-        self.map_lazy(start, len, LazyRegion { node: ANON_NODE, start: 0, offset: 0, file_len: 0, private: true })
+        self.map_lazy(start, len, LazyRegion { node: ANON_NODE, start: 0, offset: 0, file_len: 0, private: true, prot: pte::PROT_ALL })
     }
 
     pub fn occupied(&self, virt: u64) -> bool {

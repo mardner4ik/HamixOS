@@ -298,7 +298,11 @@ pub(super) fn load(aspace: &mut AddressSpace, elf: &Elf, bias: u64, limit: u64) 
         }
         if let Some(node) = elf.lazy {
             let page = start & !(PAGE_SIZE - 1);
-            let region = paging::LazyRegion { node, start: page, offset: ph.p_offset - (start - page), file_len: ph.p_offset + ph.p_filesz, private: true };
+            let mut prot = 0;
+            if ph.p_flags & 4 != 0 { prot |= paging::pte::PROT_READ; }
+            if ph.p_flags & 2 != 0 { prot |= paging::pte::PROT_WRITE; }
+            if ph.p_flags & 1 != 0 { prot |= paging::pte::PROT_EXEC; }
+            let region = paging::LazyRegion { node, start: page, offset: ph.p_offset - (start - page), file_len: ph.p_offset + ph.p_filesz, private: true, prot };
             if !aspace.map_lazy(page, seg_end - page, region) {
                 return Err("out of memory");
             }

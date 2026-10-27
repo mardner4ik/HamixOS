@@ -1049,7 +1049,7 @@ pub fn fault_in_range(addr: u64, len: u64) -> bool {
     true
 }
 
-pub fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, offset: u64) -> i64 {
+pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> i64 {
     if len == 0 || len > 1 << 36 || offset & (PAGE_SIZE - 1) != 0 {
         return EINVAL;
     }
@@ -1105,7 +1105,7 @@ pub fn sys_mmap(addr: u64, len: u64, _prot: u64, flags: u64, fd: u64, offset: u6
         };
         let aspace = t.aspace.as_mut().ok_or(ENOMEM)?;
         let ok = match lazy_file {
-            Some((node, file_len)) => aspace.map_lazy(base, size, paging::LazyRegion { node, start: base, offset, file_len, private: flags & MAP_SHARED == 0 }),
+            Some((node, file_len)) => aspace.map_lazy(base, size, paging::LazyRegion { node, start: base, offset, file_len, private: flags & MAP_SHARED == 0, prot: prot as u8 & 7 }),
             None => aspace.map_zero(base, size),
         };
         if !ok {
