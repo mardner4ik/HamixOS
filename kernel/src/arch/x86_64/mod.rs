@@ -201,3 +201,25 @@ pub fn write_msr(msr: u32, val: u64) {
         );
     }
 }
+static TSC_KHZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TSC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn calibrate_tsc() -> u64 {
+    use core::sync::atomic::Ordering;
+    let mut best = u64::MAX;
+    for _ in 0..3 {
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        pit_delay_us(10_000);
+        let spent = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(start);
+        best = best.min(spent);
+    }
+    let khz = if best == u64::MAX || best < 1_000 { 0 } else { best / 10 };
+    TSC_BASE.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
+    TSC_KHZ.store(khz, Ordering::Relaxed);
+    khz
+}
+
+pub fn vdso_clock_data() -> (u64, u64) {
+    use core::sync::atomic::Ordering;
+    (TSC_BASE.load(Ordering::Relaxed), TSC_KHZ.load(Ordering::Relaxed))
+}

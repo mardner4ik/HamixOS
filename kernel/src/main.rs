@@ -143,6 +143,7 @@ mod x86_64_main {
             arch::x86_64::paging::enable_kernel_write_combining(fb.addr, fb.byte_len());
         }
         drivers::video::text_mode::fb_clear_full();
+        arch::x86_64::calibrate_tsc();
         {
             let (free, total) = memory::frame::memory_info();
             hxinit::record("memory", "Physical memory", hxinit::ok(alloc::format!("{} MiB, {} MiB free, kernel heap grows on demand", total >> 20, free >> 20)));
