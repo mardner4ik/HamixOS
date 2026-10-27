@@ -21,6 +21,8 @@ const SOL_SOCKET: c_int = 1;
 const SCM_RIGHTS: c_int = 1;
 const MSG_DONTWAIT: c_int = 0x40;
 const MSG_NOSIGNAL: c_int = 0x4000;
+const MSG_CMSG_CLOEXEC: c_int = 0x40000000;
+const MSG_CTRUNC: c_int = 0x8;
 const MFD_CLOEXEC: u32 = 1;
 const PROT_READ: c_int = 1;
 const PROT_WRITE: c_int = 2;
@@ -94,6 +96,7 @@ pub struct Connection {
     input: Vec<u8>,
     output: Vec<u8>,
     events: VecDeque<Event>,
+    received_fds: VecDeque<i32>,
     alive: bool,
 }
 
@@ -116,7 +119,15 @@ impl Connection {
             unsafe { close(fd) };
             return Err("cannot make the Wayland connection nonblocking");
         }
-        Ok(Connection { fd, next_id: 2, input: Vec::new(), output: Vec::new(), events: VecDeque::new(), alive: true })
+        Ok(Connection {
+            fd,
+            next_id: 2,
+            input: Vec::new(),
+            output: Vec::new(),
+            events: VecDeque::new(),
+            received_fds: VecDeque::new(),
+            alive: true,
+        })
     }
 
     pub fn new_id(&mut self) -> u32 {
@@ -249,7 +260,7 @@ impl Connection {
             let mut iov = Iovec { base: buf.as_mut_ptr() as *mut c_void, len: buf.len() };
             let mut control = [0u64; 16];
             let mut msg = Msghdr { name: core::ptr::null_mut(), namelen: 0, iov: &mut iov, iovlen: 1, control: control.as_mut_ptr() as *mut c_void, controllen: core::mem::size_of_val(&control), flags: 0 };
-            let n = unsafe { recvmsg(self.fd, &mut msg, MSG_DONTWAIT) };
+            let n = unsafe { recvmsg(self.fd, &mut msg, MSG_DONTWAIT | MSG_CMSG_CLOEXEC) };
             if n == 0 {
                 self.alive = false;
                 break;
@@ -264,7 +275,11 @@ impl Connection {
                     }
                 }
             }
-            close_received(&control, msg.controllen);
+            self.received_fds.extend(collect_received(&control, msg.controllen));
+            if msg.flags & MSG_CTRUNC != 0 {
+                self.alive = false;
+                break;
+            }
             if self.input.len().saturating_add(n as usize) > MAX_INPUT_BUFFER {
                 self.alive = false;
                 self.input.clear();
@@ -297,6 +312,10 @@ impl Connection {
 
     pub fn next(&mut self) -> Option<Event> {
         self.events.pop_front()
+    }
+
+    pub fn take_fd(&mut self) -> Option<i32> {
+        self.received_fds.pop_front()
     }
 
     pub fn dispatch_pending(&mut self, timeout_ms: i64) -> Option<Event> {
@@ -353,30 +372,46 @@ impl Connection {
 impl Drop for Connection {
     fn drop(&mut self) {
         self.flush();
+        while let Some(fd) = self.received_fds.pop_front() {
+            unsafe { close(fd) };
+        }
         unsafe { close(self.fd) };
     }
 }
 
-fn close_received(control: &[u64; 16], len: usize) {
+fn collect_received(control: &[u64; 16], len: usize) -> Vec<i32> {
     let raw = unsafe { core::slice::from_raw_parts(control.as_ptr() as *const u8, len.min(128)) };
+    let mut fds = Vec::new();
     let mut at = 0usize;
     while at + 16 <= raw.len() {
-        let clen = u64::from_le_bytes(raw[at..at + 8].try_into().unwrap()) as usize;
+        let raw_len = u64::from_le_bytes(raw[at..at + 8].try_into().unwrap());
+        let Ok(clen) = usize::try_from(raw_len) else {
+            break;
+        };
         let level = i32::from_le_bytes(raw[at + 8..at + 12].try_into().unwrap());
         let kind = i32::from_le_bytes(raw[at + 12..at + 16].try_into().unwrap());
-        if level == SOL_SOCKET && kind == SCM_RIGHTS && clen >= 16 {
+        let Some(end) = at.checked_add(clen) else {
+            break;
+        };
+        if clen < 16 || end > raw.len() {
+            break;
+        }
+        if level == SOL_SOCKET && kind == SCM_RIGHTS {
             let mut p = at + 16;
-            while p + 4 <= at + clen && p + 4 <= raw.len() {
-                let fd = i32::from_le_bytes(raw[p..p + 4].try_into().unwrap());
-                unsafe { close(fd) };
+            while p + 4 <= end {
+                fds.push(i32::from_le_bytes(raw[p..p + 4].try_into().unwrap()));
                 p += 4;
             }
         }
-        if clen < 16 {
+        let Some(step) = clen.checked_add(7).map(|n| n & !7) else {
+            break;
+        };
+        if step == 0 {
             break;
         }
-        at += (clen + 7) & !7;
+        at = at.saturating_add(step);
     }
+    fds
 }
 
 pub struct ShmBuffer {
