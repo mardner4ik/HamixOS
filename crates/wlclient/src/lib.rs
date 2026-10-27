@@ -441,6 +441,9 @@ impl ShmBuffer {
     pub fn create(conn: &mut Connection, shm: u32, width: u32, height: u32, format: u32) -> Option<ShmBuffer> {
         const MAX_DIMENSION: u32 = 16_384;
         const MAX_BYTES: usize = 128 << 20;
+        if !conn.alive() {
+            return None;
+        }
         if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
             return None;
         }
@@ -458,6 +461,11 @@ impl ShmBuffer {
             return None;
         }
         let addr = unsafe { mmap(core::ptr::null_mut(), bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) };
+        if addr.is_null() {
+            unsafe { munmap(addr, bytes) };
+            unsafe { close(fd) };
+            return None;
+        }
         if addr as usize == !0usize {
             unsafe { close(fd) };
             return None;
@@ -465,8 +473,16 @@ impl ShmBuffer {
         let pool = conn.new_id();
         conn.send_fd(Message::new(shm, 0).uint(pool).int(bytes as i32).finish(), fd);
         unsafe { close(fd) };
+        if !conn.alive() {
+            unsafe { munmap(addr, bytes) };
+            return None;
+        }
         let id = conn.new_id();
         conn.send(Message::new(pool, 0).uint(id).int(0).int(width as i32).int(height as i32).int(width as i32 * 4).uint(format).finish());
+        if !conn.alive() {
+            unsafe { munmap(addr, bytes) };
+            return None;
+        }
         Some(ShmBuffer { id, pool, addr: addr as *mut u8, bytes, width, height, busy: false })
     }
 
