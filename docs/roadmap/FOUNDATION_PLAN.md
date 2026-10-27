@@ -970,7 +970,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 - [~] `crates/wlwire` і `crates/wlclient`: спільний `no_std` encoder/reader/header decoder із
       перевіркою граничного розміру кадру, окремий
       від hxproto неблокувальний POSIX-транспорт, коректне передавання fd з частковими
-      записами, ліміти SHM
+      записами, обмежена вихідна черга з backpressure, ліміти SHM
       (16 384 px / 128 МіБ), автоматичне звільнення локального SHM-відображення та обмежені
       вхідний буфер і черга подій; нативний frontend hxserver ще попереду
 - [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені

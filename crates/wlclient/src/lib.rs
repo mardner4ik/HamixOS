@@ -12,6 +12,8 @@ pub const DISPLAY: u32 = 1;
 
 const MAX_INPUT_BUFFER: usize = 1 << 20;
 const MAX_PENDING_EVENTS: usize = 4096;
+const MAX_OUTPUT_BUFFER: usize = 1 << 20;
+const FD_SEND_TIMEOUT_MS: u64 = 5000;
 const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = 1;
 const SOCK_CLOEXEC: c_int = 0o2000000;
@@ -129,6 +131,14 @@ impl Connection {
     }
 
     pub fn send(&mut self, bytes: Vec<u8>) {
+        if !self.alive {
+            return;
+        }
+        if self.output.len().saturating_add(bytes.len()) > MAX_OUTPUT_BUFFER {
+            self.alive = false;
+            self.output.clear();
+            return;
+        }
         self.output.extend_from_slice(&bytes);
     }
 
@@ -158,9 +168,22 @@ impl Connection {
     }
 
     pub fn send_fd(&mut self, bytes: Vec<u8>, fd: i32) {
+        let deadline = now_ms().saturating_add(FD_SEND_TIMEOUT_MS);
         self.flush();
         if !self.alive || bytes.is_empty() {
             return;
+        }
+        while !self.output.is_empty() {
+            let remaining = deadline.saturating_sub(now_ms()).min(i32::MAX as u64) as i32;
+            if remaining == 0 || !posix::wait_writable(self.fd, remaining) {
+                self.alive = false;
+                self.output.clear();
+                return;
+            }
+            self.flush();
+            if !self.alive {
+                return;
+            }
         }
         let mut data = bytes;
         let mut offset = 0usize;
@@ -188,7 +211,14 @@ impl Connection {
             if sent < 0 {
                 match posix::errno() {
                     EINTR => continue,
-                    EAGAIN if posix::wait_writable(self.fd, -1) => continue,
+                    EAGAIN => {
+                        let remaining = deadline.saturating_sub(now_ms()).min(i32::MAX as u64) as i32;
+                        if remaining > 0 && posix::wait_writable(self.fd, remaining) {
+                            continue;
+                        }
+                        self.alive = false;
+                        return;
+                    }
                     _ => {
                         self.alive = false;
                         return;
