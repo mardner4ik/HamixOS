@@ -16,7 +16,7 @@ struct Entry {
 
 struct Cache {
     entries: Vec<Entry>,
-    generations: Vec<(usize, u64)>,
+    generations: Vec<u64>,
     age: u64,
 }
 
@@ -26,19 +26,17 @@ impl Cache {
     }
 
     fn generation(&mut self, node: usize) -> u64 {
-        if let Some((_, generation)) = self.generations.iter().find(|(id, _)| *id == node) {
-            return *generation;
+        if self.generations.len() <= node {
+            self.generations.resize(node + 1, 1);
         }
-        self.generations.push((node, 1));
-        1
+        self.generations[node]
     }
 
     fn invalidate(&mut self, node: usize) {
-        if let Some((_, generation)) = self.generations.iter_mut().find(|(id, _)| *id == node) {
-            *generation = generation.wrapping_add(1).max(1);
-        } else {
-            self.generations.push((node, 2));
+        if self.generations.len() <= node {
+            self.generations.resize(node + 1, 1);
         }
+        self.generations[node] = self.generations[node].wrapping_add(1).max(1);
     }
 
     fn tick(&mut self) -> u64 {
