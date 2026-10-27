@@ -1,5 +1,4 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::frame;
@@ -17,12 +16,29 @@ struct Entry {
 
 struct Cache {
     entries: Vec<Entry>,
+    generations: Vec<(usize, u64)>,
     age: u64,
 }
 
 impl Cache {
     const fn new() -> Self {
-        Self { entries: Vec::new(), age: 0 }
+        Self { entries: Vec::new(), generations: Vec::new(), age: 0 }
+    }
+
+    fn generation(&mut self, node: usize) -> u64 {
+        if let Some((_, generation)) = self.generations.iter().find(|(id, _)| *id == node) {
+            return *generation;
+        }
+        self.generations.push((node, 1));
+        1
+    }
+
+    fn invalidate(&mut self, node: usize) {
+        if let Some((_, generation)) = self.generations.iter_mut().find(|(id, _)| *id == node) {
+            *generation = generation.wrapping_add(1).max(1);
+        } else {
+            self.generations.push((node, 2));
+        }
     }
 
     fn tick(&mut self) -> u64 {
@@ -39,16 +55,16 @@ impl Cache {
 }
 
 static CACHE: Mutex<Cache> = Mutex::new(Cache::new());
-static GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn get_or_load<F>(node: usize, offset: u64, load: F) -> Option<usize>
 where
     F: FnOnce(&mut [u8]) -> bool,
 {
-    let generation = GENERATION.load(Ordering::Acquire);
-    let cached = {
+    let (generation, cached) = {
         let mut cache = CACHE.lock();
-        cache.find(node, offset, generation).map(|phys| (phys, frame::share(phys)))
+        let generation = cache.generation(node);
+        let cached = cache.find(node, offset, generation).map(|phys| (phys, frame::share(phys)));
+        (generation, cached)
     };
     if let Some((phys, true)) = cached {
         return Some(phys);
@@ -67,7 +83,7 @@ where
     }
 
     let mut cache = CACHE.lock();
-    if GENERATION.load(Ordering::Acquire) != generation {
+    if cache.generation(node) != generation {
         return Some(phys);
     }
     if let Some(existing) = cache.find(node, offset, generation) {
@@ -101,8 +117,8 @@ where
 }
 
 pub fn invalidate(node: usize) {
-    GENERATION.fetch_add(1, Ordering::AcqRel);
     let mut cache = CACHE.lock();
+    cache.invalidate(node);
     let mut index = 0;
     while index < cache.entries.len() {
         if cache.entries[index].node == node {
