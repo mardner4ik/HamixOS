@@ -13,7 +13,7 @@ core::arch::global_asm!(
     "1:",
     "xor %r9d, %r9d",
     "2:",
-    "movabs $0x0000009ffffffff000, %r8",
+    "movabs $0x0000009ffffff000, %r8",
     "mov 8(%r8), %rcx",
     "lfence",
     "rdtsc",
