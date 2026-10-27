@@ -290,6 +290,7 @@ impl Vfs {
                     if previous.contains(&id) {
                         freed += body.bytes.len();
                         body.discard();
+                        crate::memory::page_cache::invalidate(id);
                         node.dirty = 0;
                     } else {
                         candidates.insert(id);

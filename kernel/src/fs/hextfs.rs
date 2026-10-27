@@ -302,6 +302,7 @@ fn overlay_tree(vfs: &mut Vfs, root: &mut Hext<KernelDevice>, fs: &mut Hext<Kern
                     }
                     if let NodeKind::File(old) = &mut vfs.nodes[id].kind {
                         old.replace_from_overlay(data);
+                        crate::memory::page_cache::invalidate(id);
                         vfs.nodes[id].dirty |= DIRTY_DATA;
                     }
                 }
@@ -821,6 +822,7 @@ fn clear_subtree(vfs: &mut Vfs, id: usize) {
         NodeKind::Dir(map) => core::mem::take(map).into_values().collect(),
         NodeKind::File(body) => {
             body.discard();
+            crate::memory::page_cache::invalidate(id);
             Vec::new()
         }
         _ => Vec::new(),
