@@ -7,7 +7,7 @@
 **A desktop operating system written from scratch in Rust — its own kernel, its own shell, its own desktop, and room for your Linux apps.**
 
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-5b8cff?style=flat-square)](LICENSE)
-![Version](https://img.shields.io/badge/version-0.6.1-8b5cf6?style=flat-square)
+![Version](https://img.shields.io/badge/version-0.6.1--dev-8b5cf6?style=flat-square)
 ![Language](https://img.shields.io/badge/written%20in-Rust-e0621a?style=flat-square)
 ![Arch](https://img.shields.io/badge/arch-x86__64%20·%20aarch64%20·%20riscv64-2dd4bf?style=flat-square)
 ![Desktop](https://img.shields.io/badge/desktop-Nook-5aa0ff?style=flat-square)
@@ -93,27 +93,26 @@
 
 ## 🚀 Get started
 
-1. Download `hamix_os.iso` from the [Releases](https://github.com/mardner4ik/HamixOS/releases) page (or [build it](#-build-from-source)).
-2. Write it to a USB stick (`dd`, [Ventoy](https://www.ventoy.net) or balenaEtcher) and boot it, or run it in QEMU:
+No prebuilt ISO is published yet. Build it with the commands in [Build from source](#-build-from-source); the image is written to `out/hamix_os.iso`.
+
+1. Boot that ISO from a USB stick or in QEMU:
 
 ```bash
 qemu-system-x86_64 -M q35 -m 2G -smp 2 -enable-kvm \
-    -cdrom hamix_os.iso -boot d \
+    -cdrom out/hamix_os.iso -boot d \
     -device virtio-vga -nic user,model=e1000
 ```
 
-3. Log in and start the desktop:
+2. At the graphical login screen, sign in to the default **Nook** session:
 
 | account | password |
 |---------|----------|
 | `user`  | `user`   |
 | `root`  | `hamix`  |
 
-```
-user@hamix:~$ startx
-```
+If you are using a text console instead of the graphical login, sign in there and run `startx` to start Nook manually.
 
-4. Double-click **Install HamixOS** on the desktop to put the system on a disk.
+3. Double-click **Install HamixOS** on the desktop to put the system on a disk.
 
 ### Boot firmware
 
