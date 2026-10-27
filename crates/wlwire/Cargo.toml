@@ -1,0 +1,7 @@
+[package]
+name = "wlwire"
+version = "0.1.0"
+edition = "2021"
+description = "Shared no_std Wayland wire codec for HamixOS"
+
+[dependencies]

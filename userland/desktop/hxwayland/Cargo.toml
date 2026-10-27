@@ -10,3 +10,4 @@ path = "src/main.rs"
 [dependencies]
 hamix_std = { path = "../../sdk/hamix_std" }
 hxproto = { path = "../../libs/hxproto" }
+wlwire = { path = "../../../crates/wlwire" }
