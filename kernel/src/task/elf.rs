@@ -2,7 +2,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::{linux_loader, Abi, Pid, UserImage};
+use crate::linux::loader as linux_loader;
+use super::{Abi, Pid, UserImage};
 use crate::arch::paging::{self, AddressSpace, PAGE_SIZE};
 use crate::fs;
 
@@ -11,7 +12,7 @@ const PT_INTERP: u32 = 3;
 const PT_NOTE: u32 = 4;
 const PT_PHDR: u32 = 6;
 pub(super) const ET_EXEC: u16 = 2;
-pub(super) const ET_DYN: u16 = 3;
+pub(crate) const ET_DYN: u16 = 3;
 #[cfg(target_arch = "x86_64")]
 const EM_HOST: u16 = 0x3E;
 #[cfg(target_arch = "aarch64")]
@@ -111,7 +112,7 @@ const AT_SYSINFO_EHDR: u64 = 33;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(super) struct Elf64Header {
+pub(crate) struct Elf64Header {
     pub e_ident: [u8; 16],
     pub e_type: u16,
     pub e_machine: u16,
@@ -130,7 +131,7 @@ pub(super) struct Elf64Header {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub(super) struct Elf64ProgramHeader {
+pub(crate) struct Elf64ProgramHeader {
     pub p_type: u32,
     pub p_flags: u32,
     pub p_offset: u64,
@@ -171,7 +172,7 @@ fn validate(header: &Elf64Header) -> Result<(), &'static str> {
     Ok(())
 }
 
-pub(super) struct Elf<'a> {
+pub(crate) struct Elf<'a> {
     pub data: &'a [u8],
     pub header: Elf64Header,
     pub phdrs: Vec<Elf64ProgramHeader>,
@@ -207,24 +208,21 @@ impl<'a> Elf<'a> {
         Ok(Some(String::from_utf8_lossy(&bytes[..end]).into_owned()))
     }
 
-    pub fn has_hamix_note(&self) -> bool {
-        self.phdrs.iter().filter(|p| p.p_type == PT_NOTE).any(|ph| {
-            let Ok(bytes) = self.segment_bytes(ph) else {
-                return false;
-            };
+    pub fn hamix_note(&self) -> Option<u32> {
+        self.phdrs.iter().filter(|p| p.p_type == PT_NOTE).find_map(|ph| {
+            let bytes = self.segment_bytes(ph).ok()?;
             let mut off = 0usize;
             while off + 12 <= bytes.len() {
-                let (Some(namesz), Some(descsz), Some(kind)) = (read_u32(bytes, off), read_u32(bytes, off + 4), read_u32(bytes, off + 8)) else {
-                    return false;
-                };
+                let (namesz, descsz, kind) = (read_u32(bytes, off)?, read_u32(bytes, off + 4)?, read_u32(bytes, off + 8)?);
                 let name_start = off + 12;
                 let name_end = name_start + namesz as usize;
+                let desc_start = name_start + (namesz as usize).next_multiple_of(4);
                 if bytes.get(name_start..name_end) == Some(HAMIX_NOTE_NAME) && kind == HAMIX_NOTE_TYPE {
-                    return true;
+                    return Some(if descsz >= 4 { read_u32(bytes, desc_start)? } else { crate::linux::HAMIX_ABI_LEGACY });
                 }
-                off = name_start + (namesz as usize).next_multiple_of(4) + (descsz as usize).next_multiple_of(4);
+                off = desc_start + (descsz as usize).next_multiple_of(4);
             }
-            false
+            None
         })
     }
 
@@ -252,11 +250,16 @@ impl<'a> Elf<'a> {
     }
 
     pub fn classify(&self) -> Result<Abi, &'static str> {
-        if self.has_hamix_note() {
-            if self.header.e_type != ET_EXEC {
-                return Err("elf: HamixOS binaries must be ET_EXEC");
+        use crate::linux::{HAMIX_ABI_LEGACY, HAMIX_ABI_MIN, HAMIX_ABI_VERSION};
+        if let Some(revision) = self.hamix_note() {
+            if revision == HAMIX_ABI_LEGACY && self.header.e_type != ET_EXEC {
+                return Err("elf: legacy HamixOS binaries must be ET_EXEC");
             }
-            return Ok(Abi::Native);
+            return match revision {
+                HAMIX_ABI_LEGACY => Ok(Abi::Native),
+                r if (HAMIX_ABI_MIN..=HAMIX_ABI_VERSION).contains(&r) => Ok(Abi::Hamix),
+                _ => Err("elf: the program needs a newer Hamix ABI"),
+            };
         }
         if self.header.e_type == ET_DYN || self.interp()?.is_some() {
             return Ok(Abi::Linux);
@@ -299,11 +302,7 @@ pub(super) fn load(aspace: &mut AddressSpace, elf: &Elf, bias: u64, limit: u64) 
         }
         if let Some(node) = elf.lazy {
             let page = start & !(PAGE_SIZE - 1);
-            let mut prot = 0;
-            if ph.p_flags & 4 != 0 { prot |= paging::pte::PROT_READ; }
-            if ph.p_flags & 2 != 0 { prot |= paging::pte::PROT_WRITE; }
-            if ph.p_flags & 1 != 0 { prot |= paging::pte::PROT_EXEC; }
-            let region = paging::LazyRegion { node, start: page, offset: ph.p_offset - (start - page), file_len: ph.p_offset + ph.p_filesz, private: true, prot };
+            let region = paging::LazyRegion { node, start: page, offset: ph.p_offset - (start - page), file_len: ph.p_offset + ph.p_filesz, private: true, prot: segment_prot(ph.p_flags) };
             if !aspace.map_lazy(page, seg_end - page, region) {
                 return Err("out of memory");
             }
@@ -339,6 +338,7 @@ pub(super) fn load(aspace: &mut AddressSpace, elf: &Elf, bias: u64, limit: u64) 
     if !loaded {
         return Err("elf: no PT_LOAD segments");
     }
+    protect_segments(aspace, elf, bias);
     let entry = bias.wrapping_add(elf.header.e_entry);
     let inside = elf.phdrs.iter().any(|p| p.p_type == PT_LOAD && entry >= bias + p.p_vaddr && entry < bias + p.p_vaddr + p.p_memsz);
     if !inside {
@@ -347,7 +347,49 @@ pub(super) fn load(aspace: &mut AddressSpace, elf: &Elf, bias: u64, limit: u64) 
     Ok(Loaded { bias, entry, phdr, phnum: elf.header.e_phnum as u64, end })
 }
 
-pub(super) struct StackSpec<'a> {
+const PT_GNU_STACK: u32 = 0x6474_e551;
+const PF_X: u32 = 1;
+const PF_W: u32 = 2;
+const PF_R: u32 = 4;
+
+fn segment_prot(flags: u32) -> u8 {
+    let mut prot = 0;
+    if flags & PF_R != 0 {
+        prot |= paging::pte::PROT_READ;
+    }
+    if flags & PF_W != 0 {
+        prot |= paging::pte::PROT_WRITE;
+    }
+    if flags & PF_X != 0 {
+        prot |= paging::pte::PROT_EXEC;
+    }
+    prot
+}
+
+fn protect_segments(aspace: &mut AddressSpace, elf: &Elf, bias: u64) {
+    let mut pages: alloc::collections::BTreeMap<u64, u8> = alloc::collections::BTreeMap::new();
+    for ph in elf.phdrs.iter().filter(|p| p.p_type == PT_LOAD && p.p_memsz != 0) {
+        let start = bias.wrapping_add(ph.p_vaddr) & !(PAGE_SIZE - 1);
+        let end = (bias.wrapping_add(ph.p_vaddr) + ph.p_memsz + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let prot = segment_prot(ph.p_flags);
+        let mut page = start;
+        while page < end {
+            *pages.entry(page).or_insert(0) |= prot;
+            page += PAGE_SIZE;
+        }
+    }
+    for (page, prot) in pages {
+        aspace.protect_range(page, PAGE_SIZE, prot);
+    }
+}
+
+fn stack_prot(elf: &Elf) -> u8 {
+    let executable = elf.phdrs.iter().find(|p| p.p_type == PT_GNU_STACK).map(|p| p.p_flags & PF_X != 0).unwrap_or(true);
+    let rw = paging::pte::PROT_READ | paging::pte::PROT_WRITE;
+    if executable { rw | paging::pte::PROT_EXEC } else { rw }
+}
+
+pub(crate) struct StackSpec<'a> {
     pub args: &'a [String],
     pub envp: &'a [String],
     pub execfn: &'a str,
@@ -362,6 +404,7 @@ fn build_stack(aspace: &mut AddressSpace, spec: &StackSpec, main: &Loaded, elf: 
     if !aspace.map_zero(stack_base, USER_STACK_SIZE - USER_STACK_EAGER) || !aspace.alloc_range(eager_base, USER_STACK_EAGER) {
         return Err("out of memory");
     }
+    aspace.protect_range(stack_base, USER_STACK_SIZE, stack_prot(elf));
 
     let strings_size: usize = spec.args.iter().chain(spec.envp.iter()).map(|s| s.len() + 1).sum::<usize>() + spec.execfn.len() + 1;
     if strings_size > MAX_STRINGS {
@@ -450,7 +493,7 @@ fn build_stack(aspace: &mut AddressSpace, spec: &StackSpec, main: &Loaded, elf: 
     Ok(sp)
 }
 
-pub(super) fn assemble(main: &Elf, main_bias: u64, interp: Option<(&Elf, u64)>, abi: Abi, spec: &StackSpec) -> Result<UserImage, &'static str> {
+pub(crate) fn assemble(main: &Elf, main_bias: u64, interp: Option<(&Elf, u64)>, abi: Abi, spec: &StackSpec) -> Result<UserImage, &'static str> {
     let mut aspace = AddressSpace::new().ok_or("out of memory")?;
     let result = (|| {
         let main_limit = match interp {
@@ -484,6 +527,8 @@ pub(super) fn assemble(main: &Elf, main_bias: u64, interp: Option<(&Elf, u64)>, 
             exe: String::from(spec.execfn),
             env: spec.envp.to_vec(),
             args: spec.args.to_vec(),
+            set_uid: None,
+            set_gid: None,
         }),
         Err(e) => {
             aspace.destroy();
@@ -495,9 +540,12 @@ pub(super) fn assemble(main: &Elf, main_bias: u64, interp: Option<(&Elf, u64)>, 
 fn build_image(data: &[u8], lazy: Option<usize>, spec: &StackSpec) -> Result<UserImage, &'static str> {
     let mut elf = Elf::parse(data)?;
     elf.lazy = lazy;
-    match elf.classify()? {
-        Abi::Linux => linux_loader::build(&elf, spec),
-        Abi::Native => assemble(&elf, 0, None, Abi::Native, spec),
+    let abi = elf.classify()?;
+    crate::linux::of(abi).admit(spec.execfn)?;
+    match abi {
+        Abi::Linux => linux_loader::build(&elf, spec, abi),
+        Abi::Hamix if elf.header.e_type == ET_DYN || elf.interp()?.is_some() => linux_loader::build(&elf, spec, abi),
+        native => assemble(&elf, 0, None, native, spec),
     }
 }
 
@@ -520,14 +568,14 @@ fn exec_limit() -> usize {
     (free / 4 + heap_free).max(MIN_EXEC_HEADROOM)
 }
 
-pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/sbin:/usr/sbin:/opt/linux/bin:/opt/linux/usr/bin";
+pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/var/lib/hamix/commands/bin";
 
 pub fn default_env(uid: u32) -> Vec<String> {
-    let user = crate::users::name_of(uid).and_then(|n| crate::users::find_by_name(&n));
+    let user = crate::users::find_by_uid(uid);
     let (name, home, shell) = match user {
         Some(u) => (u.name, u.home, u.shell),
-        None if uid == 0 => (String::from("root"), String::from("/root"), String::from("/usr/bin/hsh")),
-        None => (format!("{}", uid), String::from("/"), String::from("/usr/bin/hsh")),
+        None if uid == 0 => (String::from("root"), String::from("/root"), String::from("/usr/bin/bash")),
+        None => (format!("{}", uid), String::from("/"), String::from("/usr/bin/bash")),
     };
     alloc::vec![
         format!("PATH={}", DEFAULT_PATH),
@@ -557,6 +605,9 @@ pub fn load_program(path: &str, argv: &[String], envp: &[String], uid: u32, ruid
         return Err("too many levels of interpreters");
     }
     let mut lazy: Option<usize> = None;
+    let mut set_uid: Option<u32> = None;
+    let mut set_gid: Option<u32> = None;
+    let cred = if super::current_pid() != 0 && super::with_current(|t| !t.kernel_thread) { Some(super::current_cred()) } else { None };
     let data: Vec<u8> = {
         let mut guard = fs::VFS.lock();
         let vfs = guard.as_mut().ok_or("no filesystem mounted")?;
@@ -566,8 +617,18 @@ pub fn load_program(path: &str, argv: &[String], envp: &[String], uid: u32, ruid
             return Err("is a directory");
         }
         let stat = vfs.stat(id);
-        if uid != 0 && stat.mode & 0o111 == 0 {
+        let allowed = match &cred {
+            Some(c) => vfs.can_exec(id, *c),
+            None => uid == 0 || stat.mode & 0o111 != 0,
+        };
+        if !allowed {
             return Err("permission denied");
+        }
+        if stat.mode & 0o4000 != 0 && stat.mode & 0o111 != 0 {
+            set_uid = Some(stat.owner);
+        }
+        if stat.mode & 0o2000 != 0 && stat.mode & 0o010 != 0 {
+            set_gid = Some(stat.group);
         }
         let size = vfs.node_size(id);
         if size > LAZY_EXEC_MIN {
@@ -599,19 +660,33 @@ pub fn load_program(path: &str, argv: &[String], envp: &[String], uid: u32, ruid
         if interpreter == path {
             return Err("recursive interpreter");
         }
-        let resolved = if interpreter.starts_with('/') { linux_loader::resolve(&interpreter) } else { interpreter.clone() };
+        let linux_view = path.starts_with("/linux/") || super::with_current(|t| t.abi) == Abi::Linux;
+        let resolved = if linux_view { linux_loader::follow_linux(&interpreter, true) } else { interpreter.clone() };
         let mut new_argv = alloc::vec![interpreter.clone()];
         if let Some(opt) = optional.filter(|o| !o.is_empty()) {
             new_argv.push(opt);
         }
-        new_argv.push(String::from(path));
+        new_argv.push(if linux_view { linux_loader::to_linux(path) } else { String::from(path) });
         new_argv.extend(argv.iter().skip(1).cloned());
         return load_program(&resolved, &new_argv, envp, uid, ruid, depth + 1);
     }
-    let spec = StackSpec { args: argv, envp, execfn: path, uid, ruid, secure: false };
-    let image = build_image(&data, lazy, &spec)?;
+    let effective = set_uid.unwrap_or(uid);
+    let spec = StackSpec { args: argv, envp, execfn: path, uid: effective, ruid, secure: effective != uid || set_gid.is_some() };
+    let mut image = build_image(&data, lazy, &spec)?;
+    image.set_uid = set_uid.filter(|owner| *owner != uid);
+    image.set_gid = set_gid;
     let name = String::from(path.rsplit('/').next().unwrap_or(path));
     Ok((image, name))
+}
+
+pub fn spawn_init(path: &str, args: &[String]) -> Result<Pid, &'static str> {
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(String::from(path));
+    argv.extend_from_slice(args);
+    let env = default_env(0);
+    let (image, _) = load_program(path, &argv, &env, 0, 0, 0)?;
+    let name = path.rsplit('/').next().unwrap_or(path);
+    super::spawn_user_as(Some(super::INIT_PID), name, image, 0, 0, 0, 0, "/").ok_or("init is already running")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -621,5 +696,6 @@ pub fn spawn(path: &str, args: &[String], envp: &[String], parent: Pid, vt: usiz
     argv.extend_from_slice(args);
     let (image, _) = load_program(path, &argv, envp, uid, ruid, 0)?;
     let name = path.rsplit('/').next().unwrap_or(path);
+    let uid = image.set_uid.unwrap_or(uid);
     super::spawn_user(name, image, parent, vt, uid, ruid, cwd).ok_or("out of memory")
 }

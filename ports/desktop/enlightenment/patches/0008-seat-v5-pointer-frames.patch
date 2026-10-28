@@ -1,0 +1,72 @@
+diff --color -ru a/src/bin/e_comp_wl.c b/src/bin/e_comp_wl.c
+--- a/src/bin/e_comp_wl.c	2026-10-05 20:47:02.113191780 +0300
++++ b/src/bin/e_comp_wl.c	2026-10-05 20:47:02.150178442 +0300
+@@ -217,6 +217,8 @@
+         wl_pointer_send_enter(res, serial, ec->comp_data->surface,
+                               wl_fixed_from_int(ev->canvas.x - ec->client.x),
+                               wl_fixed_from_int(ev->canvas.y - ec->client.y));
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+         e_comp_wl_input_pointer_cursor_update(ptr);
+      }
+ }
+@@ -274,6 +276,8 @@
+         if (wl_resource_get_client(res) != wc) continue;
+         ptr->entered = 0;
+         wl_pointer_send_leave(res, serial, ec->comp_data->surface);
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+      }
+ }
+ 
+@@ -358,6 +362,8 @@
+         wl_pointer_send_motion(res, timestamp,
+                                wl_fixed_from_int(x - ec->client.x),
+                                wl_fixed_from_int(y - ec->client.y));
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+      }
+ }
+ 
+@@ -449,6 +455,8 @@
+         if (!e_comp_wl_input_pointer_check(res)) continue;
+         if (wl_resource_get_client(res) != wc) continue;
+         wl_pointer_send_axis(res, ev->timestamp, axis, dir);
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+      }
+ }
+ 
+@@ -3542,6 +3550,8 @@
+         if (wl_resource_get_client(res) != wc) continue;
+         if (!e_comp_wl_input_pointer_check(res)) continue;
+         wl_pointer_send_button(res, serial, timestamp, btn, state);
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+      }
+    return EINA_TRUE;
+ }
+diff --color -ru a/src/bin/e_comp_wl_data.c b/src/bin/e_comp_wl_data.c
+--- a/src/bin/e_comp_wl_data.c	2026-10-05 20:47:02.116717324 +0300
++++ b/src/bin/e_comp_wl_data.c	2026-10-05 20:47:02.151106439 +0300
+@@ -670,6 +670,8 @@
+         if (!e_comp_wl_input_pointer_check(res)) continue;
+         if (wl_resource_get_client(res) != client) continue;
+         wl_pointer_send_leave(res, serial, e_comp_wl->kbd.focus);
++        if (wl_resource_get_version(res) >= WL_POINTER_FRAME_SINCE_VERSION)
++          wl_pointer_send_frame(res);
+      }
+ 
+    evas_pointer_canvas_xy_get(e_comp->evas, &x, &y);
+diff --color -ru a/src/bin/e_comp_wl_input.c b/src/bin/e_comp_wl_input.c
+--- a/src/bin/e_comp_wl_input.c	2026-10-05 20:47:02.119724932 +0300
++++ b/src/bin/e_comp_wl_input.c	2026-10-05 20:47:02.151178440 +0300
+@@ -494,7 +494,7 @@
+ 
+    /* create the global resource for input seat */
+    e_comp_wl->seat.global =
+-     wl_global_create(e_comp_wl->wl.disp, &wl_seat_interface, 4,
++     wl_global_create(e_comp_wl->wl.disp, &wl_seat_interface, 5,
+                       e_comp->wl_comp_data, _e_comp_wl_input_cb_bind_seat);
+    if (!e_comp_wl->seat.global)
+      {

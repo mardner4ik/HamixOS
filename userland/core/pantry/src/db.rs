@@ -1,9 +1,9 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::{fs, sys};
+use hxstd::{fs, sys};
 
-pub const SYSROOT: &str = "/opt/linux";
+pub const LEGACY_SYSROOT: &str = "/opt/linux";
 pub const DB_PATH: &str = "/var/lib/pantry/installed";
 pub const WORLD_PATH: &str = "/etc/pantry/world";
 pub const REPOS_PATH: &str = "/etc/pantry/repositories";
@@ -24,6 +24,7 @@ pub struct Installed {
     pub files: Vec<String>,
     pub scripts: Vec<String>,
     pub triggers: Vec<String>,
+    pub layer: String,
 }
 
 impl Installed {
@@ -66,13 +67,14 @@ impl Db {
         let mut packages = Vec::new();
         if let Some(text) = fs::read_to_string(PROVIDED_PATH) {
             for block in text.split("\n\n") {
-                let mut pkg = Installed { repo: String::from(SYSTEM_REPO), ..Default::default() };
+                let mut pkg = Installed { repo: String::from(SYSTEM_REPO), layer: String::from("linux"), ..Default::default() };
                 for line in block.lines() {
                     match line.split_once(':') {
                         Some(("P", v)) => pkg.name = v.to_string(),
                         Some(("V", v)) => pkg.version = v.to_string(),
                         Some(("T", v)) => pkg.description = v.to_string(),
                         Some(("p", v)) => pkg.provides = v.split_whitespace().map(|s| s.to_string()).collect(),
+                        Some(("L", v)) => pkg.layer = v.to_string(),
                         _ => {}
                     }
                 }
@@ -83,7 +85,7 @@ impl Db {
         }
         if let Some(text) = fs::read_to_string(DB_PATH) {
             for block in text.split("\n\n") {
-                let mut pkg = Installed::default();
+                let mut pkg = Installed { layer: String::from("linux"), ..Default::default() };
                 for line in block.lines() {
                     let Some((key, value)) = line.split_once(':') else {
                         continue;
@@ -99,6 +101,7 @@ impl Db {
                         "F" => pkg.files.push(value.to_string()),
                         "X" => pkg.scripts.push(value.to_string()),
                         "G" => pkg.triggers = words(),
+                        "L" => pkg.layer = value.to_string(),
                         _ => {}
                     }
                 }
@@ -114,7 +117,7 @@ impl Db {
     pub fn save(&self) -> bool {
         let mut text = String::new();
         for pkg in self.packages.iter().filter(|p| !p.is_system()) {
-            text.push_str(&format!("P:{}\nV:{}\nR:{}\nT:{}\n", pkg.name, pkg.version, pkg.repo, pkg.description));
+            text.push_str(&format!("P:{}\nV:{}\nR:{}\nL:{}\nT:{}\n", pkg.name, pkg.version, pkg.repo, pkg.layer, pkg.description));
             if !pkg.depends.is_empty() {
                 text.push_str(&format!("D:{}\n", pkg.depends.join(" ")));
             }
@@ -142,6 +145,10 @@ impl Db {
 
     pub fn find(&self, name: &str) -> Option<&Installed> {
         self.packages.iter().find(|p| p.name == name)
+    }
+
+    pub fn in_layer(&self, layer: &str) -> Vec<&Installed> {
+        self.packages.iter().filter(|p| p.layer == layer).collect()
     }
 
     pub fn owner_of(&self, file: &str) -> Option<&Installed> {

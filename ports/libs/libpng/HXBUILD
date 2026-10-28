@@ -1,0 +1,16 @@
+pkgname=libpng
+pkgver=1.6.44
+pkgdesc="PNG reference library"
+source="https://download.sourceforge.net/libpng/libpng-$pkgver.tar.xz"
+sha256="60c4da1d5b7f0aa8d158da48e8f8afa9773c1c8baa5d21974df61f1886b8ce8e"
+builddir="libpng-$pkgver"
+depends="zlib"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

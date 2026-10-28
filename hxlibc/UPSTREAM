@@ -1,0 +1,4 @@
+url=https://github.com/managarm/mlibc
+tag=5.0.0
+commit=fc49abcc8245c35b62e7b88322f6bda1d554fb19
+license=MIT

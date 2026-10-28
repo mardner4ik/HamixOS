@@ -1,0 +1,11 @@
+--- a/options/ansi/include/string.h	2026-09-29 17:43:13.263740362 +0300
++++ b/options/ansi/include/string.h	2026-09-29 17:43:13.264245001 +0300
+@@ -53,7 +53,7 @@
+ 
+ #endif /* !__MLIBC_ABI_ONLY */
+ 
+-#if __MLIBC_POSIX_OPTION && (defined(_BSD_SOURCE) || defined(_GNU_SOURCE))
++#if __MLIBC_POSIX_OPTION && (defined(_BSD_SOURCE) || defined(_GNU_SOURCE) || defined(_DEFAULT_SOURCE) || (!defined(_POSIX_C_SOURCE) && !defined(_XOPEN_SOURCE) && !defined(__STRICT_ANSI__)))
+ #include <strings.h>
+ #endif
+ 

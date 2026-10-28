@@ -1,0 +1,26 @@
+diff --color -ru a/src/bin/e_includes.h b/src/bin/e_includes.h
+--- a/src/bin/e_includes.h	2023-12-23 18:08:09.000000000 +0200
++++ b/src/bin/e_includes.h	2026-09-29 22:43:15.675878520 +0300
+@@ -152,7 +152,9 @@
+ #include "e_comp_canvas.h"
+ #include "e_utils.h"
+ #include "e_hints.h"
+-#include "e_comp_x_devices.h"
++#ifndef HAVE_WAYLAND_ONLY
++# include "e_comp_x_devices.h"
++#endif
+ #include "e_comp_x_randr.h"
+ #include "e_watchdog.h"
+ #include "e_gesture.h"
+diff --color -ru a/src/modules/conf_randr/e_int_config_randr2.c b/src/modules/conf_randr/e_int_config_randr2.c
+--- a/src/modules/conf_randr/e_int_config_randr2.c	2023-12-23 18:08:09.000000000 +0200
++++ b/src/modules/conf_randr/e_int_config_randr2.c	2026-09-29 22:43:15.677207437 +0300
+@@ -402,7 +402,7 @@
+           {
+              mode_cbdata->cfdata = cfdata;
+              mode_cbdata->mode = *m;
+-             if (m->flags & ECORE_X_RANDR_MODE_DOUBLE_SCAN)
++             if (m->flags & 0x20)
+                snprintf(buf, sizeof(buf), "%ix%i @ %1.2fHz (Doublescan)", m->w, m->h, m->refresh / 2);
+              else
+                snprintf(buf, sizeof(buf), "%ix%i @ %1.2fHz", m->w, m->h, m->refresh);

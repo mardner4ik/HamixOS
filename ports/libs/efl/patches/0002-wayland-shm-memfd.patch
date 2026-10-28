@@ -1,0 +1,52 @@
+diff --color -ru a/src/lib/ecore_wl2/ecore_wl2_buffer.c b/src/lib/ecore_wl2/ecore_wl2_buffer.c
+--- a/src/lib/ecore_wl2/ecore_wl2_buffer.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/ecore_wl2/ecore_wl2_buffer.c	2026-09-30 15:56:12.475707624 +0300
+@@ -371,15 +371,22 @@
+    void *out = NULL;
+    char *tmp;
+ 
+-   // XXX try memfd, then shm open then the below...
+-   tmp = eina_vpath_resolve("(:usr.run:)/evas-wayland_shm-XXXXXX");
+-   *fd = eina_file_mkstemp(tmp, &fullname);
+-   free(tmp);
++#ifdef MFD_CLOEXEC
++   *fd = memfd_create("evas-wayland_shm", MFD_CLOEXEC);
++#else
++   *fd = -1;
++#endif
++   if (*fd < 0)
++     {
++        tmp = eina_vpath_resolve("(:usr.run:)/evas-wayland_shm-XXXXXX");
++        *fd = eina_file_mkstemp(tmp, &fullname);
++        free(tmp);
+ 
+-   if (*fd < 0) return NULL;
++        if (*fd < 0) return NULL;
+ 
+-   unlink(fullname);
+-   eina_tmpstr_del(fullname);
++        unlink(fullname);
++        eina_tmpstr_del(fullname);
++     }
+ 
+    *stride = w * 4;
+    if (ftruncate(*fd, size) < 0) goto err;
+diff --color -ru a/src/lib/efl_canvas_wl/efl_canvas_wl.c b/src/lib/efl_canvas_wl/efl_canvas_wl.c
+--- a/src/lib/efl_canvas_wl/efl_canvas_wl.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/efl_canvas_wl/efl_canvas_wl.c	2026-09-30 15:56:12.476488396 +0300
+@@ -3624,6 +3624,15 @@
+    Eina_Tmpstr *file;
+    int fd;
+ 
++#ifdef MFD_CLOEXEC
++   fd = memfd_create("comp-keymap", MFD_CLOEXEC);
++   if (fd >= 0)
++     {
++        if (ftruncate(fd, size) == -1)
++          EINA_LOG_ERR("ftruncate failed!");
++        return fd;
++     }
++#endif
+    fd = eina_file_mkstemp("comp-keymapXXXXXX", &file);
+    if (fd < 0)
+      {

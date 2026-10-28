@@ -1,0 +1,22 @@
+pkgname=libjpeg-turbo
+pkgver=3.0.4
+pkgdesc="JPEG image codec with SIMD acceleration"
+source="https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/$pkgver/libjpeg-turbo-$pkgver.tar.gz"
+sha256="99130559e7d62e8d695f2c0eaeef912c5828d5b84a0537dcb24c9678c9d5b76b"
+builddir="libjpeg-turbo-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    cmake -G Ninja -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="$HX_ARCH" \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_AR="$(command -v llvm-ar)" -DCMAKE_RANLIB="$(command -v llvm-ranlib)" \
+        -DENABLE_STATIC=OFF -DENABLE_SHARED=ON -DWITH_SIMD=OFF -DWITH_TURBOJPEG=OFF -DWITH_JPEG8=ON
+    cmake --build build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+    rm -rf "$pkgdir/usr/bin" "$pkgdir/usr/share"
+}

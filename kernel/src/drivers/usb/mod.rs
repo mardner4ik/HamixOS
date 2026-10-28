@@ -1,3 +1,4 @@
+pub mod ehci;
 pub mod hid;
 pub mod uhci;
 
@@ -70,8 +71,8 @@ impl DeviceClass {
             DeviceClass::HidMouse => "HID mouse",
             DeviceClass::HidKeyboard => "HID keyboard",
             DeviceClass::HidOther => "HID device",
-            DeviceClass::MassStorage => "mass storage (not supported yet)",
-            DeviceClass::Hub => "hub (not supported yet)",
+            DeviceClass::MassStorage => "mass storage",
+            DeviceClass::Hub => "hub",
             DeviceClass::Other => "device",
         }
     }
@@ -157,7 +158,17 @@ fn ehci_take_over(device: &PciDevice, controller: &mut Controller) {
     controller.note = format!("taken over from firmware, {} port(s) routed to companion UHCI/OHCI controllers", ports);
 }
 
+static STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn scan() -> bool {
+    let high_speed = ehci::scan();
+    uhci::scan() || high_speed
+}
+
 pub fn init() {
+    if STARTED.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let devices: Vec<PciDevice> = pci::enumerate()
         .into_iter()
         .filter(|d| d.class == CLASS_SERIAL_BUS && d.subclass == SUBCLASS_USB)
@@ -172,9 +183,20 @@ pub fn init() {
         if companions || (has_companions && device.vendor != 0x8086) {
             pci::enable_bus_master(device.address);
             ehci_take_over(device, &mut controller);
+            if crate::memory::cmdline_value("ehci").as_deref() != Some("0") && !ehci::attach(device, &mut controller) {
+                crate::drivers::klog::log("usb: EHCI driver could not start, ports stay with the companion controllers");
+            }
+        } else if crate::memory::cmdline_value("ehci").as_deref() != Some("0") {
+            pci::enable_bus_master(device.address);
+            if ehci::attach(device, &mut controller) {
+                controller.note = format!("{} port(s), rate-matching hub: keyboards, mice and flash drives driven", controller.ports);
+            } else {
+                controller.base = device.mmio_bar(0).unwrap_or(0);
+                controller.note = String::from("rate-matching hub, the EHCI driver could not start; left to the firmware");
+            }
         } else {
             controller.base = device.mmio_bar(0).unwrap_or(0);
-            controller.note = String::from("no UHCI companions (rate-matching hub), left to the firmware");
+            controller.note = String::from("no UHCI companions (rate-matching hub), left to the firmware (ehci=0)");
         }
         controllers.push(controller);
     }
@@ -222,19 +244,21 @@ pub fn init() {
 
 extern "C" fn usb_daemon(_: u64) -> ! {
     loop {
+        ehci::scan();
         uhci::scan();
         crate::task::sleep_ticks(crate::task::TICK_HZ / 4);
     }
 }
 
 pub fn start_daemon() {
-    if uhci::active() {
+    if uhci::active() || ehci::active() {
         crate::task::spawn_kernel_thread("usbd", 0, usb_daemon, 0);
     }
 }
 
 pub fn poll() {
     uhci::poll();
+    ehci::poll();
 }
 
 pub fn adopt_controller(bus: u8, device: u8, function: u8, kind: u32, ports: u32, owner: &str) {

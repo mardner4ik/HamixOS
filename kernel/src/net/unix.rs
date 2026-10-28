@@ -11,17 +11,17 @@ pub const SOCK_STREAM: u8 = 1;
 pub const SOCK_DGRAM: u8 = 2;
 pub const SOCK_SEQPACKET: u8 = 5;
 
-pub const EAGAIN: i64 = -11;
-pub const EINVAL: i64 = -22;
-pub const EPIPE: i64 = -32;
-pub const EMSGSIZE: i64 = -90;
-pub const EPROTOTYPE: i64 = -91;
-pub const EOPNOTSUPP: i64 = -95;
-pub const EADDRINUSE: i64 = -98;
-pub const EISCONN: i64 = -106;
-pub const ENOTCONN: i64 = -107;
-pub const ECONNREFUSED: i64 = -111;
-pub const EDESTADDRREQ: i64 = -89;
+pub use crate::errno::EAGAIN;
+pub use crate::errno::EINVAL;
+pub use crate::errno::EPIPE;
+pub use crate::errno::EMSGSIZE;
+pub use crate::errno::EPROTOTYPE;
+pub use crate::errno::EOPNOTSUPP;
+pub use crate::errno::EADDRINUSE;
+pub use crate::errno::EISCONN;
+pub use crate::errno::ENOTCONN;
+pub use crate::errno::ECONNREFUSED;
+pub use crate::errno::EDESTADDRREQ;
 
 const CAPACITY: usize = 256 * 1024;
 const MAX_DATAGRAM: usize = 212 * 1024;

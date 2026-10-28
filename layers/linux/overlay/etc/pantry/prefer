@@ -1,0 +1,3 @@
+so:libudev.so.1 libudev-zero
+pc:libudev libudev-zero-dev
+pc:udev libudev-zero-dev

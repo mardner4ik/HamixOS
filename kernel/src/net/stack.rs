@@ -15,15 +15,15 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, Icmpv4Packet, Icmpv4Repr, 
 use super::{with_devices, NetDevice};
 use crate::task::{self, Pid};
 
-pub const EINVAL: i64 = -22;
-pub const EBADF: i64 = -9;
-pub const ENETDOWN: i64 = -100;
-pub const ETIMEDOUT: i64 = -110;
-pub const ECONNREFUSED: i64 = -111;
-pub const EHOSTUNREACH: i64 = -113;
-pub const ENOTCONN: i64 = -107;
-pub const EAGAIN: i64 = -11;
-pub const ENOENT: i64 = -2;
+pub use crate::errno::EINVAL;
+pub use crate::errno::EBADF;
+pub use crate::errno::ENETDOWN;
+pub use crate::errno::ETIMEDOUT;
+pub use crate::errno::ECONNREFUSED;
+pub use crate::errno::EHOSTUNREACH;
+pub use crate::errno::ENOTCONN;
+pub use crate::errno::EAGAIN;
+pub use crate::errno::ENOENT;
 
 const LINK_DOWN_GRACE_MS: u64 = 3000;
 const DHCP_RETRY_MS: u64 = 20000;

@@ -68,9 +68,13 @@ const SC_C: u8 = 0x2E;
 static EXTENDED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn on_scancode(scancode: u8) {
+    super::evdev::on_scancode(scancode);
+    let claimed = super::evdev::claimed(super::evdev::KEYBOARD);
     let extended = EXTENDED.swap(scancode == 0xE0, core::sync::atomic::Ordering::Relaxed);
     if extended && scancode & 0x80 == 0 && crate::drivers::audio::hotkey(scancode) {
-        KEY_QUEUE.lock().push(scancode);
+        if !claimed {
+            KEY_QUEUE.lock().push(scancode);
+        }
         crate::task::notify_input();
         return;
     }
@@ -82,13 +86,15 @@ fn on_scancode(scancode: u8) {
         _ => {}
     }
     if (SC_F1..=SC_F6).contains(&scancode) && *HOTKEY_CTRL.lock() && *HOTKEY_ALT.lock() {
-        crate::vt::request_switch((scancode - SC_F1) as usize);
+        crate::tty::vt::request_switch((scancode - SC_F1) as usize);
         return;
     }
     if scancode == SC_C && *HOTKEY_CTRL.lock() {
-        crate::vt::request_kill();
+        crate::tty::vt::request_kill();
     }
-    KEY_QUEUE.lock().push(scancode);
+    if !claimed {
+        KEY_QUEUE.lock().push(scancode);
+    }
     crate::task::notify_input();
 }
 
@@ -208,7 +214,7 @@ fn extended_to_key(sc: u8) -> Option<Key> {
 }
 
 pub fn read_key() -> Option<Key> {
-    if !crate::vt::input_allowed(crate::task::current_pid(), crate::task::current_vt()) {
+    if !crate::tty::vt::input_allowed(crate::task::current_pid(), crate::task::current_vt()) {
         return None;
     }
     let key = decode_key();
@@ -353,7 +359,7 @@ fn decode_key() -> Option<Key> {
 pub fn read_key_blocking() -> Key {
     loop {
         let seq = crate::task::input_seq();
-        crate::vt::service_pending();
+        crate::tty::vt::service_pending();
         if let Some(key) = read_key() {
             return key;
         }

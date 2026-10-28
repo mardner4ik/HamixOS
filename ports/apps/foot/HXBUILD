@@ -1,0 +1,22 @@
+pkgname=foot
+pkgver=1.19.0
+pkgdesc="Fast, lightweight Wayland terminal emulator"
+source="foot-$pkgver.tar.gz::https://codeberg.org/dnkl/foot/archive/$pkgver.tar.gz"
+sha256="aa537908dff8a573adb68137974f8b317eed3b779d3e6954da84e0baff7b13a0"
+builddir="foot"
+depends="fcft tllist wayland wayland-protocols libxkbcommon fontconfig pixman"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dc_args="-I$HX_ROOT/usr/include" -Dwerror=false -Ddocs=disabled -Dthemes=true -Dime=true -Dgrapheme-clustering=disabled \
+        -Dterminfo=disabled -Ddefault-terminfo=xterm-256color -Dtests=false -Dutmp-backend=none
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/doc" "$pkgdir/usr/share/zsh" "$pkgdir/usr/share/fish" "$pkgdir/usr/share/bash-completion"
+    for f in foot-server footclient; do
+        echo "NoDisplay=true" >> "$pkgdir/usr/share/applications/$f.desktop"
+    done
+}

@@ -30,7 +30,7 @@ not as resistant to a determined offline attacker.
 ## uid / euid, exactly like POSIX
 
 Because HamixOS still runs the entire shell as kernel code with no separate
-processes yet (see `docs/USERSPACE_ROADMAP.md`), there's no fork/exec to
+processes yet (see `docs/history/USERSPACE_ROADMAP.md`), there's no fork/exec to
 hand off privilege to a child process the way a real `sudo` binary does.
 Instead, `hsh` keeps the same two numbers the kernel would eventually track
 per-process:
@@ -83,7 +83,7 @@ setuid-root ELF binary that `execve()`s the target command in a *new
 process* running as uid 0; HamixOS has no process concept to exec into yet,
 so today's `sudo` is a trusted function inside the one shell "process" that
 temporarily raises its own effective uid. The moment the ELF
-loader/scheduler milestones in `docs/USERSPACE_ROADMAP.md` land, this same
+loader/scheduler milestones in `docs/history/USERSPACE_ROADMAP.md` land, this same
 permission table (`kernel/src/users.rs`) becomes the backing store for a
 real `setuid` bit on `/bin/sudo`'s inode and a real `sys_setuid`/`sys_execve`
 pair -- no data model changes required, only the process plumbing underneath

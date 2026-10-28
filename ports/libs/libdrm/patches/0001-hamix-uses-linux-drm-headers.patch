@@ -1,0 +1,22 @@
+--- a/include/drm/drm.h	2026-09-29 17:46:05.248015714 +0300
++++ b/include/drm/drm.h	2026-09-29 17:46:05.250905454 +0300
+@@ -35,7 +35,7 @@
+ #ifndef _DRM_H_
+ #define _DRM_H_
+ 
+-#if   defined(__linux__)
++#if   defined(__linux__) || defined(__hamix__)
+ 
+ #include <linux/types.h>
+ #include <asm/ioctl.h>
+--- a/xf86drm.h	2026-09-29 17:46:05.249528798 +0300
++++ b/xf86drm.h	2026-09-29 17:46:05.252905485 +0300
+@@ -47,7 +47,7 @@
+ #define DRM_MAX_MINOR   64 /* deprecated */
+ #endif
+ 
+-#if defined(__linux__)
++#if (defined(__linux__) || defined(__hamix__))
+ 
+ #define DRM_IOCTL_NR(n)		_IOC_NR(n)
+ #define DRM_IOC_VOID		_IOC_NONE

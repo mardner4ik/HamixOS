@@ -1,0 +1,9 @@
+prefix=/usr
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: hxproto
+Description: Client library for the HamixOS hxserver display protocol
+Version: @VERSION@
+Libs: -L${libdir} -lhxproto
+Cflags: -I${includedir}

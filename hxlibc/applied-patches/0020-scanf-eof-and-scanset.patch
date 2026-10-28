@@ -1,0 +1,31 @@
+--- a/options/ansi/generic/stdio-stubs.cpp	2026-09-30 15:34:58.954303955 +0300
++++ b/options/ansi/generic/stdio-stubs.cpp	2026-09-30 15:34:58.969052839 +0300
+@@ -460,6 +460,9 @@
+ 				handler.consume();
+ 		}
+ 
++		if (*fmt != 'n' && !handler.look_ahead())
++			return match_count ? match_count : EOF;
++
+ 		switch (*fmt) {
+ 			case 'd':
+ 			case 'u':
+@@ -645,14 +648,16 @@
+ 				int count = 0;
+ 				char c = handler.look_ahead();
+ 				while (c && (!width || count < width)) {
+-					handler.consume();
+-					if (!scanset[1 + c])
++					if (!scanset[1 + (unsigned char)c])
+ 						break;
++					handler.consume();
+ 					if (typed_dest)
+ 						typed_dest[count] = c;
+ 					c = handler.look_ahead();
+ 					count++;
+ 				}
++				if (!count)
++					return match_count;
+ 				if (typed_dest)
+ 					typed_dest[count] = '\0';
+ 				break;

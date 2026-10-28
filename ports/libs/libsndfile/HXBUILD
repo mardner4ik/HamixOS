@@ -1,0 +1,18 @@
+pkgname=libsndfile
+pkgver=1.2.2
+pkgdesc="Library for reading and writing sampled sound files"
+source="https://github.com/libsndfile/libsndfile/releases/download/$pkgver/libsndfile-$pkgver.tar.xz"
+sha256="3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e"
+builddir="libsndfile-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static \
+        --disable-external-libs --disable-mpeg --disable-full-suite --disable-alsa --disable-sqlite
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share" "$pkgdir/usr/bin"
+}

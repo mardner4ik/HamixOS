@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
-use hamix_std::audio;
-use hamix_std::sys;
+use hxstd::audio;
+use hxstd::sys;
 use hxclient::ui::{self, theme, Style};
 use vellum::gfx::ellipsize;
 use vellum::{Area, Painter};

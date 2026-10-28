@@ -13,7 +13,7 @@ pub const DT_REG: u8 = 8;
 pub const DT_LNK: u8 = 10;
 const DT_FIFO: u8 = 1;
 
-const PID_FILES: [&str; 6] = ["stat", "statm", "status", "cmdline", "comm", "maps"];
+const PID_FILES: [&str; 7] = ["stat", "statm", "status", "cmdline", "environ", "comm", "maps"];
 const PID_LINKS: [&str; 2] = ["exe", "cwd"];
 const INO_BASE: u64 = 0x4000_0000;
 
@@ -43,6 +43,7 @@ struct Snapshot {
     uid: u32,
     ruid: u32,
     args: Vec<String>,
+    env: Vec<String>,
     exe: String,
     cwd: String,
     kernel_thread: bool,
@@ -53,6 +54,10 @@ struct Snapshot {
     rss: u64,
     mmap: (u64, u64),
     cpu: usize,
+    vt: usize,
+    abi: &'static str,
+    debug: String,
+    leader: Pid,
 }
 
 fn snapshot(pid: Pid) -> Option<Snapshot> {
@@ -68,7 +73,7 @@ fn snapshot(pid: Pid) -> Option<Snapshot> {
                 Some(OpenFile::Memfd { name, .. }) => FdKind::Path(format!("/memfd:{} (deleted)", name)),
                 Some(OpenFile::Epoll(_)) => FdKind::Path(String::from("anon_inode:[eventpoll]")),
                 Some(OpenFile::Mailbox) => FdKind::Path(String::from("anon_inode:[hamix-mailbox]")),
-                Some(OpenFile::Special(id)) => FdKind::Path(String::from(super::special::describe(*id))),
+                Some(OpenFile::Special(id)) => FdKind::Path(String::from(crate::syscall::special::describe(*id))),
                 Some(OpenFile::PtyMaster { .. }) => FdKind::Path(String::from("/dev/ptmx")),
                 Some(OpenFile::PtySlave { index, .. }) => FdKind::Path(alloc::format!("/dev/pts/{}", index)),
                 None if i < 3 && !t.kernel_thread => FdKind::Console,
@@ -76,7 +81,21 @@ fn snapshot(pid: Pid) -> Option<Snapshot> {
             };
             fds.push((i, kind));
         }
+        let (wait, on_cpu, wake_at) = task::wait_state(t);
+        let debug = format!(
+            "HamixWait:\tsyscall={} wait={:#x} futex={:#x} cpu={:?} pinned={:?} wake_at={} pending={:#x} mask={:#x}\n",
+            t.syscall as i64,
+            wait,
+            t.futex,
+            on_cpu,
+            t.pinned,
+            wake_at,
+            t.sig_pending,
+            t.sig_mask
+        );
         Snapshot {
+            debug,
+            leader: t.leader,
             pid: t.pid,
             parent: t.parent,
             name: t.name.clone(),
@@ -84,6 +103,7 @@ fn snapshot(pid: Pid) -> Option<Snapshot> {
             uid: t.uid,
             ruid: t.ruid,
             args: t.args.clone(),
+            env: t.env.clone(),
             exe: t.exe.clone(),
             cwd: t.cwd.clone(),
             kernel_thread: t.kernel_thread,
@@ -94,6 +114,8 @@ fn snapshot(pid: Pid) -> Option<Snapshot> {
             rss: t.aspace.as_ref().map(|a| paging::resident_pages(a.root)).unwrap_or(0),
             mmap: (paging::USER_MMAP_BASE, t.mmap_next),
             cpu: t.last_cpu,
+            vt: t.vt,
+            abi: if t.kernel_thread { "kernel" } else { t.abi.name() },
         }
     })
     .filter(|s| s.pid != 0)
@@ -126,13 +148,14 @@ fn file_content(s: &Snapshot, name: &str) -> Vec<u8> {
     let vsize = rss * paging::PAGE_SIZE;
     let text = match name {
         "stat" => format!(
-            "{} ({}) {} {} {} {} 0 -1 {} 0 0 0 0 {} 0 0 0 20 0 {} 0 {} {} {} 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+            "{} ({}) {} {} {} {} {} -1 {} 0 0 0 0 {} 0 0 0 20 0 {} 0 {} {} {} 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
             s.pid,
             comm,
             state_letter(s.state),
             s.parent,
             s.pid,
             s.pid,
+            if s.kernel_thread { 0 } else { (4 << 8) | (s.vt as u32 + 1) },
             if s.kernel_thread { 0x0020_0040u32 } else { 0x0040_0000 },
             to_clock_ticks(s.cpu_ticks),
             task::group_of(s.pid).len().max(1),
@@ -143,7 +166,7 @@ fn file_content(s: &Snapshot, name: &str) -> Vec<u8> {
         ),
         "statm" => format!("{} {} 0 0 0 {} 0\n", rss, rss, s.brk.1.saturating_sub(s.brk.0) / paging::PAGE_SIZE),
         "status" => format!(
-            "Name:\t{}\nState:\t{} ({})\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nThreads:\t{}\n",
+            "Name:\t{}\nState:\t{} ({})\nTgid:\t{}\nPid:\t{}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nVmSize:\t{} kB\nVmRSS:\t{} kB\nThreads:\t{}\nAbi:\t{}\n",
             comm,
             state_letter(s.state),
             match s.state {
@@ -151,7 +174,7 @@ fn file_content(s: &Snapshot, name: &str) -> Vec<u8> {
                 State::Blocked => "sleeping",
                 State::Zombie => "zombie",
             },
-            s.pid,
+            s.leader,
             s.pid,
             s.parent,
             s.ruid,
@@ -164,12 +187,25 @@ fn file_content(s: &Snapshot, name: &str) -> Vec<u8> {
             s.uid,
             vsize / 1024,
             vsize / 1024,
-            task::group_of(s.pid).len().max(1)
-        ),
+            task::group_of(s.pid).len().max(1),
+            s.abi
+        ) + &s.debug,
         "cmdline" => {
             let mut out = Vec::new();
             for arg in &s.args {
                 out.extend_from_slice(arg.as_bytes());
+                out.push(0);
+            }
+            return out;
+        }
+        "environ" => {
+            let viewer = task::with_current(|t| t.uid);
+            if viewer != 0 && viewer != s.uid && viewer != s.ruid {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            for var in &s.env {
+                out.extend_from_slice(var.as_bytes());
                 out.push(0);
             }
             return out;
@@ -196,7 +232,7 @@ fn ino(pid: Pid, slot: u64) -> u64 {
 }
 
 fn stat(ino: u64, mode: u32, uid: u32, size: u64) -> LinuxStat {
-    LinuxStat { dev: 0x50, ino, mode, uid, size, nlink: 0 }
+    LinuxStat { dev: 0x50, ino, mode, uid, gid: 0, size, nlink: 0, rdev: 0 }
 }
 
 fn split(path: &str) -> Option<(Pid, Vec<&str>)> {
@@ -238,15 +274,27 @@ fn global_text(name: &str) -> Option<String> {
         }
         "meminfo" => {
             let (free, total) = crate::memory::frame::memory_info();
+            let (heap_free, heap_total) = crate::memory::heap_stats();
+            let (vmalloc_bytes, vmalloc_blocks) = crate::memory::vmalloc::stats();
             let cached = fs::file_cache_bytes();
             let kb = |b: usize| b / 1024;
             format!(
-                "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\nBuffers:               0 kB\nCached:         {:>8} kB\nSwapCached:            0 kB\nActive:         {:>8} kB\nInactive:              0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nShmem:                 0 kB\nSReclaimable:          0 kB\n",
+                "MemTotal:       {:>8} kB\nMemFree:        {:>8} kB\nMemAvailable:   {:>8} kB\nBuffers:               0 kB\nCached:         {:>8} kB\nSwapCached:            0 kB\nActive:         {:>8} kB\nInactive:              0 kB\nSwapTotal:             0 kB\nSwapFree:              0 kB\nShmem:                 0 kB\nSReclaimable:          0 kB\nMemUsed:        {:>8} kB\nKernelHeap:     {:>8} kB\nHeapFree:       {:>8} kB\nVmalloc:        {:>8} kB\nVmallocBlk:     {:>8}\nFileCache:      {:>8} kB\nVfsNodes:       {:>8}\nHeapCorrupt:    {:>8}\nTlbShootdown:   {:>8}\nTlbTimeout:     {:>8}\n",
                 kb(total),
                 kb(free),
                 kb(free + cached),
                 kb(cached),
-                kb(total - free)
+                kb(total - free),
+                kb(total - free),
+                kb(heap_total),
+                kb(heap_free),
+                kb(vmalloc_bytes),
+                vmalloc_blocks,
+                kb(cached),
+                fs::vfs_node_count(),
+                crate::memory::heap::corruptions().0,
+                crate::memory::tlb::shootdowns(),
+                crate::memory::tlb::timeouts()
             )
         }
         "uptime" => {

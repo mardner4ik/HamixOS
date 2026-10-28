@@ -1,0 +1,143 @@
+diff --color -ru a/src/lib/eina/eina_file_common.c b/src/lib/eina/eina_file_common.c
+--- a/src/lib/eina/eina_file_common.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/eina/eina_file_common.c	2026-09-29 22:15:25.520167413 +0300
+@@ -463,7 +463,7 @@
+    eina_lock_recursive_new(&file->lock);
+    file->mtime = ti / 1000;
+    file->length = length;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+    file->mtime_nsec = ti;
+ #endif
+    file->refcount = 1;
+diff --color -ru a/src/lib/eina/eina_file_common.h b/src/lib/eina/eina_file_common.h
+--- a/src/lib/eina/eina_file_common.h	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/eina/eina_file_common.h	2026-09-29 22:15:25.519929424 +0300
+@@ -79,7 +79,7 @@
+    unsigned long long length;  /**< The length of the file in bytes. */
+    time_t mtime;               /**< The last modified time. */
+    ino_t inode;                /**< The inode. */
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+    unsigned long int mtime_nsec; /**< The nano version of the last modified time. */
+ #endif
+ #else
+diff --color -ru a/src/lib/eina/eina_file_posix.c b/src/lib/eina/eina_file_posix.c
+--- a/src/lib/eina/eina_file_posix.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/eina/eina_file_posix.c	2026-09-29 22:15:25.522273825 +0300
+@@ -411,7 +411,7 @@
+    if (f->mtime != st->st_mtime) return EINA_FALSE;
+    if (f->length != (unsigned long long) st->st_size) return EINA_FALSE;
+    if (f->inode != st->st_ino) return EINA_FALSE;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    if (f->mtime_nsec != (unsigned long int)st->st_mtim.tv_nsec)
+      return EINA_FALSE;
+@@ -869,7 +869,7 @@
+         n->global_map = MAP_FAILED;
+         n->length = file_stat.st_size;
+         n->mtime = file_stat.st_mtime;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+         n->mtime_nsec = (unsigned long int)file_stat.st_mtim.tv_nsec;
+ # else
+@@ -927,7 +927,7 @@
+ 
+    file->length = file_stat.st_size;
+    file->mtime = file_stat.st_mtime;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    file->mtime_nsec = (unsigned long int)file_stat.st_mtim.tv_nsec;
+ # else
+@@ -1244,7 +1244,7 @@
+    st->atime = buf.st_atime;
+    st->mtime = buf.st_mtime;
+    st->ctime = buf.st_ctime;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    st->atimensec = buf.st_atim.tv_nsec;
+    st->mtimensec = buf.st_mtim.tv_nsec;
+@@ -1306,8 +1306,8 @@
+ //# define do_getdents(fd, buf, size) getdents64(fd, buf, size)
+ typedef struct
+ {
+-   ino64_t        d_ino;
+-   off64_t        d_off;
++   uint64_t       d_ino;
++   int64_t        d_off;
+    unsigned short d_reclen;
+    unsigned char  d_type;
+    char           d_name[4096];
+diff --color -ru a/src/lib/eio/eio_monitor_poll.c b/src/lib/eio/eio_monitor_poll.c
+--- a/src/lib/eio/eio_monitor_poll.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/eio/eio_monitor_poll.c	2026-09-29 22:15:25.518673378 +0300
+@@ -109,7 +109,7 @@
+    est->atime = st.st_atime;
+    est->mtime = st.st_mtime;
+    est->ctime = st.st_ctime;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    est->atimensec = st.st_atim.tv_nsec;
+    est->mtimensec = st.st_mtim.tv_nsec;
+diff --color -ru a/src/lib/eio/eio_single.c b/src/lib/eio/eio_single.c
+--- a/src/lib/eio/eio_single.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/eio/eio_single.c	2026-09-29 22:15:25.517278145 +0300
+@@ -127,7 +127,7 @@
+    es->atime = st->st_atime;
+    es->mtime = st->st_mtime;
+    es->ctime = st->st_ctime;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    es->atimensec = st->st_atim.tv_nsec;
+    es->mtimensec = st->st_mtim.tv_nsec;
+diff --color -ru a/src/lib/evas/cache/evas_cache_image.c b/src/lib/evas/cache/evas_cache_image.c
+--- a/src/lib/evas/cache/evas_cache_image.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/evas/cache/evas_cache_image.c	2026-09-29 22:15:25.519202913 +0300
+@@ -200,7 +200,7 @@
+    if (tstamp->mtime != st->st_mtime) return EINA_FALSE;
+    if (tstamp->size != st->st_size) return EINA_FALSE;
+    if (tstamp->ino != st->st_ino) return EINA_FALSE;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ #if (defined __USE_MISC && defined st_mtime)
+    if (tstamp->mtime_nsec != (unsigned long int)st->st_mtim.tv_nsec)
+      return EINA_FALSE;
+@@ -218,7 +218,7 @@
+    tstamp->mtime = st->st_mtime;
+    tstamp->size = st->st_size;
+    tstamp->ino = st->st_ino;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ #if (defined __USE_MISC && defined st_mtime)
+    tstamp->mtime_nsec = (unsigned long int)st->st_mtim.tv_nsec;
+ #else
+diff --color -ru a/src/lib/evas/common/evas_image_load.c b/src/lib/evas/common/evas_image_load.c
+--- a/src/lib/evas/common/evas_image_load.c	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/evas/common/evas_image_load.c	2026-09-29 22:15:25.518936186 +0300
+@@ -414,7 +414,7 @@
+    tstamp->mtime = st->st_mtime;
+    tstamp->size = st->st_size;
+    tstamp->ino = st->st_ino;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+ # if (defined __USE_MISC && defined st_mtime)
+    tstamp->mtime_nsec = (unsigned long int)st->st_mtim.tv_nsec;
+ # else
+diff --color -ru a/src/lib/evas/include/evas_common_private.h b/src/lib/evas/include/evas_common_private.h
+--- a/src/lib/evas/include/evas_common_private.h	2023-12-23 17:56:36.000000000 +0200
++++ b/src/lib/evas/include/evas_common_private.h	2026-09-29 22:15:25.519519951 +0300
+@@ -523,7 +523,7 @@
+    time_t mtime;
+    off_t  size;
+    ino_t  ino;
+-#ifdef _STAT_VER_LINUX
++#if defined(_STAT_VER_LINUX) && !defined(__hamix__)
+    unsigned long int mtime_nsec;
+ #endif
+ };

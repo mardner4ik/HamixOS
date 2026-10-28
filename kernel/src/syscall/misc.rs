@@ -1,10 +1,11 @@
-use alloc::vec::Vec;
 
-use crate::syscall::{copy_out, target, user_slice, Target, EBADF, EFAULT, EINVAL, EPERM, ESRCH};
+use crate::syscall::{target, Target};
+use crate::usercopy::{copy_out, user_slice, user_slice_mut};
+use crate::errno::{EBADF, EFAULT, EINVAL, EPERM, ESRCH};
 use crate::fs;
 use crate::task::{self, Pid};
 
-const ENOTSUP: i64 = -95;
+use crate::errno::ENOTSUP;
 const RLIM_INFINITY: u64 = u64::MAX;
 
 fn valid_fd(fd: u64) -> bool {
@@ -78,7 +79,8 @@ pub fn sys_times(buf: u64) -> i64 {
 }
 
 fn realtime_us() -> u64 {
-    crate::drivers::rtc::boot_epoch() * 1_000_000 + task::uptime_ms() * 1000
+    let ns = crate::arch::monotonic_ns().unwrap_or_else(|| task::uptime_ms() * 1_000_000);
+    crate::drivers::rtc::boot_epoch() * 1_000_000 + ns / 1000
 }
 
 pub fn sys_gettimeofday(tv: u64, tz: u64) -> i64 {
@@ -108,12 +110,17 @@ pub fn sys_time(tloc: u64) -> i64 {
 pub fn sys_clock_getres(_clock: u64, res: u64) -> i64 {
     if res != 0 {
         let mut raw = [0u8; 16];
-        raw[8..16].copy_from_slice(&1_000_000u64.to_le_bytes());
+        let resolution: u64 = if crate::arch::monotonic_ns().is_some() { 1 } else { 1_000_000 };
+        raw[8..16].copy_from_slice(&resolution.to_le_bytes());
         if copy_out(res, 16, &raw) < 0 {
             return EFAULT;
         }
     }
     0
+}
+
+fn wanted(value: u64, current: u32) -> u32 {
+    if value as u32 == u32::MAX { current } else { value as u32 }
 }
 
 pub fn sys_setuid(uid: u64) -> i64 {
@@ -122,8 +129,9 @@ pub fn sys_setuid(uid: u64) -> i64 {
         if t.uid == 0 {
             t.uid = uid;
             t.ruid = uid;
+            t.suid = uid;
             0
-        } else if uid == t.ruid || uid == t.uid {
+        } else if uid == t.ruid || uid == t.suid {
             t.uid = uid;
             0
         } else {
@@ -133,26 +141,37 @@ pub fn sys_setuid(uid: u64) -> i64 {
 }
 
 pub fn sys_setreuid(ruid: u64, euid: u64) -> i64 {
-    let (cur_r, cur_e) = task::with_current(|t| (t.ruid, t.uid));
-    let want_r = if ruid as u32 == u32::MAX { cur_r } else { ruid as u32 };
-    let want_e = if euid as u32 == u32::MAX { cur_e } else { euid as u32 };
-    if cur_e != 0 && !([cur_r, cur_e].contains(&want_r) && [cur_r, cur_e].contains(&want_e)) {
-        return EPERM;
-    }
     task::with_current(|t| {
-        t.ruid = want_r;
-        t.uid = want_e;
-    });
-    0
+        let (r, e) = (wanted(ruid, t.ruid), wanted(euid, t.uid));
+        if t.uid != 0 && (![t.ruid, t.uid].contains(&r) || ![t.ruid, t.uid, t.suid].contains(&e)) {
+            return EPERM;
+        }
+        if ruid as u32 != u32::MAX || (euid as u32 != u32::MAX && e != t.ruid) {
+            t.suid = e;
+        }
+        t.ruid = r;
+        t.uid = e;
+        0
+    })
 }
 
-pub fn sys_setresuid(ruid: u64, euid: u64, _suid: u64) -> i64 {
-    sys_setreuid(ruid, euid)
+pub fn sys_setresuid(ruid: u64, euid: u64, suid: u64) -> i64 {
+    task::with_current(|t| {
+        let (r, e, s) = (wanted(ruid, t.ruid), wanted(euid, t.uid), wanted(suid, t.suid));
+        let allowed = [t.ruid, t.uid, t.suid];
+        if t.uid != 0 && !(allowed.contains(&r) && allowed.contains(&e) && allowed.contains(&s)) {
+            return EPERM;
+        }
+        t.ruid = r;
+        t.uid = e;
+        t.suid = s;
+        0
+    })
 }
 
 pub fn sys_getresuid(r: u64, e: u64, s: u64) -> i64 {
-    let (ruid, uid) = task::with_current(|t| (t.ruid, t.uid));
-    for (ptr, value) in [(r, ruid), (e, uid), (s, uid)] {
+    let (ruid, uid, suid) = task::with_current(|t| (t.ruid, t.uid, t.suid));
+    for (ptr, value) in [(r, ruid), (e, uid), (s, suid)] {
         if copy_out(ptr, 4, &value.to_le_bytes()) < 0 {
             return EFAULT;
         }
@@ -161,9 +180,8 @@ pub fn sys_getresuid(r: u64, e: u64, s: u64) -> i64 {
 }
 
 pub fn sys_getresgid(r: u64, e: u64, s: u64) -> i64 {
-    let rgid = super::base::sys_getgid() as u32;
-    let egid = super::base::sys_getegid() as u32;
-    for (ptr, value) in [(r, rgid), (e, egid), (s, egid)] {
+    let (rgid, egid, sgid) = task::with_current(|t| (t.rgid, t.egid, t.sgid));
+    for (ptr, value) in [(r, rgid), (e, egid), (s, sgid)] {
         if copy_out(ptr, 4, &value.to_le_bytes()) < 0 {
             return EFAULT;
         }
@@ -171,8 +189,50 @@ pub fn sys_getresgid(r: u64, e: u64, s: u64) -> i64 {
     0
 }
 
-pub fn sys_setgid(_gid: u64) -> i64 {
-    0
+pub fn sys_setregid(rgid: u64, egid: u64) -> i64 {
+    task::with_current(|t| {
+        let (r, e) = (wanted(rgid, t.rgid), wanted(egid, t.egid));
+        if t.uid != 0 && (![t.rgid, t.egid].contains(&r) || ![t.rgid, t.egid, t.sgid].contains(&e)) {
+            return EPERM;
+        }
+        if rgid as u32 != u32::MAX || (egid as u32 != u32::MAX && e != t.rgid) {
+            t.sgid = e;
+        }
+        t.rgid = r;
+        t.egid = e;
+        0
+    })
+}
+
+pub fn sys_setresgid(rgid: u64, egid: u64, sgid: u64) -> i64 {
+    task::with_current(|t| {
+        let (r, e, s) = (wanted(rgid, t.rgid), wanted(egid, t.egid), wanted(sgid, t.sgid));
+        let allowed = [t.rgid, t.egid, t.sgid];
+        if t.uid != 0 && !(allowed.contains(&r) && allowed.contains(&e) && allowed.contains(&s)) {
+            return EPERM;
+        }
+        t.rgid = r;
+        t.egid = e;
+        t.sgid = s;
+        0
+    })
+}
+
+pub fn sys_setgid(gid: u64) -> i64 {
+    let gid = gid as u32;
+    task::with_current(|t| {
+        if t.uid == 0 {
+            t.rgid = gid;
+            t.egid = gid;
+            t.sgid = gid;
+            0
+        } else if gid == t.rgid || gid == t.sgid {
+            t.egid = gid;
+            0
+        } else {
+            EPERM
+        }
+    })
 }
 
 pub fn sys_setfsuid(_uid: u64) -> i64 {
@@ -180,7 +240,7 @@ pub fn sys_setfsuid(_uid: u64) -> i64 {
 }
 
 pub fn sys_setfsgid(_gid: u64) -> i64 {
-    super::base::sys_getegid()
+    task::with_current(|t| t.egid) as i64
 }
 
 pub fn sys_setpgid(pid: u64, pgid: u64) -> i64 {
@@ -198,6 +258,24 @@ pub fn sys_setpgid(pid: u64, pgid: u64) -> i64 {
 pub fn sys_getpgid(pid: u64) -> i64 {
     let target_pid = if pid == 0 { task::current_pid() } else { pid as Pid };
     task::with_task(target_pid, |t| t.pgid as i64).unwrap_or(ESRCH)
+}
+
+pub fn sys_reboot(magic1: u64, magic2: u64, cmd: u64) -> i64 {
+    const MAGIC1: u32 = 0xfee1_dead;
+    const MAGIC2: [u32; 4] = [672274793, 85072278, 369367448, 537993216];
+    if magic1 as u32 != MAGIC1 || !MAGIC2.contains(&(magic2 as u32)) {
+        return EINVAL;
+    }
+    if task::with_current(|t| t.uid) != 0 {
+        return -1;
+    }
+    match cmd as u32 {
+        0x0123_4567 => crate::syscall::power_off_mode(1),
+        0xCDEF_0123 => crate::syscall::power_off_mode(0),
+        0x4321_FEDC => crate::syscall::power_off_mode(2),
+        0x89AB_CDEF | 0 => 0,
+        _ => EINVAL,
+    }
 }
 
 pub fn sys_setsid() -> i64 {
@@ -277,8 +355,11 @@ pub fn sys_mincore(addr: u64, len: u64, vec: u64) -> i64 {
     if !crate::arch::paging::is_user_range(addr, pages * page_size) {
         return crate::syscall::ENOMEM;
     }
-    let mut state = alloc::vec![0u8; pages as usize];
-    for (i, slot) in state.iter_mut().enumerate() {
+    let out = match user_slice_mut(vec, pages) {
+        Ok(out) => out,
+        Err(e) => return e,
+    };
+    for (i, slot) in out.iter_mut().enumerate() {
         let page = addr + i as u64 * page_size;
         let (present, lazy) = crate::task::with_current(|t| {
             t.aspace.as_ref().map(|a| (a.translate(page).is_some(), a.lazy_at(page).is_some())).unwrap_or((false, false))
@@ -288,13 +369,7 @@ pub fn sys_mincore(addr: u64, len: u64, vec: u64) -> i64 {
         }
         *slot = present as u8;
     }
-    match user_slice(vec, pages) {
-        Ok(out) => {
-            out.copy_from_slice(&state);
-            0
-        }
-        Err(e) => e,
-    }
+    0
 }
 
 pub fn sys_get_mempolicy(mode: u64, nodemask: u64, maxnode: u64) -> i64 {
@@ -339,6 +414,9 @@ pub fn sys_mremap(old: u64, old_size: u64, new_size: u64, flags: u64, new_addr: 
     if old & (PAGE - 1) != 0 || new_size == 0 {
         return EINVAL;
     }
+    if old_size > 1 << 40 || new_size > 1 << 40 {
+        return -12;
+    }
     let old_len = old_size.div_ceil(PAGE) * PAGE;
     let new_len = new_size.div_ceil(PAGE) * PAGE;
     if flags & 2 != 0 {
@@ -365,20 +443,22 @@ pub fn sys_mremap(old: u64, old_size: u64, new_size: u64, flags: u64, new_addr: 
     if flags & 1 == 0 {
         return -12;
     }
-    let fresh = super::base::sys_mmap(0, new_len, 3, 0x22, u64::MAX, 0);
+    let fresh = crate::syscall::base::sys_mmap(0, new_len, 3, 0x22, u64::MAX, 0);
     if fresh < 0 {
         return fresh;
     }
-    let copy: Vec<u8> = match user_slice(old, old_len) {
-        Ok(b) => b.to_vec(),
-        Err(e) => {
+    let mut done = 0;
+    while done < old_len {
+        let step = (old_len - done).min(16 * PAGE);
+        let copied = match user_slice(old + done, step) {
+            Ok(b) => copy_out(fresh as u64 + done, step, &b.to_vec()),
+            Err(e) => e,
+        };
+        if copied < 0 {
             crate::syscall::sys_munmap(fresh as u64, new_len);
-            return e;
+            return EFAULT;
         }
-    };
-    if copy_out(fresh as u64, old_len, &copy) < 0 {
-        crate::syscall::sys_munmap(fresh as u64, new_len);
-        return EFAULT;
+        done += step;
     }
     crate::syscall::sys_munmap(old, old_len);
     fresh

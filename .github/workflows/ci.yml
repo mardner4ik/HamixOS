@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+      - run: cargo xtask lint-layers
+      - run: cargo xtask abi --check
+
+  x86_64:
+    runs-on: ubuntu-24.04
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+      - name: host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y grub-pc-bin grub-common xorriso mtools clang lld llvm qemu-system-x86 python3
+      - name: enable kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+      - run: cargo xtask build --profile core
+      - run: cargo xtask test --profile core --timeout 300
+      - run: cargo xtask build
+      - run: cargo xtask test --timeout 300
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: boot-test-logs
+          path: out/test/*.log
+
+  ports:
+    runs-on: ubuntu-24.04
+    needs: checks
+    strategy:
+      matrix:
+        arch: [aarch64, riscv64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+      - run: sudo apt-get update && sudo apt-get install -y clang lld llvm mtools dosfstools
+      - run: cargo xtask build --arch ${{ matrix.arch }}

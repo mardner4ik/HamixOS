@@ -1,0 +1,17 @@
+pkgname=atk
+pkgver=2.54.0
+pkgdesc="Accessibility toolkit (ATK from at-spi2-core)"
+source="https://download.gnome.org/sources/at-spi2-core/2.54/at-spi2-core-$pkgver.tar.xz"
+sha256="d7eee7e75beddcc272cedc2b60535600f3aae6e481589ebc667afc437c0a6079"
+builddir="at-spi2-core-$pkgver"
+depends="glib libxml2"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Datk_only=true -Dintrospection=disabled -Ddocs=false -Dx11=disabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

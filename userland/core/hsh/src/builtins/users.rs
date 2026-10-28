@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{sys, users};
+use hxstd::{sys, users};
 
 use super::basic::read_line_fd;
 use super::{parse_opts, Builtin};
@@ -42,7 +42,7 @@ fn spawn_root(sh: &mut Shell, args: &[String], io: Io) -> Result<i32, i64> {
     } else {
         match sh.resolve_program(name) {
             Some(path) => {
-                let is_elf = hamix_std::fs::read_prefix(&path, 4).map(|h| h.starts_with(b"\x7fELF")).unwrap_or(false);
+                let is_elf = hxstd::fs::read_prefix(&path, 4).map(|h| h.starts_with(b"\x7fELF")).unwrap_or(false);
                 if is_elf {
                     (path, args[1..].to_vec())
                 } else {
@@ -87,7 +87,7 @@ fn sudo(sh: &mut Shell, args: &[String], io: Io) -> i32 {
         }
     }
     let user = users::name_of(sys::getuid() as u32);
-    if !users::is_sudoer(&user) && hamix_std::fs::read_to_string("/etc/sudoers").is_some() {
+    if !users::is_sudoer(&user) && hxstd::fs::read_to_string("/etc/sudoers").is_some() {
         errln!(io, "{} is not allowed to use sudo", user);
         return 1;
     }
@@ -287,9 +287,6 @@ fn usermod(_: &mut Shell, args: &[String], io: Io) -> i32 {
                 return 1;
             }
         }
-    }
-    if root.is_empty() {
-        sys::users_reload();
     }
     0
 }

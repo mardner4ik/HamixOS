@@ -185,6 +185,28 @@ pub fn map_kernel_mmio(phys: u64, len: u64) -> bool {
 const LAZY: u64 = 1 << 1;
 
 pub mod pte {
+    pub const PROT_READ: u8 = 1;
+    pub const PROT_WRITE: u8 = 2;
+    pub const PROT_EXEC: u8 = 4;
+    pub const PROT_ALL: u8 = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+    #[inline]
+    pub fn lazy_prot(index: usize, _prot: u8) -> u64 {
+        lazy(index)
+    }
+
+    pub fn prot_of(_e: u64) -> u8 {
+        PROT_ALL
+    }
+
+    pub fn user_page_prot(phys: u64, owned: bool, _prot: u8) -> u64 {
+        user_page(phys, owned, false)
+    }
+
+    pub fn with_prot(e: u64, _prot: u8, _shared: bool) -> u64 {
+        e
+    }
+
     use super::*;
 
     pub use super::{USER_BASE, USER_END};
@@ -234,6 +256,28 @@ pub mod pte {
     #[inline]
     pub fn owned(e: u64) -> bool {
         e & OWNED != 0
+    }
+
+    pub const COW_SUPPORTED: bool = false;
+
+    #[inline]
+    pub fn writable(_e: u64) -> bool {
+        true
+    }
+
+    #[inline]
+    pub fn is_cow(_e: u64) -> bool {
+        false
+    }
+
+    #[inline]
+    pub fn make_cow(e: u64) -> u64 {
+        e
+    }
+
+    #[inline]
+    pub fn make_private(e: u64, phys: u64) -> u64 {
+        with_addr(e, phys)
     }
 
     #[inline]

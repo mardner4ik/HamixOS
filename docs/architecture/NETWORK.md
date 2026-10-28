@@ -2,7 +2,7 @@
 
 HamixOS has a real TCP/IP stack in the kernel. It is built on
 [smoltcp](https://github.com/smoltcp-rs/smoltcp) 0.12, vendored unchanged in
-`libs/smoltcp` (0BSD licence) and compiled into the kernel with only the parts
+`vendor/smoltcp` (0BSD licence) and compiled into the kernel with only the parts
 that are needed: Ethernet medium, IPv4, ARP, DHCPv4, DNS, ICMP, UDP and TCP.
 
 ```
@@ -14,8 +14,8 @@ kernel/src/net/
   yukon.rs        Marvell Yukon 88E8040 (sky2 family) Fast Ethernet
   ar9285.rs       Qualcomm Atheros AR9285 802.11n (b/g) Wi-Fi
   ar9285_ini.rs   register initialisation tables from the Atheros HAL (ISC)
-  wifi/           glue to libs/wlan
-libs/wlan/        802.11 station: scanning, authentication, association,
+  wifi/           glue to crates/wlan
+crates/wlan/        802.11 station: scanning, authentication, association,
                   WPA2-PSK (PBKDF2, PRF, 4-way handshake, AES key wrap, CCMP)
 ```
 
@@ -42,7 +42,7 @@ libs/wlan/        802.11 station: scanning, authentication, association,
 | `wget [-O file] http://host/path` | HTTP download |
 
 Linux programs (curl, wget, python, git...) use the same stack through real
-`AF_INET` TCP/UDP sockets, see `docs/LINUXULATOR.md`.
+`AF_INET` TCP/UDP sockets, see `docs/architecture/LINUXULATOR.md`.
 
 The Nook top bar shows the connection state (Ethernet, Wi-Fi signal strength or
 offline). Clicking it opens a menu with the adapters, the Wi-Fi networks and a
@@ -66,7 +66,7 @@ switch between Ethernet and Wi-Fi.
 ## Testing in QEMU
 
 ```
-qemu-system-x86_64 -M q35 -m 1G -smp 4 -enable-kvm -cdrom hamix_os.iso \
+qemu-system-x86_64 -M q35 -m 1G -smp 4 -enable-kvm -cdrom out/hamix_os.iso \
     -device e1000,netdev=n0 -netdev user,id=n0
 ```
 
@@ -97,14 +97,14 @@ address" forever:
   encryption/decryption was left on, so group-addressed (broadcast) frames
   could be flagged as decrypt errors and dropped. The driver clears all
   128 key cache entries, sets `AR_DIAG_ENCRYPT_DIS | AR_DIAG_DECRYPT_DIS`
-  and leaves CCMP to `libs/wlan`.
+  and leaves CCMP to `crates/wlan`.
 
 Every DHCP message is now written to the kernel log (`dmesg`, serial):
 `net: DHCP DISCOVER sent`, `net: DHCP OFFER received from ...`, and so on.
 If a machine still does not get an address, that log shows which step is
 missing.
 
-The 802.11 and WPA2 logic in `libs/wlan` is tested on the host with the
+The 802.11 and WPA2 logic in `crates/wlan` is tested on the host with the
 standard test vectors (SHA-1, HMAC, PBKDF2, PRF, AES, key wrap, CCMP) and with
 a simulated access point: `cargo test -p wlan`.
 

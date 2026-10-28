@@ -4,8 +4,8 @@ pub mod window;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::display::gpu;
-use hamix_std::{fs, sys};
+use hxstd::display::gpu;
+use hxstd::{fs, sys};
 use hxproto::{Event, MESSAGE_MAX};
 use vellum::{Area, Image, Painter};
 
@@ -47,8 +47,8 @@ pub struct Compositor {
     pub pointer: (i32, i32),
     pub buttons: u32,
     pub work: Area,
+    pub workspace: u32,
     pub next_id: u32,
-    pub cascade: i32,
     pub focused_sent: Option<u32>,
     pub resize_sent: u64,
 }
@@ -65,8 +65,8 @@ impl Compositor {
             pointer,
             buttons,
             work,
+            workspace: 0,
             next_id: 1,
-            cascade: 0,
             focused_sent: None,
             resize_sent: 0,
         }
@@ -192,16 +192,20 @@ impl Compositor {
         self.add_damage(new);
     }
 
+    pub fn shown(&self, w: &Window) -> bool {
+        !w.minimized && w.workspace == self.workspace
+    }
+
     pub fn index_of(&self, id: u32) -> Option<usize> {
         self.windows.iter().position(|w| w.id == id)
     }
 
     pub fn focused(&self) -> Option<u32> {
-        self.windows.iter().rev().find(|w| !w.minimized && !w.is_popup()).map(|w| w.id)
+        self.windows.iter().rev().find(|w| self.shown(w) && !w.is_popup()).map(|w| w.id)
     }
 
     pub fn window_at(&self, x: i32, y: i32) -> Option<usize> {
-        (0..self.windows.len()).rev().find(|&i| !self.windows[i].minimized && self.windows[i].outer().contains(x, y))
+        (0..self.windows.len()).rev().find(|&i| self.shown(&self.windows[i]) && self.windows[i].outer().contains(x, y))
     }
 
     pub fn children_of(&self, id: u32) -> Vec<u32> {
@@ -251,12 +255,28 @@ impl Compositor {
 
     pub fn place(&mut self, w: i32, h: i32) -> (i32, i32) {
         let avail = self.work;
-        let slack = (avail.h - h).max(0);
-        let offset = if slack > 0 { self.cascade % (slack + 1) } else { 0 };
-        let x = (self.width() - w) / 2 + self.cascade;
-        let y = avail.y + if slack > 0 { (slack / 3).min(48) + offset.min(slack / 2) } else { 0 };
-        self.cascade = (self.cascade + 28) % 140;
-        (x.clamp(0, (self.width() - w).max(0)), y.clamp(avail.y, (self.height() - h).max(avail.y)))
+        let fit = |x: i32, y: i32| (x.clamp(avail.x, (avail.right() - w).max(avail.x)), y.clamp(avail.y, (avail.bottom() - h).max(avail.y)));
+        let (mut x, mut y) = fit(avail.x + (avail.w - w) / 2, avail.y + (avail.h - h) / 2);
+        for _ in 0..8 {
+            let taken = self.windows.iter().any(|o| !o.is_popup() && !o.minimized && o.workspace == self.workspace && (o.x - x).abs() < 8 && (o.y - y).abs() < 8);
+            if !taken {
+                break;
+            }
+            let (nx, ny) = fit(x + 28, y + 28);
+            if (nx, ny) == (x, y) {
+                break;
+            }
+            x = nx;
+            y = ny;
+        }
+        (x, y)
+    }
+
+    pub fn place_over(&self, parent: Area, w: i32, h: i32) -> (i32, i32) {
+        let avail = self.work;
+        let x = parent.x + (parent.w - w) / 2;
+        let y = parent.y + (parent.h - h) / 3;
+        (x.clamp(avail.x, (avail.right() - w).max(avail.x)), y.clamp(avail.y, (avail.bottom() - h).max(avail.y)))
     }
 
     pub fn new_window(&mut self, title: &str, icon: &str, w: i32, h: i32, body: Body) -> u32 {
@@ -287,6 +307,8 @@ impl Compositor {
             track: false,
             placed: (i32::MIN, i32::MIN),
             frameless: false,
+            shadow: None,
+            workspace: self.workspace,
         });
         id
     }
@@ -318,6 +340,8 @@ impl Compositor {
             track: false,
             placed: (i32::MIN, i32::MIN),
             frameless: false,
+            shadow: None,
+            workspace: self.workspace,
         });
         self.add_damage(self.windows[self.windows.len() - 1].with_shadow());
         id
@@ -330,7 +354,9 @@ impl Compositor {
             if notify {
                 send_event(pid, Event::Close { window: id });
             }
-            sys::shm_release(shm);
+            if shm != 0 {
+                sys::shm_release(shm);
+            }
         }
         self.add_damage(window.with_shadow());
         Some(window)
@@ -415,6 +441,9 @@ impl Compositor {
         if !(min..=8192).contains(&w) || !(min..=8192).contains(&h) {
             return Err(Rejected::BadSize);
         }
+        if shm == 0 {
+            return Ok(core::ptr::null());
+        }
         let Some((ptr, len)) = sys::shm_map(shm) else {
             return Err(Rejected::NoBuffer);
         };
@@ -429,10 +458,13 @@ impl Compositor {
         let Body::Client { shm: old_shm, .. } = self.windows[index].body else {
             return false;
         };
-        if shm == old_shm {
-            if let Body::Client { width: bw, height: bh, .. } = &mut self.windows[index].body {
+        if shm == old_shm || shm == 0 {
+            if let Body::Client { width: bw, height: bh, stride, .. } = &mut self.windows[index].body {
                 *bw = w;
                 *bh = h;
+                if shm != 0 {
+                    *stride = w;
+                }
             }
             return true;
         }
@@ -443,13 +475,17 @@ impl Compositor {
             sys::shm_release(shm);
             return false;
         }
-        if let Body::Client { shm: s, pixels, width: bw, height: bh, .. } = &mut self.windows[index].body {
+        if let Body::Client { shm: s, pixels, width: bw, height: bh, stride, opaque, .. } = &mut self.windows[index].body {
             *s = shm;
             *pixels = ptr as *const u32;
             *bw = w;
             *bh = h;
+            *stride = w;
+            *opaque = false;
         }
-        sys::shm_release(old_shm);
+        if old_shm != 0 {
+            sys::shm_release(old_shm);
+        }
         true
     }
 
@@ -472,7 +508,7 @@ impl Compositor {
     pub fn resize_edge_at(&self, x: i32, y: i32) -> Option<(usize, u8)> {
         for i in (0..self.windows.len()).rev() {
             let w = &self.windows[i];
-            if w.minimized {
+            if !self.shown(w) {
                 continue;
             }
             let outer = w.outer();

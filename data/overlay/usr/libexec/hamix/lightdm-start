@@ -1,0 +1,11 @@
+#!/bin/sh
+mkdir -p /var/lib/lightdm /var/lib/lightdm-data /var/cache/lightdm /var/log/lightdm /run/lightdm /var/log
+chown lightdm:lightdm /var/lib/lightdm /var/lib/lightdm-data /var/cache/lightdm
+chmod 0750 /var/lib/lightdm
+unset DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE
+i=0
+while [ ! -S /run/dbus/system_bus_socket ] && [ $i -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+exec /usr/sbin/lightdm

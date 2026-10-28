@@ -1,0 +1,17 @@
+pkgname=libXext
+pkgver=1.3.6
+pkgdesc="X extensions library"
+source="https://www.x.org/releases/individual/lib/libXext-$pkgver.tar.xz"
+sha256="edb59fa23994e405fdc5b400afdf5820ae6160b94f35e3dc3da4457a16e89753"
+builddir="libXext-$pkgver"
+depends="libX11"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-specs --without-xmlto --without-fop --enable-malloc0returnsnull
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

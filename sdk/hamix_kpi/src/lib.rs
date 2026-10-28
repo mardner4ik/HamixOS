@@ -5,7 +5,7 @@ use core::ffi::c_void;
 pub mod heap;
 pub mod io;
 
-pub const KPI_VERSION: u32 = 6;
+pub const KPI_VERSION: u32 = 7;
 
 pub const CLASS_NETWORK: u32 = 1;
 pub const CLASS_DISPLAY: u32 = 2;
@@ -355,6 +355,8 @@ unsafe extern "C" {
     pub fn hamix_in_interrupt() -> i32;
     pub fn hamix_param_u32(name: *const u8, name_len: usize, fallback: u32) -> u32;
     pub fn hamix_dev_log(level: u32, text: *const u8, len: usize);
+    pub fn hamix_firmware_load(name: *const u8, len: usize, size_out: *mut usize) -> *const u8;
+    pub fn hamix_firmware_release(data: *const u8);
     pub fn hamix_claim_device(
         class: u32,
         name: *const u8,
@@ -363,6 +365,29 @@ unsafe extern "C" {
         poll: Option<extern "C" fn(*mut c_void)>,
         context: *mut c_void,
     ) -> i32;
+}
+
+pub struct Firmware {
+    data: *const u8,
+    len: usize,
+}
+
+impl Firmware {
+    pub fn load(name: &str) -> Option<Firmware> {
+        let mut len = 0usize;
+        let data = unsafe { hamix_firmware_load(name.as_ptr(), name.len(), &mut len) };
+        if data.is_null() || len == 0 { None } else { Some(Firmware { data, len }) }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.data, self.len) }
+    }
+}
+
+impl Drop for Firmware {
+    fn drop(&mut self) {
+        unsafe { hamix_firmware_release(self.data) };
+    }
 }
 
 #[inline(always)]

@@ -1,0 +1,21 @@
+pkgname=libxklavier
+pkgver=5.4
+pkgdesc="High-level API for X keyboard layouts"
+source="https://people.freedesktop.org/~svu/libxklavier-$pkgver.tar.bz2"
+sha256="17a34194df5cbcd3b7bfd0f561d95d1f723aa1c87fca56bc2c209514460a9320"
+builddir="libxklavier-$pkgver"
+depends="glib libxml2 libX11 libXi libxkbfile xkeyboard-config iso-codes"
+
+build() {
+    export PATH="$PATH:$HX_ROOT/usr/bin"
+    cp /usr/share/libtool/build-aux/config.sub /usr/share/libtool/build-aux/config.guess build-aux/
+    LDFLAGS="$LDFLAGS -Wl,--undefined-version" CPPFLAGS="$CPPFLAGS -I$HX_ROOT/usr/include/libxml2" ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --disable-static --disable-gtk-doc \
+        --disable-introspection --disable-vala --with-xkb-base=/usr/share/X11/xkb --with-xkb-bin-base=/usr/bin \
+        --enable-xkb-support --disable-xmodmap-support
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/gtk-doc"
+}

@@ -1,0 +1,20 @@
+pkgname=linux-pam
+pkgver=1.6.1
+pkgdesc="Pluggable Authentication Modules (pam_unix checks /etc/shadow with crypt(3))"
+source="https://github.com/linux-pam/linux-pam/releases/download/v$pkgver/Linux-PAM-$pkgver.tar.xz"
+sha256="f8923c740159052d719dbfc2a2f81942d68dd34fcaf61c706a02c9b80feeef8e"
+builddir="Linux-PAM-$pkgver"
+depends=""
+
+build() {
+    CFLAGS="$CFLAGS -D__linux__=1 -include signal.h -DHOST_NAME_MAX=64" ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib \
+        --enable-securedir=/usr/lib/security --disable-static --disable-nis --disable-selinux --disable-audit --disable-econf \
+        --disable-db --disable-regenerate-docu --disable-doc --disable-prelude --disable-nls --disable-logind --disable-lastlog \
+        --disable-unix-chkpwd-setuid
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/usr/share/doc" "$pkgdir/usr/lib/systemd"
+}

@@ -1,4 +1,5 @@
 pub mod console_mouse;
+pub mod drm;
 pub mod edid;
 pub mod font8x8;
 pub mod gpu;

@@ -1,5 +1,5 @@
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -63,6 +63,12 @@ const QH_SIZE: usize = 16;
 const ENDPOINT_SLOT: usize = 64;
 const MAX_ENDPOINTS: usize = 32;
 const DATA_SIZE: usize = 1024;
+const TD_SPD: u32 = 1 << 29;
+const BULK_TDS: usize = 128;
+const BULK_DATA: usize = 8192;
+const REQUEST_CLEAR_FEATURE: u8 = 1;
+const CBW_SIGNATURE: u32 = 0x4342_5355;
+const CSW_SIGNATURE: u32 = 0x5342_5355;
 
 struct Endpoint {
     address: u8,
@@ -87,12 +93,37 @@ struct Uhci {
     connected: [bool; 8],
     next_address: u8,
     endpoints: Vec<Endpoint>,
+    bulk_tds: usize,
+    bulk_data: usize,
+    found: Vec<Storage>,
 }
+
+struct Storage {
+    io: u16,
+    address: u8,
+    port: u8,
+    max_packet: u16,
+    interface: u8,
+    in_ep: u8,
+    out_ep: u8,
+    in_packet: usize,
+    out_packet: usize,
+    in_toggle: u32,
+    out_toggle: u32,
+    tag: u32,
+    block_size: u64,
+    blocks: u64,
+    model: String,
+    alive: bool,
+    disk: Option<usize>,
+}
+
+static STORAGE: Mutex<Vec<Storage>> = Mutex::new(Vec::new());
 
 static CONTROLLERS: Mutex<Vec<Uhci>> = Mutex::new(Vec::new());
 
 fn delay_ms(ms: u64) {
-    crate::arch::delay_ms(ms);
+    crate::arch::spin_delay_us(ms * 1000);
 }
 
 fn wr32(addr: usize, value: u32) {
@@ -318,6 +349,34 @@ impl Uhci {
         if interfaces.iter().any(|i| i.class == 8) {
             usb.class = DeviceClass::MassStorage;
         }
+        if let Some(storage) = interfaces.iter().find(|i| i.class == 8 && i.protocol == 0x50 && i.bulk_in != 0 && i.bulk_out != 0) {
+            if !low_speed && self.control(address, low_speed, max_packet, [0x00, REQUEST_SET_CONFIGURATION, configuration_value, 0, 0, 0, 0, 0]).is_some() {
+                delay_ms(5);
+                let mut dev = Storage {
+                    io: self.io,
+                    address,
+                    port,
+                    max_packet,
+                    interface: storage.number,
+                    in_ep: storage.bulk_in,
+                    out_ep: storage.bulk_out,
+                    in_packet: storage.bulk_in_packet.clamp(8, 64) as usize,
+                    out_packet: storage.bulk_out_packet.clamp(8, 64) as usize,
+                    in_toggle: 0,
+                    out_toggle: 0,
+                    tag: 1,
+                    block_size: 512,
+                    blocks: 0,
+                    model: String::new(),
+                    alive: true,
+                    disk: None,
+                };
+                if self.storage_init(&mut dev) {
+                    self.found.push(dev);
+                }
+            }
+            return Some(usb);
+        }
 
         let hid: Vec<&InterfaceInfo> = interfaces.iter().filter(|i| i.class == 3 && i.endpoint != 0).collect();
         if hid.is_empty() {
@@ -413,6 +472,230 @@ impl Uhci {
         }
     }
 
+    fn bulk(&mut self, dev: &mut Storage, input: bool, data: &mut [u8]) -> Result<usize, bool> {
+        let packet = if input { dev.in_packet } else { dev.out_packet };
+        let endpoint = if input { dev.in_ep } else { dev.out_ep };
+        let mut done = 0usize;
+        while done < data.len() || (data.is_empty() && done == 0) {
+            let chunk = (data.len() - done).min(BULK_DATA).min(BULK_TDS * packet);
+            if chunk == 0 {
+                break;
+            }
+            if !input {
+                unsafe { core::ptr::copy_nonoverlapping(data[done..].as_ptr(), self.bulk_data as *mut u8, chunk) };
+            }
+            let count = chunk.div_ceil(packet);
+            let mut toggle = if input { dev.in_toggle } else { dev.out_toggle };
+            for i in 0..count {
+                let td = self.bulk_tds + i * TD_SIZE;
+                let len = (chunk - i * packet).min(packet);
+                let link = if i + 1 == count { LINK_TERMINATE } else { (td + TD_SIZE) as u32 | LINK_DEPTH_FIRST };
+                wr32(td, link);
+                wr32(td + 4, TD_ACTIVE | TD_ERROR_LIMIT | if input { TD_SPD } else { 0 });
+                wr32(td + 8, build_token(if input { PID_IN } else { PID_OUT }, dev.address, endpoint, toggle, len));
+                wr32(td + 12, (self.bulk_data + i * packet) as u32);
+                toggle ^= 1;
+            }
+            wr32(self.control_qh() + 4, self.bulk_tds as u32);
+            let started = crate::task::uptime_ms();
+            let mut spins = 0u64;
+            loop {
+                if rd32(self.control_qh() + 4) & LINK_TERMINATE != 0 {
+                    break;
+                }
+                let current = (rd32(self.control_qh() + 4) & !0xF) as usize;
+                if current >= self.bulk_tds && current < self.bulk_tds + count * TD_SIZE {
+                    let status = rd32(current + 4);
+                    if status & TD_ACTIVE == 0 {
+                        let index = (current - self.bulk_tds) / TD_SIZE;
+                        let actual = (status & 0x7FF) as usize;
+                        let got = if actual == 0x7FF { 0 } else { actual + 1 };
+                        let expected = (chunk - index * packet).min(packet);
+                        if status & TD_ERRORS != 0 || (input && got < expected) {
+                            break;
+                        }
+                    }
+                }
+                if inw(self.io + REG_USBSTS) & STS_HALTED != 0 {
+                    break;
+                }
+                spins += 1;
+                if spins % 64 == 0 && crate::task::uptime_ms().saturating_sub(started) > 10_000 {
+                    break;
+                }
+                if spins > 50_000_000 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            wr32(self.control_qh() + 4, LINK_TERMINATE);
+            let mut moved = 0usize;
+            let mut finished = 0usize;
+            let mut stalled = false;
+            let mut short = false;
+            for i in 0..count {
+                let status = rd32(self.bulk_tds + i * TD_SIZE + 4);
+                if status & TD_ACTIVE != 0 {
+                    break;
+                }
+                if status & TD_ERRORS != 0 {
+                    stalled = status & TD_STALLED != 0;
+                    break;
+                }
+                let actual = (status & 0x7FF) as usize;
+                let got = if actual == 0x7FF { 0 } else { actual + 1 };
+                moved += got;
+                finished += 1;
+                let expected = (chunk - i * packet).min(packet);
+                if got < expected {
+                    short = true;
+                    break;
+                }
+            }
+            if finished % 2 == 1 {
+                if input { dev.in_toggle ^= 1 } else { dev.out_toggle ^= 1 }
+            }
+            if input {
+                unsafe { core::ptr::copy_nonoverlapping(self.bulk_data as *const u8, data[done..].as_mut_ptr(), moved.min(chunk)) };
+            }
+            done += moved;
+            if stalled {
+                return Err(true);
+            }
+            if finished < count && !short {
+                return Err(false);
+            }
+            if short {
+                break;
+            }
+        }
+        Ok(done)
+    }
+
+    fn clear_halt(&mut self, dev: &mut Storage, input: bool) {
+        let endpoint = if input { 0x80 | dev.in_ep } else { dev.out_ep };
+        self.control(dev.address, false, dev.max_packet, [0x02, REQUEST_CLEAR_FEATURE, 0, 0, endpoint, 0, 0, 0]);
+        if input { dev.in_toggle = 0 } else { dev.out_toggle = 0 }
+    }
+
+    fn reset_recovery(&mut self, dev: &mut Storage) {
+        self.control(dev.address, false, dev.max_packet, [0x21, 0xFF, 0, 0, dev.interface, 0, 0, 0]);
+        delay_ms(5);
+        self.clear_halt(dev, true);
+        self.clear_halt(dev, false);
+    }
+
+    fn scsi(&mut self, dev: &mut Storage, cdb: &[u8], data: &mut [u8], input: bool) -> Result<(), ()> {
+        let mut cbw = [0u8; 31];
+        cbw[0..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
+        dev.tag = dev.tag.wrapping_add(1);
+        cbw[4..8].copy_from_slice(&dev.tag.to_le_bytes());
+        cbw[8..12].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        cbw[12] = if input { 0x80 } else { 0 };
+        cbw[14] = cdb.len() as u8;
+        cbw[15..15 + cdb.len()].copy_from_slice(cdb);
+        if self.bulk(dev, false, &mut cbw).is_err() {
+            self.reset_recovery(dev);
+            return Err(());
+        }
+        if !data.is_empty() {
+            match self.bulk(dev, input, data) {
+                Ok(_) => {}
+                Err(true) => self.clear_halt(dev, input),
+                Err(false) => {
+                    self.reset_recovery(dev);
+                    return Err(());
+                }
+            }
+        }
+        let mut csw = [0u8; 13];
+        let mut got = self.bulk(dev, true, &mut csw);
+        if got == Err(true) {
+            self.clear_halt(dev, true);
+            got = self.bulk(dev, true, &mut csw);
+        }
+        if got != Ok(13) || u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]) != CSW_SIGNATURE {
+            self.reset_recovery(dev);
+            return Err(());
+        }
+        match csw[12] {
+            0 => Ok(()),
+            2 => {
+                self.reset_recovery(dev);
+                Err(())
+            }
+            _ => Err(()),
+        }
+    }
+
+    fn storage_init(&mut self, dev: &mut Storage) -> bool {
+        if self.bulk_tds == 0 {
+            let (Some(tds), Some(data)) = (frame::alloc_zeroed_frame(), frame::alloc_contiguous(BULK_DATA / 4096, 1 << 32)) else {
+                return false;
+            };
+            self.bulk_tds = tds;
+            self.bulk_data = data;
+        }
+        let mut inquiry = [0u8; 36];
+        if self.scsi(dev, &[0x12, 0, 0, 0, 36, 0], &mut inquiry, true).is_ok() {
+            let vendor = String::from_utf8_lossy(&inquiry[8..16]).trim().to_string();
+            let product = String::from_utf8_lossy(&inquiry[16..32]).trim().to_string();
+            dev.model = format!("{} {}", vendor, product).trim().to_string();
+        }
+        let mut ready = false;
+        for _ in 0..30 {
+            if self.scsi(dev, &[0; 6], &mut [], false).is_ok() {
+                ready = true;
+                break;
+            }
+            let mut sense = [0u8; 18];
+            let _ = self.scsi(dev, &[0x03, 0, 0, 0, 18, 0], &mut sense, true);
+            delay_ms(100);
+        }
+        if !ready {
+            crate::drivers::klog::log(&format!("usb-storage: {} has no medium or is not ready", dev.model));
+            return false;
+        }
+        let mut capacity = [0u8; 8];
+        if self.scsi(dev, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], &mut capacity, true).is_err() {
+            return false;
+        }
+        let last = u32::from_be_bytes([capacity[0], capacity[1], capacity[2], capacity[3]]) as u64;
+        let size = u32::from_be_bytes([capacity[4], capacity[5], capacity[6], capacity[7]]) as u64;
+        if !matches!(size, 512 | 1024 | 2048 | 4096) || last == 0 {
+            return false;
+        }
+        dev.block_size = size;
+        dev.blocks = last + 1;
+        crate::drivers::klog::log(&format!("usb-storage: {} on UHCI {:#x} port {}: {} blocks of {} bytes", dev.model, dev.io, dev.port, dev.blocks, size));
+        true
+    }
+
+    fn storage_io(&mut self, dev: &mut Storage, block: u64, count: usize, data: &mut [u8], write: bool) -> Result<(), ()> {
+        let per = (65536 / dev.block_size as usize).max(1);
+        let mut done = 0usize;
+        while done < count {
+            let n = (count - done).min(per);
+            let lba = (block + done as u64) as u32;
+            let opcode = if write { 0x2A } else { 0x28 };
+            let cdb = [opcode, 0, (lba >> 24) as u8, (lba >> 16) as u8, (lba >> 8) as u8, lba as u8, 0, (n >> 8) as u8, n as u8, 0];
+            let bytes = n * dev.block_size as usize;
+            let slice = &mut data[done * dev.block_size as usize..done * dev.block_size as usize + bytes];
+            let mut ok = false;
+            for _ in 0..3 {
+                if self.scsi(dev, &cdb, slice, !write).is_ok() {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
+                return Err(());
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
     fn check_ports(&mut self) -> Vec<(u8, bool)> {
         let mut changes = Vec::new();
         for port in 0..self.ports {
@@ -428,16 +711,20 @@ impl Uhci {
     }
 }
 
-struct InterfaceInfo {
-    number: u8,
-    class: u8,
-    subclass: u8,
-    protocol: u8,
-    endpoint: u8,
-    packet_size: u16,
+pub(super) struct InterfaceInfo {
+    pub(super) number: u8,
+    pub(super) class: u8,
+    pub(super) subclass: u8,
+    pub(super) protocol: u8,
+    pub(super) endpoint: u8,
+    pub(super) packet_size: u16,
+    pub(super) bulk_in: u8,
+    pub(super) bulk_out: u8,
+    pub(super) bulk_in_packet: u16,
+    pub(super) bulk_out_packet: u16,
 }
 
-fn parse_configuration(data: &[u8]) -> Vec<InterfaceInfo> {
+pub(super) fn parse_configuration(data: &[u8]) -> Vec<InterfaceInfo> {
     let mut out: Vec<InterfaceInfo> = Vec::new();
     let mut offset = 0usize;
     while offset + 2 <= data.len() {
@@ -454,15 +741,29 @@ fn parse_configuration(data: &[u8]) -> Vec<InterfaceInfo> {
                 protocol: data[offset + 7],
                 endpoint: 0,
                 packet_size: 0,
+                bulk_in: 0,
+                bulk_out: 0,
+                bulk_in_packet: 0,
+                bulk_out_packet: 0,
             });
         }
         if kind == 0x05 && length >= 7 {
             if let Some(current) = out.last_mut() {
                 let address = data[offset + 2];
                 let attributes = data[offset + 3];
+                let packet = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
                 if current.endpoint == 0 && address & 0x80 != 0 && attributes & 0x03 == 0x03 {
                     current.endpoint = address & 0x0F;
-                    current.packet_size = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+                    current.packet_size = packet;
+                }
+                if attributes & 0x03 == 0x02 {
+                    if address & 0x80 != 0 && current.bulk_in == 0 {
+                        current.bulk_in = address & 0x0F;
+                        current.bulk_in_packet = packet;
+                    } else if address & 0x80 == 0 && current.bulk_out == 0 {
+                        current.bulk_out = address & 0x0F;
+                        current.bulk_out_packet = packet;
+                    }
                 }
             }
         }
@@ -528,6 +829,9 @@ pub fn attach(controller: &mut Controller) {
         connected: [false; 8],
         next_address: 1,
         endpoints: Vec::new(),
+        bulk_tds: 0,
+        bulk_data: 0,
+        found: Vec::new(),
     };
     wr32(uhci.control_qh(), LINK_TERMINATE);
     wr32(uhci.control_qh() + 4, LINK_TERMINATE);
@@ -589,6 +893,18 @@ pub fn scan() -> bool {
                 c.io
             });
             DEVICES.lock().retain(|d| !(d.controller == io as u64 && d.port == port));
+            let gone: Vec<usize> = {
+                let mut list = STORAGE.lock();
+                list.iter_mut().filter(|d| d.alive && d.io == io && d.port == port).filter_map(|d| {
+                    d.alive = false;
+                    d.disk
+                }).collect()
+            };
+            for disk in gone {
+                let paths = crate::fs::media::forget_disk(disk);
+                crate::drivers::block::detach(disk);
+                crate::drivers::klog::log(&format!("usb-storage: disk {} removed{}", disk, if paths.is_empty() { String::new() } else { format!(", unmounted {}", paths.join(", ")) }));
+            }
             if !connected {
                 crate::drivers::klog::log(&format!("usb: device removed from UHCI {:#x} port {}", io, port));
                 continue;
@@ -601,7 +917,21 @@ pub fn scan() -> bool {
                 delay_ms(1);
             };
             let result = guard[index].enumerate_port(port);
+            let found: Vec<Storage> = guard[index].found.drain(..).collect();
             drop(guard);
+            for dev in found {
+                let sectors = dev.blocks * dev.block_size / 512;
+                let model = if dev.model.is_empty() { String::from("USB storage") } else { dev.model.clone() };
+                let slot = {
+                    let mut list = STORAGE.lock();
+                    list.push(dev);
+                    list.len() - 1
+                };
+                let disk = crate::drivers::block::register_usb_disk(&model, sectors, slot);
+                if let Some(d) = STORAGE.lock().get_mut(slot) {
+                    d.disk = Some(disk);
+                }
+            }
             match result {
                 Some(device) => {
                     log_device(&device);
@@ -624,4 +954,44 @@ pub fn poll() {
 
 pub fn active() -> bool {
     !CONTROLLERS.lock().is_empty()
+}
+
+fn with_storage<R>(slot: usize, f: impl FnOnce(&mut Uhci, &mut Storage) -> Result<R, ()>) -> Result<R, ()> {
+    let mut list = STORAGE.lock();
+    let dev = list.get_mut(slot).filter(|d| d.alive).ok_or(())?;
+    let mut guard = loop {
+        if let Some(g) = CONTROLLERS.try_lock() {
+            break g;
+        }
+        core::hint::spin_loop();
+    };
+    let controller = guard.iter_mut().find(|c| c.io == dev.io).ok_or(())?;
+    f(controller, dev)
+}
+
+pub fn storage_io(slot: usize, lba: u64, buf: &mut [u8], write: bool) -> Result<(), ()> {
+    with_storage(slot, |controller, dev| {
+        let size = dev.block_size;
+        let start = lba * 512;
+        let end = start + buf.len() as u64;
+        let first = start / size;
+        let last = end.div_ceil(size);
+        let count = (last - first) as usize;
+        if last > dev.blocks {
+            return Err(());
+        }
+        let skip = (start - first * size) as usize;
+        if skip == 0 && buf.len() as u64 % size == 0 {
+            return controller.storage_io(dev, first, count, buf, write);
+        }
+        let mut staging = alloc::vec![0u8; count * size as usize];
+        controller.storage_io(dev, first, count, &mut staging, false)?;
+        if write {
+            staging[skip..skip + buf.len()].copy_from_slice(buf);
+            controller.storage_io(dev, first, count, &mut staging, true)
+        } else {
+            buf.copy_from_slice(&staging[skip..skip + buf.len()]);
+            Ok(())
+        }
+    })
 }

@@ -6,18 +6,18 @@ can use; like smoltcp for networking, the heavy lifting is done by existing
 open-source Rust code that was vendored and ported to `no_std`.
 
 ```
-libs/rust_h264/     H.264 decoder (rust_h264 0.4.0, MIT OR Apache-2.0), ported to no_std, fixed and sped up
-libs/hx264/         HamixOS H.264 API: MP4 samples in, pictures out, YUV→RGB scaler
-libs/shiguredo_mp4/ MP4 box library (shiguredo_mp4 2026.5.0, Apache-2.0), no_std, unchanged
-libs/hxmp4/         HamixOS MP4 API: tracks, codecs, sample tables, seeking
-libs/hxaac/         AAC-LC decoder adapted from Symphonia (MPL-2.0)
-apps/hxvideo/       the player
+vendor/rust_h264/     H.264 decoder (rust_h264 0.4.0, MIT OR Apache-2.0), ported to no_std, fixed and sped up
+crates/hx264/         HamixOS H.264 API: MP4 samples in, pictures out, YUV→RGB scaler
+vendor/shiguredo_mp4/ MP4 box library (shiguredo_mp4 2026.5.0, Apache-2.0), no_std, unchanged
+crates/hxmp4/         HamixOS MP4 API: tracks, codecs, sample tables, seeking
+crates/hxaac/         AAC-LC decoder adapted from Symphonia (MPL-2.0)
+userland/apps/hxvideo/       the player
 ```
 
 ## When a library is written natively, and when it comes from Linux
 
 ffmpeg and mpv are available through the Linux compatibility layer
-([docs/LINUXULATOR.md](LINUXULATOR.md)), so "why is there a native H.264
+([docs/architecture/LINUXULATOR.md](LINUXULATOR.md)), so "why is there a native H.264
 decoder at all?" is a fair question — and it is the same question that will
 come up for every audio codec, font shaper and crypto library after this one.
 The criterion, so it does not get re-decided each time:
@@ -33,14 +33,14 @@ third-party software — goes through the Linux ABI, with no native twin.
   playback on weak hardware possible in a few megabytes, instead of pulling
   mpv/ffmpeg through the linuxulator with the whole musl/glibc library tail
   behind them (tens of megabytes of RSS before a frame is decoded). It is the
-  same reasoning that gives the OS its own TCP/IP stack (`libs/smoltcp`)
+  same reasoning that gives the OS its own TCP/IP stack (`vendor/smoltcp`)
   instead of a forked Linux network stack.
 * The native codec stack does **not** grow past H.264/AAC/MP4 under our own
   steam — no VP9, AV1, Opus or Matroska. For rare formats the RAM difference
   does not pay for months of `no_std` porting; that case is covered by
   `mpv`/`ffmpeg` from pantry. `hxvideo` stays "a fast player for a typical
   MP4/H.264 file", not "a player for everything".
-* `libs/mini_png` is the same choice made earlier and correctly: PNG decoding
+* `crates/imago` (formerly `mini_png`) is the same choice made earlier and correctly: image decoding
   is on the boot path (wallpapers, icons, cursors), so it is native and tiny.
   A future "should we write a native JPEG/WebP decoder?" is answered by the
   paragraph above, not from scratch.
@@ -75,7 +75,7 @@ The upstream decoder was checked frame by frame against FFmpeg on 19 test
 streams (x264 baseline to veryslow, B-pyramids, weighted prediction, 16
 B-frames, CAVLC with 8×8 transform, 4 slices, odd sizes up to 1080p). Five bugs
 were found and fixed; all streams now decode bit-exactly. See
-`libs/rust_h264/HAMIX.md` for the full list, including the performance work
+`vendor/rust_h264/HAMIX.md` for the full list, including the performance work
 (zero-copy pictures, buffer reuse, merged B-skip prediction, SSE2 motion
 compensation): 1.5–2.3× faster than upstream on x86-64.
 

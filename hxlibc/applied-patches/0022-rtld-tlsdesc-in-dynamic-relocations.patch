@@ -1,0 +1,44 @@
+--- a/options/rtld/generic/linker.cpp	2026-09-30 19:27:47.504655393 +0300
++++ b/options/rtld/generic/linker.cpp	2026-09-30 19:27:47.524475996 +0300
+@@ -1545,6 +1545,11 @@
+ 	object->onInitStack = false;
+ }
+ 
++#if defined(__aarch64__) || defined(__x86_64__)
++extern "C" void *__mlibcTlsdescStatic(void *);
++extern "C" void *__mlibcTlsdescDynamic(void *);
++#endif
++
+ void Loader::_processRelocations(Relocation &rel) {
+ 	// copy and irelative relocations have to be performed after all other relocations
+ 	if(rel.type() == R_COPY || rel.type() == R_IRELATIVE)
+@@ -1648,6 +1653,29 @@
+ 		off += tls_offset + tlsOffsetFromTp;
+ 		rel.relocate(off);
+ 	} break;
++#if defined(__aarch64__) || defined(__x86_64__)
++	case R_TLSDESC: {
++		SharedObject *target = rel.symbol_index() ? (p ? p->object() : nullptr) : rel.object();
++		size_t symValue = (rel.symbol_index() && p && p->symbol()) ? p->symbol()->st_value : 0;
++		__ensure(target);
++		auto slot = reinterpret_cast<uint64_t *>(rel.destination());
++		if(target->tlsModel == TlsModel::initial) {
++			slot[0] = reinterpret_cast<uintptr_t>(&__mlibcTlsdescStatic);
++			slot[1] = symValue + target->tlsOffset + tlsOffsetFromTp + rel.addend_norel();
++		}else{
++			struct TlsdescData {
++				uintptr_t tlsIndex;
++				uintptr_t addend;
++			};
++			accessDtv(target);
++			auto data = frg::construct<TlsdescData>(getAllocator());
++			data->tlsIndex = target->tlsIndex;
++			data->addend = symValue + rel.addend_norel();
++			slot[0] = reinterpret_cast<uintptr_t>(&__mlibcTlsdescDynamic);
++			slot[1] = reinterpret_cast<uintptr_t>(data);
++		}
++	} break;
++#endif
+ 	default:
+ 		mlibc::panicLogger() << "Unexpected relocation type "
+ 				<< (void *) rel.type() << frg::endlog;

@@ -1,0 +1,17 @@
+pkgname=mtdev
+pkgver=1.1.7
+pkgdesc="Multitouch protocol translation library"
+source="https://bitmath.org/code/mtdev/mtdev-$pkgver.tar.bz2"
+sha256="a107adad2101fecac54ac7f9f0e0a0dd155d954193da55c2340c97f2ff1d814e"
+builddir="mtdev-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static
+    make -j"$JOBS" -C src
+}
+
+package() {
+    make DESTDIR="$pkgdir" -C src install
+    install -Dm644 mtdev.pc "$pkgdir/usr/lib/pkgconfig/mtdev.pc"
+}

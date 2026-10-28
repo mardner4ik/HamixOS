@@ -1,13 +1,17 @@
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::unix::{self, PollFd, POLLHUP, POLLIN};
-use hamix_std::sys;
+use hxstd::unix::{self, PollFd, POLLHUP, POLLIN};
+use hxstd::sys;
 use hxproto::{Request, Title};
 
 use crate::Bridge;
 
-pub const XWAYLAND: &str = "/opt/linux/usr/bin/Xwayland";
+pub const XWAYLAND_PATHS: [&str; 2] = ["/usr/bin/Xwayland", "/linux/usr/bin/Xwayland"];
+
+pub fn xwayland_binary() -> Option<&'static str> {
+    XWAYLAND_PATHS.iter().copied().find(|p| sys::stat(p).is_ok())
+}
 pub const SOCKET_DIR: &str = "/tmp/.X11-unix";
 pub const SOCKET: &str = "/tmp/.X11-unix/X0";
 const XWAYLAND_IDLE_MS: u64 = 20000;
@@ -335,8 +339,8 @@ impl Xwm {
 }
 
 fn x_resources() -> String {
-    let dark = hamix_std::env::var("HOME")
-        .and_then(|home| hamix_std::fs::read_to_string(&alloc::format!("{}/.config/gtk-3.0/settings.ini", home)))
+    let dark = hxstd::env::var("HOME")
+        .and_then(|home| hxstd::fs::read_to_string(&alloc::format!("{}/.config/gtk-3.0/settings.ini", home)))
         .map(|text| text.contains("prefer-dark-theme=1"))
         .unwrap_or(false);
     let (bg, fg, base, select, select_fg) = if dark {
@@ -391,9 +395,9 @@ fn parse(inbuf: &mut Vec<u8>) -> Parsed {
     out
 }
 
-impl Bridge {
+impl<L: crate::Link> Bridge<L> {
     pub fn xwm_prepare(&mut self) {
-        if self.xlisten.is_some() || self.xwm.is_some() || sys::stat(XWAYLAND).is_err() {
+        if self.xlisten.is_some() || self.xwm.is_some() || xwayland_binary().is_none() {
             return;
         }
         let now = sys::uptime_ms();
@@ -422,13 +426,16 @@ impl Bridge {
         sys::unlink("/tmp/.X0-lock");
         let log = sys::open_with("/tmp/xwayland.log", sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC);
         let args = [":0", "-rootless", "-shm", "-noreset", "-nolisten", "tcp", "-listenfd", "3"];
-        let mut env: Vec<String> = hamix_std::env::vars().iter().filter(|(k, _)| k != "WAYLAND_SOCKET" && k != "WAYLAND_DISPLAY").map(|(k, v)| alloc::format!("{}={}", k, v)).collect();
+        let mut env: Vec<String> = hxstd::env::vars().iter().filter(|(k, _)| k != "WAYLAND_SOCKET" && k != "WAYLAND_DISPLAY").map(|(k, v)| alloc::format!("{}={}", k, v)).collect();
         env.push(String::from("WAYLAND_SOCKET=0"));
         let err = if log >= 0 { Some(log as u64) } else { None };
+        let Some(binary) = xwayland_binary() else {
+            return;
+        };
         let Ok((ours, theirs)) = unix::socketpair(unix::SOCK_STREAM) else {
             return;
         };
-        let pid = sys::spawn_fds_env(XWAYLAND, &args, Some(&env), sys::SPAWN_DETACH, [Some(theirs), err, err, Some(listen)]);
+        let pid = sys::spawn_fds_env(binary, &args, Some(&env), sys::SPAWN_DETACH, [Some(theirs), err, err, Some(listen)]);
         sys::close(theirs);
         if log >= 0 {
             sys::close(log as u64);
@@ -488,7 +495,7 @@ impl Bridge {
         let mut fds = Vec::with_capacity(order.len() + 3);
         fds.push(PollFd { fd: xfd as i32, events: POLLIN, revents: 0 });
         fds.push(PollFd { fd: self.listen as i32, events: POLLIN, revents: 0 });
-        fds.push(PollFd { fd: self.mailbox as i32, events: POLLIN, revents: 0 });
+        fds.push(PollFd { fd: self.link.mailbox() as i32, events: POLLIN, revents: 0 });
         for cid in order.iter() {
             fds.push(PollFd { fd: self.clients[cid].fd as i32, events: POLLIN, revents: 0 });
         }

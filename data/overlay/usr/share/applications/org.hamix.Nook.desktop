@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nook
+Comment=The HamixOS desktop
+Exec=/usr/bin/hxserver
+Icon=hamix
+NoDisplay=true
+X-Hamix-Permissions=inet;audio;video;input;power;sysconf;
+X-Hamix-Permissions-Required=video;input;

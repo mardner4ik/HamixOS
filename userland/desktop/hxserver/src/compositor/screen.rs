@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
-use hamix_std::display::gpu;
-use hamix_std::sys;
+use hxstd::display::gpu;
+use hxstd::drm::Drm;
+use hxstd::sys;
 use vellum::{Area, Painter};
 
 pub struct Screen {
@@ -19,6 +20,8 @@ pub struct Screen {
     pub frame_damage: Vec<Area>,
     pub previous_damage: Vec<Area>,
     pub force_flip: bool,
+    pub drm: Option<Drm>,
+    pub drm_damage: Vec<(i32, i32, i32, i32)>,
 }
 
 fn flip_wanted(force: bool) -> bool {
@@ -28,6 +31,28 @@ fn flip_wanted(force: bool) -> bool {
 
 impl Screen {
     pub fn take() -> Option<Screen> {
+        if let Some(drm) = Drm::open() {
+            let (width, height) = (drm.width as i32, drm.height as i32);
+            return Some(Screen {
+                width,
+                height,
+                fb: drm.map,
+                pitch: drm.pitch as usize,
+                bpp: 4,
+                frame: alloc::vec![0; (width * height) as usize],
+                clip: Area::new(0, 0, width, height),
+                generation: hxstd::display::generation(),
+                scanout: false,
+                buffers: 1,
+                back: 1,
+                stride: 0,
+                frame_damage: Vec::new(),
+                previous_damage: Vec::new(),
+                force_flip: false,
+                drm: Some(drm),
+                drm_damage: Vec::new(),
+            });
+        }
         let mut info = sys::HamixFbInfo::default();
         if sys::fbmap(&mut info) != 0 {
             return None;
@@ -41,7 +66,7 @@ impl Screen {
             bpp: (info.bpp / 8).max(1) as usize,
             frame: alloc::vec![0; (width * height) as usize],
             clip: Area::new(0, 0, width, height),
-            generation: hamix_std::display::generation(),
+            generation: hxstd::display::generation(),
             scanout: gpu::caps() & gpu::CAP_FLUSH != 0,
             buffers: 1,
             back: 1,
@@ -49,12 +74,14 @@ impl Screen {
             frame_damage: Vec::new(),
             previous_damage: Vec::new(),
             force_flip: false,
+            drm: None,
+            drm_damage: Vec::new(),
         })
     }
 
     pub fn configure_flip(&mut self, force: bool) {
         self.force_flip = force;
-        self.buffers = if flip_wanted(force) { 2 } else { 1 };
+        self.buffers = if self.drm.is_none() && flip_wanted(force) { 2 } else { 1 };
         self.stride = (self.pitch * self.height as usize).div_ceil(4096) * 4096;
         self.back = 1;
         self.frame_damage.clear();
@@ -69,6 +96,25 @@ impl Screen {
     }
 
     pub fn remap(&mut self) -> Option<bool> {
+        if self.drm.is_some() {
+            self.drm = None;
+            let drm = Drm::open()?;
+            let (width, height) = (drm.width as i32, drm.height as i32);
+            self.fb = drm.map;
+            self.pitch = drm.pitch as usize;
+            self.bpp = 4;
+            self.drm = Some(drm);
+            self.drm_damage.clear();
+            let resized = width != self.width || height != self.height;
+            if resized {
+                self.width = width;
+                self.height = height;
+                self.frame = alloc::vec![0; (width * height) as usize];
+            }
+            self.generation = hxstd::display::generation();
+            self.clip = self.bounds();
+            return Some(resized);
+        }
         let mut info = sys::HamixFbInfo::default();
         if sys::fbmap(&mut info) != 0 {
             return None;
@@ -83,7 +129,7 @@ impl Screen {
             self.height = height;
             self.frame = alloc::vec![0; (width * height) as usize];
         }
-        self.generation = hamix_std::display::generation();
+        self.generation = hxstd::display::generation();
         self.clip = self.bounds();
         self.scanout = gpu::caps() & gpu::CAP_FLUSH != 0;
         let force = self.force_flip;
@@ -96,7 +142,7 @@ impl Screen {
     }
 
     pub fn stale(&self) -> bool {
-        hamix_std::display::generation() != self.generation
+        hxstd::display::generation() != self.generation
     }
 
     pub fn painter(&mut self) -> Painter<'_> {
@@ -119,12 +165,21 @@ impl Screen {
             return;
         }
         present(&self.frame, self.width, area, self.fb, self.pitch, self.bpp);
-        if self.scanout {
+        if self.drm.is_some() {
+            self.drm_damage.push((area.x, area.y, area.w, area.h));
+        } else if self.scanout {
             gpu::flush(area.x, area.y, area.w, area.h);
         }
     }
 
     pub fn finish_frame(&mut self) {
+        if let Some(drm) = self.drm.as_ref() {
+            if !self.drm_damage.is_empty() {
+                drm.dirty(&self.drm_damage);
+                self.drm_damage.clear();
+            }
+            return;
+        }
         if !self.flipping() || self.frame_damage.is_empty() {
             return;
         }

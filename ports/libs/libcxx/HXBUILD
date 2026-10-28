@@ -1,0 +1,33 @@
+pkgname=libcxx
+pkgver=22.1.8
+pkgdesc="LLVM C++ runtime: libc++, libc++abi and libunwind on hxlibc"
+source="https://github.com/llvm/llvm-project/releases/download/llvmorg-$pkgver/llvm-project-$pkgver.src.tar.xz"
+sha256="922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888"
+builddir="llvm-project-$pkgver.src"
+extract="llvm-project-$pkgver.src/runtimes llvm-project-$pkgver.src/cmake llvm-project-$pkgver.src/libcxx llvm-project-$pkgver.src/libcxxabi llvm-project-$pkgver.src/libunwind llvm-project-$pkgver.src/llvm/cmake llvm-project-$pkgver.src/llvm/utils/llvm-lit llvm-project-$pkgver.src/third-party/siphash llvm-project-$pkgver.src/libc"
+depends=""
+
+build() {
+    export HX_NO_CXX_RUNTIME=1
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+    cmake -G Ninja -S runtimes -B build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="$HX_ARCH" \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_ASM_COMPILER="$CC" \
+        -DCMAKE_AR="$(command -v llvm-ar)" -DCMAKE_RANLIB="$(command -v llvm-ranlib)" \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCMAKE_C_FLAGS="-D_GNU_SOURCE" -DCMAKE_CXX_FLAGS="-D_GNU_SOURCE" \
+        -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
+        -DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_USE_COMPILER_RT=ON -DLIBUNWIND_INCLUDE_TESTS=OFF \
+        -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_USE_LLVM_UNWINDER=ON -DLIBCXXABI_USE_COMPILER_RT=ON \
+        -DLIBCXXABI_ENABLE_STATIC_UNWINDER=ON -DLIBCXXABI_INCLUDE_TESTS=OFF \
+        -DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_USE_COMPILER_RT=ON -DLIBCXX_CXX_ABI=libcxxabi -DLIBCXX_HAS_PTHREAD_API=ON \
+        -DLIBCXXABI_HAS_PTHREAD_API=ON -DLIBUNWIND_HAS_PTHREAD_API=ON \
+        -DLIBCXX_ENABLE_STATIC_ABI_LIBRARY=ON -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF \
+        -DLIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF -DLIBCXX_HARDENING_MODE=none -DLIBCXX_INSTALL_MODULES=OFF
+    cmake --build build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+}

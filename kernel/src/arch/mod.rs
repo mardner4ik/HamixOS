@@ -143,3 +143,25 @@ pub mod kmap {
         smp::online(cpu)
     }
 }
+
+pub fn spin_delay_us(micros: u64) {
+    match monotonic_ns() {
+        Some(start) => {
+            let end = start.saturating_add(micros.saturating_mul(1000));
+            while monotonic_ns().map(|now| now < end).unwrap_or(false) {
+                core::hint::spin_loop();
+            }
+        }
+        None => delay_us(micros),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub fn monotonic_ns() -> Option<u64> {
+    x86_64::monotonic_ns()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn monotonic_ns() -> Option<u64> {
+    Some(timer::now_ns())
+}

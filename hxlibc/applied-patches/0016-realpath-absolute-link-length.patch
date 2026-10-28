@@ -1,0 +1,15 @@
+--- a/options/posix/generic/posix_stdlib.cpp	2026-09-29 21:56:25.105883927 +0300
++++ b/options/posix/generic/posix_stdlib.cpp	2026-09-29 21:56:25.121910275 +0300
+@@ -324,9 +324,9 @@
+ 
+ 			if (path[0] == '/') {
+ 				// Absolute path, replace resolv
+-				resolv.resize(sz);
+-				strncpy(resolv.data(), path, sz - 1);
+-				resolv.data()[sz - 1] = 0;
++				resolv.resize(sz + 1);
++				memcpy(resolv.data(), path, sz);
++				resolv.data()[sz] = 0;
+ 
+ 				if(debugPathResolution) {
+ 					mlibc::infoLogger() << "mlibc realpath(): Symlink is absolute, resolv: '"

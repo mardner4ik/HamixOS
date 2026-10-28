@@ -1,0 +1,18 @@
+pkgname=glib
+pkgver=2.82.2
+pkgdesc="Low-level core library of GNOME (GLib, GObject, GIO)"
+source="https://download.gnome.org/sources/glib/2.82/glib-$pkgver.tar.xz"
+sha256="ab45f5a323048b1659ee0fbda5cecd94b099ab3e4b9abf26ae06aeb3e781fd63"
+builddir="glib-$pkgver"
+depends="libffi pcre2 zlib"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Dtests=false -Dintrospection=disabled -Dlibmount=disabled -Dselinux=disabled \
+        -Dxattr=false -Dnls=disabled -Dman-pages=disabled -Ddocumentation=false -Dsysprof=disabled -Dglib_debug=disabled -Dlibelf=disabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

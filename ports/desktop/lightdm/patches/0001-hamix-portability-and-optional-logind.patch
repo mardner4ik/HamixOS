@@ -1,0 +1,124 @@
+diff --color -ruN a/liblightdm-gobject/language.c b/liblightdm-gobject/language.c
+--- a/liblightdm-gobject/language.c	2021-02-16 00:06:28.000000000 +0200
++++ b/liblightdm-gobject/language.c	2026-10-06 22:23:07.268417567 +0300
+@@ -211,6 +211,7 @@
+     if (!priv->name)
+     {
+         g_autofree gchar *locale = get_locale_name (priv->code);
++#ifdef LC_IDENTIFICATION
+         if (locale)
+         {
+             const gchar *current = setlocale (LC_ALL, NULL);
+@@ -223,6 +224,7 @@
+ 
+             setlocale (LC_ALL, current);
+         }
++#endif
+         if (!priv->name)
+         {
+             g_auto(GStrv) tokens = g_strsplit_set (priv->code, "_.@", 2);
+@@ -251,6 +253,7 @@
+     if (!priv->territory && strchr (priv->code, '_'))
+     {
+         g_autofree gchar *locale = get_locale_name (priv->code);
++#ifdef LC_IDENTIFICATION
+         if (locale)
+         {
+             gchar *current = setlocale (LC_ALL, NULL);
+@@ -263,6 +266,7 @@
+ 
+             setlocale (LC_ALL, current);
+         }
++#endif
+         if (!priv->territory)
+         {
+             g_auto(GStrv) tokens = g_strsplit_set (priv->code, "_.@", 3);
+diff --color -ruN a/src/lightdm.c b/src/lightdm.c
+--- a/src/lightdm.c	2022-07-11 00:17:23.000000000 +0300
++++ b/src/lightdm.c	2026-10-06 22:23:07.268230105 +0300
+@@ -756,6 +756,8 @@
+         config_set_boolean (config_get_instance (), "LightDM", "lock-memory", TRUE);
+     if (!config_has_key (config_get_instance (), "LightDM", "backup-logs"))
+         config_set_boolean (config_get_instance (), "LightDM", "backup-logs", TRUE);
++    if (!config_has_key (config_get_instance (), "LightDM", "use-logind"))
++        config_set_boolean (config_get_instance (), "LightDM", "use-logind", TRUE);
+     if (!config_has_key (config_get_instance (), "LightDM", "dbus-service"))
+         config_set_boolean (config_get_instance (), "LightDM", "dbus-service", TRUE);
+     if (!config_has_key (config_get_instance (), "Seat:*", "type"))
+@@ -867,7 +869,7 @@
+     shared_data_manager_start (shared_data_manager_get_instance ());
+ 
+     /* Connect to logind */
+-    if (login1_service_connect (login1_service_get_instance ()))
++    if (config_get_boolean (config_get_instance (), "LightDM", "use-logind") && login1_service_connect (login1_service_get_instance ()))
+     {
+         /* Load dynamic seats from logind */
+         g_debug ("Monitoring logind for seats");
+diff --color -ruN a/src/session-child.c b/src/session-child.c
+--- a/src/session-child.c	2021-04-12 07:52:50.000000000 +0300
++++ b/src/session-child.c	2026-10-06 22:23:07.268681266 +0300
+@@ -16,6 +16,7 @@
+ #include <utmp.h>
+ #include <utmpx.h>
+ #include <sys/mman.h>
++#include <sys/time.h>
+ 
+ #if HAVE_LIBAUDIT
+ #include <libaudit.h>
+@@ -193,26 +194,11 @@
+     return x_authority_new (x_authority_family, x_authority_address, x_authority_address_length, x_authority_number, x_authority_name, x_authority_data, x_authority_data_length);
+ }
+ 
+-/* GNU provides this but we can't rely on that so let's make our own version */
+ static void
+-updwtmpx (const gchar *wtmp_file, struct utmpx *ut)
++write_wtmp (const gchar *wtmp_file, struct utmpx *ut)
+ {
+-    struct utmp u;
+-    memset (&u, 0, sizeof (u));
+-    u.ut_type = ut->ut_type;
+-    u.ut_pid = ut->ut_pid;
+-    if (ut->ut_line)
+-        strncpy (u.ut_line, ut->ut_line, sizeof (u.ut_line));
+-    if (ut->ut_id)
+-        strncpy (u.ut_id, ut->ut_id, sizeof (u.ut_id));
+-    if (ut->ut_user)
+-        strncpy (u.ut_user, ut->ut_user, sizeof (u.ut_user));
+-    if (ut->ut_host)
+-        strncpy (u.ut_host, ut->ut_host, sizeof (u.ut_host));
+-    u.ut_tv.tv_sec = ut->ut_tv.tv_sec;
+-    u.ut_tv.tv_usec = ut->ut_tv.tv_usec;
+-
+-    updwtmp (wtmp_file, &u);
++    (void) wtmp_file;
++    (void) ut;
+ }
+ 
+ #if HAVE_LIBAUDIT
+@@ -364,7 +350,7 @@
+             ut.ut_tv.tv_sec = tv.tv_sec;
+             ut.ut_tv.tv_usec = tv.tv_usec;
+ 
+-            updwtmpx ("/var/log/btmp", &ut);
++            write_wtmp ("/var/log/btmp", &ut);
+ 
+ #if HAVE_LIBAUDIT
+             audit_event (AUDIT_USER_LOGIN, username, -1, remote_host_name, tty, FALSE);
+@@ -709,7 +695,7 @@
+             if (!pututxline (&ut))
+                 g_printerr ("Failed to write utmpx: %s\n", strerror (errno));
+             endutxent ();
+-            updwtmpx ("/var/log/wtmp", &ut);
++            write_wtmp ("/var/log/wtmp", &ut);
+ 
+ #if HAVE_LIBAUDIT
+             audit_event (AUDIT_USER_LOGIN, username, uid, remote_host_name, tty, TRUE);
+@@ -750,7 +736,7 @@
+             if (!pututxline (&ut))
+                 g_printerr ("Failed to write utmpx: %s\n", strerror (errno));
+             endutxent ();
+-            updwtmpx ("/var/log/wtmp", &ut);
++            write_wtmp ("/var/log/wtmp", &ut);
+ 
+ #if HAVE_LIBAUDIT
+             audit_event (AUDIT_USER_LOGOUT, username, uid, remote_host_name, tty, TRUE);

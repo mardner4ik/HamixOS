@@ -1,0 +1,17 @@
+pkgname=libxcb
+pkgver=1.17.0
+pkgdesc="X C binding"
+source="https://www.x.org/releases/individual/lib/libxcb-$pkgver.tar.xz"
+sha256="599ebf9996710fea71622e6e184f3a8ad5b43d0e5fa8c4e407123c88a59a6d55"
+builddir="libxcb-$pkgver"
+depends="xcb-proto libXau libXdmcp xorgproto"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --without-doxygen --disable-devel-docs --without-launchd
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

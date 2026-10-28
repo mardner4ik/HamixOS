@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::{net, print, sys};
+use hxstd::{net, print, sys};
 
 const MAX_REDIRECTS: usize = 5;
 const RECV_TIMEOUT_MS: u64 = 20_000;

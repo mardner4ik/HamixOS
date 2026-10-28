@@ -1,0 +1,7 @@
+[package]
+name = "imago"
+version = "0.1.0"
+edition = "2024"
+description = "no_std image decoders for HamixOS: PNG, JPEG, GIF, BMP, ICO, QOI, TGA, PNM and SVG"
+
+[dependencies]

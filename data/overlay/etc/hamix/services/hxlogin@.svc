@@ -1,0 +1,4 @@
+description = Login prompt on a text console
+exec = /usr/libexec/hamix/hxlogin --tty %i
+start = vt
+restart = always

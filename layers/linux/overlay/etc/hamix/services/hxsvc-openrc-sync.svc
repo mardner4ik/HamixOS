@@ -1,0 +1,5 @@
+description = Create hxsvc units for OpenRC scripts from Alpine packages
+exec = /usr/libexec/hamix/hxsvc-openrc sync
+start = boot
+restart = no
+layer = linux

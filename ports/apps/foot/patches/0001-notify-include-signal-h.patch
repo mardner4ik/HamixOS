@@ -1,0 +1,10 @@
+--- a/notify.c	2026-09-29 17:29:12.658436428 +0300
++++ b/notify.c	2026-09-29 17:29:12.658689259 +0300
+@@ -1,6 +1,7 @@
+ #include "notify.h"
+ 
+ #include <errno.h>
++#include <signal.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>

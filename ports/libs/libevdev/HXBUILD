@@ -1,0 +1,17 @@
+pkgname=libevdev
+pkgver=1.13.3
+pkgdesc="Wrapper library for evdev devices"
+source="https://www.freedesktop.org/software/libevdev/libevdev-$pkgver.tar.xz"
+sha256="abf1aace86208eebdd5d3550ffded4c8d73bb405b796d51c389c9d0604cbcfbf"
+builddir="libevdev-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dtests=disabled -Dtools=disabled -Ddocumentation=disabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

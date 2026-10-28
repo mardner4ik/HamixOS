@@ -1,0 +1,288 @@
+diff --color -ruN a/src/modules/mixer/lib/backends/oss/oss.c b/src/modules/mixer/lib/backends/oss/oss.c
+--- a/src/modules/mixer/lib/backends/oss/oss.c	1970-01-01 03:00:00.000000000 +0300
++++ b/src/modules/mixer/lib/backends/oss/oss.c	2026-09-30 15:49:02.092624854 +0300
+@@ -0,0 +1,228 @@
++#include "emix.h"
++
++#include <Ecore.h>
++#include <fcntl.h>
++#include <sys/ioctl.h>
++#include <unistd.h>
++#include <linux/soundcard.h>
++
++#define OSS_MAX_VOLUME 100
++
++typedef struct _Oss_Context
++{
++   Emix_Event_Cb cb;
++   const void *userdata;
++   Emix_Sink sink;
++   Eina_List *sinks;
++   int volumes[2];
++   Emix_Channel names[2];
++   int counter;
++   Ecore_Timer *poll;
++} Oss_Context;
++
++static Oss_Context *ctx = NULL;
++
++static int
++_oss_mixer_call(unsigned long request, int *value)
++{
++   int fd = open("/dev/mixer", O_RDWR | O_CLOEXEC);
++   int ret;
++
++   if (fd < 0) return -1;
++   ret = ioctl(fd, request, value);
++   close(fd);
++   return ret;
++}
++
++static int
++_oss_counter(void)
++{
++   mixer_info info;
++   int fd = open("/dev/mixer", O_RDWR | O_CLOEXEC);
++
++   if (fd < 0) return -1;
++   if (ioctl(fd, SOUND_MIXER_INFO, &info) < 0) info.modify_counter = -1;
++   close(fd);
++   return info.modify_counter;
++}
++
++static Eina_Bool
++_oss_read(void)
++{
++   int volume = 0, speaker = 0;
++
++   if (_oss_mixer_call(SOUND_MIXER_READ_VOLUME, &volume) < 0) return EINA_FALSE;
++   if (_oss_mixer_call(MIXER_READ(SOUND_MIXER_SPEAKER), &speaker) < 0) speaker = 100;
++   ctx->volumes[0] = volume & 0xff;
++   ctx->volumes[1] = (volume >> 8) & 0xff;
++   ctx->sink.mute = (speaker & 0xff) == 0;
++   return EINA_TRUE;
++}
++
++static Eina_Bool
++_oss_poll(void *data EINA_UNUSED)
++{
++   int counter;
++
++   if (!ctx) return ECORE_CALLBACK_CANCEL;
++   counter = _oss_counter();
++   if (counter != ctx->counter)
++     {
++        ctx->counter = counter;
++        if (_oss_read() && ctx->cb)
++          ctx->cb((void *)ctx->userdata, EMIX_SINK_CHANGED_EVENT, &ctx->sink);
++     }
++   return ECORE_CALLBACK_RENEW;
++}
++
++static Eina_Bool
++_oss_init(Emix_Event_Cb cb, const void *data)
++{
++   int devmask = 0;
++
++   EINA_SAFETY_ON_NULL_RETURN_VAL(cb, EINA_FALSE);
++   if (_oss_mixer_call(SOUND_MIXER_READ_DEVMASK, &devmask) < 0) return EINA_FALSE;
++   if (!(devmask & SOUND_MASK_VOLUME)) return EINA_FALSE;
++   if (!ctx) ctx = calloc(1, sizeof(Oss_Context));
++   EINA_SAFETY_ON_NULL_RETURN_VAL(ctx, EINA_FALSE);
++
++   ctx->cb = cb;
++   ctx->userdata = data;
++   ctx->names[0] = "Front Left";
++   ctx->names[1] = "Front Right";
++   ctx->sink.name = eina_stringshare_add("Master");
++   ctx->sink.volume.channel_count = 2;
++   ctx->sink.volume.volumes = ctx->volumes;
++   ctx->sink.volume.channel_names = ctx->names;
++   ctx->sink.default_sink = EINA_TRUE;
++   _oss_read();
++   ctx->counter = _oss_counter();
++   ctx->sinks = eina_list_append(ctx->sinks, &ctx->sink);
++   ctx->poll = ecore_timer_add(1.0, _oss_poll, NULL);
++
++   ctx->cb((void *)ctx->userdata, EMIX_READY_EVENT, NULL);
++   ctx->cb((void *)ctx->userdata, EMIX_SINK_ADDED_EVENT, &ctx->sink);
++   return EINA_TRUE;
++}
++
++static void
++_oss_shutdown(void)
++{
++   EINA_SAFETY_ON_NULL_RETURN(ctx);
++   if (ctx->poll) ecore_timer_del(ctx->poll);
++   eina_list_free(ctx->sinks);
++   eina_stringshare_del(ctx->sink.name);
++   free(ctx);
++   ctx = NULL;
++}
++
++static int
++_oss_max_volume(void)
++{
++   return OSS_MAX_VOLUME;
++}
++
++static const Eina_List *
++_oss_sinks_get(void)
++{
++   EINA_SAFETY_ON_NULL_RETURN_VAL(ctx, NULL);
++   return ctx->sinks;
++}
++
++static Eina_Bool
++_oss_support(void)
++{
++   return EINA_FALSE;
++}
++
++static const Emix_Sink *
++_oss_sink_default_get(void)
++{
++   EINA_SAFETY_ON_NULL_RETURN_VAL(ctx, NULL);
++   return &ctx->sink;
++}
++
++static void
++_oss_sink_mute_set(Emix_Sink *sink EINA_UNUSED, Eina_Bool mute)
++{
++   int value = mute ? 0 : (100 | (100 << 8));
++
++   EINA_SAFETY_ON_NULL_RETURN(ctx);
++   _oss_mixer_call(MIXER_WRITE(SOUND_MIXER_SPEAKER), &value);
++   _oss_read();
++   ctx->counter = _oss_counter();
++   if (ctx->cb)
++     ctx->cb((void *)ctx->userdata, EMIX_SINK_CHANGED_EVENT, &ctx->sink);
++}
++
++static void
++_oss_sink_volume_set(Emix_Sink *sink EINA_UNUSED, Emix_Volume *volume)
++{
++   int left, right, value;
++
++   EINA_SAFETY_ON_NULL_RETURN(ctx);
++   EINA_SAFETY_ON_NULL_RETURN(volume);
++   if (volume->channel_count < 1) return;
++   left = volume->volumes[0];
++   right = volume->channel_count > 1 ? volume->volumes[1] : left;
++   if (left < 0) left = 0;
++   if (right < 0) right = 0;
++   if (left > OSS_MAX_VOLUME) left = OSS_MAX_VOLUME;
++   if (right > OSS_MAX_VOLUME) right = OSS_MAX_VOLUME;
++   value = left | (right << 8);
++   _oss_mixer_call(SOUND_MIXER_WRITE_VOLUME, &value);
++   _oss_read();
++   ctx->counter = _oss_counter();
++   if (ctx->cb)
++     ctx->cb((void *)ctx->userdata, EMIX_SINK_CHANGED_EVENT, &ctx->sink);
++}
++
++static const Eina_List *
++_oss_sources_get(void)
++{
++   return NULL;
++}
++
++static Emix_Backend
++_oss_backend =
++{
++   _oss_init,
++   _oss_shutdown,
++   _oss_max_volume,
++   _oss_sinks_get,
++   _oss_support,
++   _oss_sink_default_get,
++   NULL,
++   _oss_sink_mute_set,
++   _oss_sink_volume_set,
++   NULL,
++   _oss_support,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   _oss_sources_get,
++   _oss_support,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL,
++   NULL
++};
++
++E_API Emix_Backend *
++emix_backend_oss_get(void)
++{
++   return &_oss_backend;
++}
++
++E_API const char *emix_backend_oss_name = "OSS";
+diff --color -ruN a/src/modules/mixer/lib/emix.c b/src/modules/mixer/lib/emix.c
+--- a/src/modules/mixer/lib/emix.c	2026-09-30 15:48:38.436519494 +0300
++++ b/src/modules/mixer/lib/emix.c	2026-09-30 15:49:14.290018637 +0300
+@@ -12,6 +12,10 @@
+ E_API Emix_Backend      *emix_backend_alsa_get(void);
+ E_API extern const char *emix_backend_alsa_name;
+ #endif
++#ifdef HAVE_OSS
++E_API Emix_Backend      *emix_backend_oss_get(void);
++E_API extern const char *emix_backend_oss_name;
++#endif
+ 
+ static int _log_domain;
+ 
+@@ -111,6 +115,17 @@
+         eina_array_push(ctx->backends, back);
+         ctx->backends_names = eina_list_append(ctx->backends_names,
+                                                back->backend_name);
++     }
++#endif
++#ifdef HAVE_OSS
++   back = calloc(1, sizeof(Back));
++   if (back)
++     {
++        back->backend_get = emix_backend_oss_get;
++        back->backend_name = emix_backend_oss_name;
++        eina_array_push(ctx->backends, back);
++        ctx->backends_names = eina_list_append(ctx->backends_names,
++                                               back->backend_name);
+      }
+ #endif
+ 
+diff --color -ruN a/src/modules/mixer/meson.build b/src/modules/mixer/meson.build
+--- a/src/modules/mixer/meson.build	2026-09-30 15:48:38.436440462 +0300
++++ b/src/modules/mixer/meson.build	2026-09-30 15:49:14.290155542 +0300
+@@ -22,6 +22,11 @@
+ 
+   config_h.set('HAVE_ALSA' , dep_alsa.found())
+   config_h.set('HAVE_PULSE', dep_pulse.found() and dep_pulse_simple.found())
++  have_oss = cc.has_header('linux/soundcard.h')
++  if have_oss
++    config_h.set('HAVE_OSS', '1')
++    mixer_lib += files('lib/backends/oss/oss.c')
++  endif
+ 
+   if config_h.get('HAVE_ALSA') == true
+     mixer_lib += files(
+@@ -34,7 +39,7 @@
+       'lib/backends/pulseaudio/pulse.c'
+     )
+   endif
+-  if config_h.has('HAVE_PULSE') == false and config_h.has('HAVE_ALSA') == false
++  if config_h.get('HAVE_PULSE') == false and config_h.get('HAVE_ALSA') == false and not have_oss
+     error('mixer support requested, but no backends found!')
+   endif
+ 

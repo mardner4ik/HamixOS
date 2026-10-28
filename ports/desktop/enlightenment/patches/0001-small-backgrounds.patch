@@ -1,0 +1,33 @@
+--- a/data/backgrounds/meson.build	2026-09-29 22:14:15.657764359 +0300
++++ b/data/backgrounds/meson.build	2026-09-29 22:14:15.659013124 +0300
+@@ -1,28 +1,8 @@
+-install_data([ 'Flat-Fan.edj',
+-               'Sunset-Hills.edj',
+-               'Dunes.edj',
+-               'Squiggle.edj',
++install_data([ 'Squiggle.edj',
+                'Squiggle-Dark.edj',
+                'Squiggle-Mid.edj',
+                'Squiggle-Light.edj',
+-
+-               'Flat-Stone-Pattern.edj',
+-               'Paper-Flower.edj',
+-
+-               'Mountain.edj',
+-               'Sunset-Clouds.edj',
+-               'Red-Maple.edj',
+-               'Spruce-Needles.edj',
+-               'Lichen-Branches.edj',
+-               'Foggy-Trees.edj',
+-               'God-Rays.edj',
+-               'Sea-of-Lanterns.edj',
+-               'Yellow-Flower.edj',
+-               'Green-Maple.edj',
+-               'Peaks.edj',
+-               'White-Flower.edj',
+-               'Snow-Trees.edj',
+-               'Bamboo.edj'
++               'Flat-Stone-Pattern.edj'
+              ],
+              install_dir: join_paths(dir_data, 'enlightenment/data/backgrounds')
+             )

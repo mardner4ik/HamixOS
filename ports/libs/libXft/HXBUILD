@@ -1,0 +1,17 @@
+pkgname=libXft
+pkgver=2.3.8
+pkgdesc="FreeType fonts for X clients"
+source="https://www.x.org/releases/individual/lib/libXft-$pkgver.tar.xz"
+sha256="5e8c3c4bc2d4c0a40aef6b4b38ed2fb74301640da29f6528154b5009b1c6dd49"
+builddir="libXft-$pkgver"
+depends="libXrender fontconfig freetype"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

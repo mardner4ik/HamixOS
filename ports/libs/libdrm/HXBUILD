@@ -1,0 +1,20 @@
+pkgname=libdrm
+pkgver=2.4.123
+pkgdesc="Userspace interface to the kernel DRM services"
+source="https://dri.freedesktop.org/libdrm/libdrm-$pkgver.tar.xz"
+sha256="a2b98567a149a74b0f50e91e825f9c0315d86e7be9b74394dae8b298caadb79e"
+builddir="libdrm-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dc_args="-D__linux__ -D_GNU_SOURCE -I$HX_ROOT/usr/include" -Dintel=disabled -Dradeon=disabled -Damdgpu=disabled -Dnouveau=disabled \
+        -Dvmwgfx=disabled -Domap=disabled -Dexynos=disabled -Dfreedreno=disabled -Dtegra=disabled \
+        -Dvc4=disabled -Detnaviv=disabled -Dcairo-tests=disabled -Dman-pages=disabled -Dvalgrind=disabled \
+        -Dtests=false -Dinstall-test-programs=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

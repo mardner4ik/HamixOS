@@ -1,19 +1,9 @@
 
 use super::*;
+use crate::fs::epoll;
+use crate::net::socket;
+use crate::tty;
 
-pub mod base;
-pub mod epoll;
-#[cfg(not(target_arch = "x86_64"))]
-pub mod generic;
-pub mod inet;
-pub mod misc;
-pub mod netlink;
-pub mod procfs;
-pub mod process;
-pub mod signal;
-pub mod socket;
-pub mod special;
-pub mod tty;
 
 pub(super) const SYS_STAT: u64 = 4;
 pub(super) const SYS_LSTAT: u64 = 6;
@@ -187,6 +177,8 @@ pub(super) const SYS_SETRLIMIT: u64 = 160;
 pub(super) const SYS_CHROOT: u64 = 161;
 pub(super) const SYS_SYNC: u64 = 162;
 pub(super) const SYS_MOUNT: u64 = 165;
+pub(super) const SYS_UMOUNT2: u64 = 166;
+pub(super) const SYS_REBOOT: u64 = 169;
 pub(super) const SYS_SETXATTR: u64 = 188;
 pub(super) const SYS_LSETXATTR: u64 = 189;
 pub(super) const SYS_FSETXATTR: u64 = 190;
@@ -210,6 +202,7 @@ pub(super) const SYS_MEMBARRIER: u64 = 324;
 pub(super) const SYS_MBIND: u64 = 237;
 pub(super) const SYS_MINCORE: u64 = 27;
 pub(super) const SYS_PIDFD_OPEN: u64 = 434;
+pub(super) const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
 pub(super) const SYS_SET_MEMPOLICY: u64 = 238;
 pub(super) const SYS_GET_MEMPOLICY: u64 = 239;
 pub(super) const SYS_FACCESSAT2: u64 = 439;
@@ -260,9 +253,15 @@ pub(super) fn dispatch(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64,
         SYS_PRLIMIT64 => misc::sys_prlimit64(a1, a2, a3, a4),
         SYS_GETRUSAGE => misc::sys_getrusage(a1, a2),
         SYS_TIMES => misc::sys_times(a1),
-        SYS_PTRACE | SYS_CHROOT | SYS_MOUNT | SYS_MKNOD => EPERM,
+        SYS_MOUNT => crate::syscall::sys_mount_posix(a1, a2, a3, a4),
+        SYS_UMOUNT2 => crate::syscall::sys_umount2(a1, a2),
+        SYS_REBOOT => misc::sys_reboot(a1, a2, a3),
+        SYS_PTRACE | SYS_CHROOT | SYS_MKNOD => EPERM,
         SYS_SETUID => misc::sys_setuid(a1),
-        SYS_SETGID | SYS_SETREGID | SYS_SETRESGID | SYS_SETGROUPS => misc::sys_setgid(a1),
+        SYS_SETGID => misc::sys_setgid(a1),
+        SYS_SETREGID => misc::sys_setregid(a1, a2),
+        SYS_SETRESGID => misc::sys_setresgid(a1, a2, a3),
+        SYS_SETGROUPS => base::sys_setgroups(a1, a2),
         SYS_SETREUID => misc::sys_setreuid(a1, a2),
         SYS_SETRESUID => misc::sys_setresuid(a1, a2, a3),
         SYS_GETRESUID => misc::sys_getresuid(a1, a2, a3),
@@ -290,7 +289,8 @@ pub(super) fn dispatch(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64,
         SYS_MEMBARRIER | SYS_MBIND | SYS_SET_MEMPOLICY => 0,
         SYS_GET_MEMPOLICY => misc::sys_get_mempolicy(a1, a2, a3),
         SYS_MINCORE => misc::sys_mincore(a1, a2, a3),
-        SYS_PIDFD_OPEN => ENOSYS,
+        SYS_PIDFD_OPEN => special::sys_pidfd_open(a1, a2),
+        SYS_PIDFD_SEND_SIGNAL => special::sys_pidfd_send_signal(a1, a2, a3, a4),
         SYS_FACCESSAT2 => base::sys_faccessat(a1, a2, a3),
         SYS_EPOLL_PWAIT2 => {
             let ms = if a4 == 0 {
@@ -370,9 +370,9 @@ pub(super) fn dispatch(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64,
         SYS_CLOSE_RANGE => sys_close_range(a1, a2, a3),
         SYS_FCHMOD => base::sys_fchmod(a1, a2),
         SYS_FCHMODAT => base::sys_fchmodat(a1, a2, a3),
-        SYS_FCHOWN => base::sys_fchown(a1, a2),
-        SYS_LCHOWN => base::sys_fchownat(base::AT_FDCWD, a1, a2),
-        SYS_FCHOWNAT => base::sys_fchownat(a1, a2, a3),
+        SYS_FCHOWN => base::sys_fchown(a1, a2, a3),
+        SYS_LCHOWN => base::sys_fchownat(base::AT_FDCWD, a1, a2, a3),
+        SYS_FCHOWNAT => base::sys_fchownat(a1, a2, a3, a4),
         SYS_UMASK => base::sys_umask(a1),
         SYS_SYSINFO => base::sys_sysinfo(a1),
         SYS_GETGROUPS => base::sys_getgroups(a1, a2),
@@ -385,7 +385,7 @@ pub(super) fn dispatch(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64,
         SYS_PREAD64 => base::sys_pread(a1, a2, a3, a4),
         SYS_READV => base::sys_readv(a1, a2, a3),
         SYS_ACCESS => base::sys_faccessat(base::AT_FDCWD, a1, a2),
-        SYS_MPROTECT => base::sys_mprotect(a1, a2),
+        SYS_MPROTECT => base::sys_mprotect(a1, a2, a3),
         SYS_MADVISE => 0,
         SYS_FCNTL => base::sys_fcntl(a1, a2, a3),
         SYS_READLINK => base::sys_readlinkat(base::AT_FDCWD, a1, a2, a3),
@@ -421,13 +421,7 @@ pub(super) fn dispatch(number: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64,
         SYS_FORK => process::sys_fork(),
         SYS_VFORK => process::sys_vfork(),
         SYS_EXECVE => process::sys_execve(a1, a2, a3),
-        SYS_EXECVEAT => {
-            if a5 & 0x1000 != 0 || (a1 != base::AT_FDCWD && !matches!(user_cstr(a2).as_deref().map(|p| p.starts_with('/')), Ok(true))) {
-                ENOSYS
-            } else {
-                process::sys_execve(a2, a3, a4)
-            }
-        }
+        SYS_EXECVEAT => process::sys_execveat(a1, a2, a3, a4, a5),
         SYS_WAITID => process::sys_waitid(a1, a2, a3, a4),
         SYS_EXIT_GROUP => process::sys_exit_group(a1),
         _ => return None,

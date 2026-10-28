@@ -1,0 +1,11 @@
+--- a/meson.build	2026-09-29 22:39:40.641268110 +0300
++++ b/meson.build	2026-09-29 22:39:40.642009117 +0300
+@@ -316,7 +316,7 @@
+                   dependency('wayland-server' , version: wayland_version),
+                   dependency('wayland-client' , version: wayland_version),
+                   wayland_protocols,
+-                  dependency('wayland-scanner', version: wayland_version),
++                  dependency('wayland-scanner', version: wayland_version, native: true),
+                   dependency('xkbcommon'),
+                   dependency('uuid')
+                 ]

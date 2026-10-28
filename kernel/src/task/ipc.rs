@@ -12,13 +12,13 @@ use crate::memory::frame;
 pub const MAX_MESSAGE: usize = 4096;
 const MAILBOX_LIMIT: usize = 512;
 
-pub const ESRCH: i64 = -3;
-pub const EAGAIN: i64 = -11;
-pub const ENOMEM: i64 = -12;
-pub const EACCES: i64 = -13;
-pub const EEXIST: i64 = -17;
-pub const EINVAL: i64 = -22;
-pub const ENOENT: i64 = -2;
+pub use crate::errno::ESRCH;
+pub use crate::errno::EAGAIN;
+pub use crate::errno::ENOMEM;
+pub use crate::errno::EACCES;
+pub use crate::errno::EEXIST;
+pub use crate::errno::EINVAL;
+pub use crate::errno::ENOENT;
 
 struct Segment {
     frames: Vec<usize>,
@@ -32,6 +32,8 @@ const F_SEAL_SHRINK: u32 = 0x0002;
 const EPERM: i64 = -1;
 
 static SERVICES: Mutex<BTreeMap<String, Pid>> = Mutex::new(BTreeMap::new());
+static ACTIVATORS: Mutex<BTreeMap<String, Pid>> = Mutex::new(BTreeMap::new());
+const ACTIVATION_TIMEOUT_MS: u64 = 5000;
 static SEGMENTS: Mutex<BTreeMap<u32, Segment>> = Mutex::new(BTreeMap::new());
 static NEXT_SEGMENT: AtomicU32 = AtomicU32::new(0x5100);
 
@@ -65,6 +67,13 @@ pub fn take_message() -> Option<Message> {
     super::with_current(|task| task.mailbox.pop_front())
 }
 
+pub fn take_message_from(sender: Pid) -> Option<Message> {
+    super::with_current(|task| {
+        let index = task.mailbox.iter().position(|m| m.sender == sender)?;
+        task.mailbox.remove(index)
+    })
+}
+
 pub fn has_message() -> bool {
     super::with_current(|task| !task.mailbox.is_empty())
 }
@@ -83,6 +92,39 @@ pub fn register_service(name: &str, pid: Pid) -> i64 {
         services.insert(String::from(name), pid);
         0
     })
+}
+
+pub fn register_activator(name: &str, pid: Pid) -> i64 {
+    if name.is_empty() || name.len() > 64 {
+        return EINVAL;
+    }
+    without_interrupts(|| ACTIVATORS.lock().insert(String::from(name), pid));
+    0
+}
+
+pub fn lookup_service_activating(name: &str) -> i64 {
+    let found = lookup_service(name);
+    if found != ENOENT {
+        return found;
+    }
+    let activator = without_interrupts(|| ACTIVATORS.lock().get(name).copied());
+    let Some(activator) = activator.filter(|p| super::exists(*p)) else {
+        return ENOENT;
+    };
+    let request = alloc::format!("activate {}", name);
+    if send(0, activator, request.as_bytes()) < 0 {
+        return ENOENT;
+    }
+    let deadline = super::uptime_ms() + ACTIVATION_TIMEOUT_MS;
+    while super::uptime_ms() < deadline {
+        super::sleep_ticks((super::TICK_HZ / 50).max(1));
+        super::check_killed();
+        let found = lookup_service(name);
+        if found != ENOENT {
+            return found;
+        }
+    }
+    ENOENT
 }
 
 pub fn lookup_service(name: &str) -> i64 {
@@ -173,9 +215,15 @@ pub fn shm_len(id: u32) -> Option<u64> {
 }
 
 pub fn shm_add_seals(id: u32, seals: u32) -> i64 {
-    if seals & !F_SEAL_SHRINK != 0 { return EINVAL; }
+    if seals & !F_SEAL_SHRINK != 0 {
+        return EINVAL;
+    }
     without_interrupts(|| match SEGMENTS.lock().get_mut(&id) {
-        Some(segment) => { segment.seals |= seals; 0 }, None => ENOENT,
+        Some(segment) => {
+            segment.seals |= seals;
+            0
+        }
+        None => ENOENT,
     })
 }
 
@@ -209,7 +257,9 @@ pub fn shm_set_len(id: u32, len: u64) -> i64 {
         let Some(segment) = segments.get_mut(&id) else {
             return (extra, ENOENT);
         };
-        if segment.len > len && segment.seals & F_SEAL_SHRINK != 0 { return (extra, EPERM); }
+        if segment.len > len && segment.seals & F_SEAL_SHRINK != 0 {
+            return (extra, EPERM);
+        }
         if segment.len > len {
             let keep = len as usize;
             for (i, f) in segment.frames.iter().enumerate() {
@@ -230,6 +280,10 @@ pub fn shm_set_len(id: u32, len: u64) -> i64 {
         frame::free_frame(f);
     }
     error
+}
+
+pub fn shm_frames(id: u32) -> Option<(Vec<usize>, u64)> {
+    without_interrupts(|| SEGMENTS.lock().get(&id).map(|s| (s.frames.clone(), s.len)))
 }
 
 pub fn shm_io(id: u32, offset: u64, buf: &mut [u8], write: bool) -> Result<usize, i64> {
@@ -295,7 +349,7 @@ pub fn shm_map_at(pid: Pid, id: u32, fixed: Option<u64>, offset: u64, len: u64) 
         Some(base)
     })
     .flatten();
-    crate::arch::paging::flush_tlb();
+    crate::memory::tlb::sync();
     match mapped {
         Some(base) => Ok(base),
         None => {
@@ -325,7 +379,7 @@ pub fn unmap_range(pid: Pid, start: u64, len: u64) -> bool {
         removed
     })
     .unwrap_or_default();
-    crate::arch::paging::flush_tlb();
+    crate::memory::tlb::sync();
     let any = !removed.is_empty();
     for id in removed {
         drop_ref(id);
@@ -360,7 +414,7 @@ pub fn shm_release(pid: Pid, id: u32) -> i64 {
         Some(())
     })
     .flatten();
-    crate::arch::paging::flush_tlb();
+    crate::memory::tlb::sync();
     match entry {
         Some(()) => {
             drop_ref(id);

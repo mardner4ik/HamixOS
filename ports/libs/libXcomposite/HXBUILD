@@ -1,0 +1,17 @@
+pkgname=libXcomposite
+pkgver=0.4.6
+pkgdesc="X Composite extension library"
+source="https://www.x.org/releases/individual/lib/libXcomposite-$pkgver.tar.xz"
+sha256="fe40bcf0ae1a09070eba24088a5eb9810efe57453779ec1e20a55080c6dc2c87"
+builddir="libXcomposite-$pkgver"
+depends="libX11 libXfixes"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-malloc0returnsnull
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

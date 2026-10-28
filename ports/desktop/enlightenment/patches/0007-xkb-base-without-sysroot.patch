@@ -1,0 +1,16 @@
+--- a/meson.build	2026-09-30 16:12:49.786559979 +0300
++++ b/meson.build	2026-09-30 16:12:49.807967162 +0300
+@@ -362,7 +362,12 @@
+ 
+ dep_xkeyboard_config = dependency('xkeyboard-config', required: false)
+ if dep_xkeyboard_config.found() == true
+-  config_h.set_quoted('XKB_BASE', dep_xkeyboard_config.get_pkgconfig_variable('xkb_base'))
++  xkb_base = dep_xkeyboard_config.get_pkgconfig_variable('xkb_base')
++  sys_root = meson.get_external_property('sys_root', '')
++  if sys_root != '' and xkb_base.startswith(sys_root)
++    xkb_base = xkb_base.replace(sys_root, '')
++  endif
++  config_h.set_quoted('XKB_BASE', xkb_base)
+ endif
+ 
+ eldbus_codegen_cmd = get_option('eldbus-codegen')

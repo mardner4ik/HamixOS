@@ -122,7 +122,7 @@ setup_long_mode:
 
     movl %cr0, %eax
     andl $0x9FFFFFFF, %eax
-    orl $0x80000022, %eax
+    orl $0x80010022, %eax
     movl %eax, %cr0
 
     fninit
@@ -161,6 +161,7 @@ long_mode_start:
 .global ap_trampoline
 .global ap_trampoline_end
 .global ap_slot_cr3
+.global ap_slot_efer
 .global ap_slot_stack
 .global ap_slot_entry
 .code16
@@ -191,11 +192,11 @@ ap_protected:
     movl %eax, %cr4
     movl $0xC0000080, %ecx
     rdmsr
-    orl $0x00000101, %eax
+    orl (ap_slot_efer - ap_trampoline + 0x7000), %eax
     wrmsr
     movl %cr0, %eax
     andl $0x9FFFFFFF, %eax
-    orl $0x80000022, %eax
+    orl $0x80010022, %eax
     movl %eax, %cr0
     lgdt (ap_gdt64_ptr - ap_trampoline + 0x7000)
     ljmp $0x08, $(ap_long - ap_trampoline + 0x7000)
@@ -238,6 +239,9 @@ ap_gdt64_ptr:
     .long ap_gdt64 - ap_trampoline + 0x7000
 .p2align 3
 ap_slot_cr3:
+    .long 0
+    .long 0
+ap_slot_efer:
     .long 0
     .long 0
 ap_slot_stack:

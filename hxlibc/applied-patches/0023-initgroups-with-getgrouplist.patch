@@ -1,0 +1,18 @@
+--- a/options/posix/generic/grp-stubs.cpp	2026-10-04 20:19:27.660816112 +0300
++++ b/options/posix/generic/grp-stubs.cpp	2026-10-04 20:19:27.681541111 +0300
+@@ -295,9 +295,12 @@
+ 	return 0;
+ }
+ 
+-int initgroups(const char *, gid_t) {
+-	mlibc::infoLogger() << "mlibc: initgroups is a stub" << frg::endlog;
+-	return 0;
++int initgroups(const char *user, gid_t gid) {
++	gid_t groups[64];
++	int count = 64;
++	if(getgrouplist(user, gid, groups, &count) < 0)
++		count = 64;
++	return setgroups(count, groups);
+ }
+ 
+ int putgrent(const struct group *, FILE *) {

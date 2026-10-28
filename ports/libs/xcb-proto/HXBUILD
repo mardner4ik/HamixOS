@@ -1,0 +1,18 @@
+pkgname=xcb-proto
+pkgver=1.17.0
+pkgdesc="XCB protocol descriptions"
+source="https://www.x.org/releases/individual/proto/xcb-proto-$pkgver.tar.xz"
+sha256="2c1bacd2110f4799f74de6ebb714b94cf6f80fb112316b1219480fd22562148c"
+builddir="xcb-proto-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    sed -i 's#^xcbincludedir=.*#xcbincludedir=${pc_sysrootdir}${datarootdir}/xcb#' "$pkgdir/usr/share/pkgconfig/xcb-proto.pc"
+}

@@ -1,0 +1,16 @@
+pkgname=libffi
+pkgver=3.4.6
+pkgdesc="Portable foreign function interface library"
+source="https://github.com/libffi/libffi/releases/download/v$pkgver/libffi-$pkgver.tar.gz"
+sha256="b0dea9df23c863a7a50e825440f3ebffabd65df1497108e5d437747843895a4e"
+builddir="libffi-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static --disable-docs --disable-multi-os-directory --disable-exec-static-tramp
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

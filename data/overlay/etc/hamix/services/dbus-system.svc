@@ -1,0 +1,4 @@
+description = D-Bus system message bus
+exec = /usr/libexec/hamix/dbus-system
+start = boot
+restart = on-failure

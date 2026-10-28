@@ -1,0 +1,17 @@
+--- a/meson.build
++++ b/meson.build
+@@ -505,12 +505,13 @@
+ 	if library_type in ['shared', 'both']
+ 		ld_shared_lib = shared_library('ld', rtld_sources + rtld_dso_sources,
+ 			name_prefix: '',
++			name_suffix: host_machine.system() == 'hamix' ? 'hx' : [],
+ 			cpp_args: ld_cpp_args,
+ 			include_directories: rtld_include_dirs,
+ 			dependencies: rtld_deps + rtlib_deps,
+ 			install: true
+ 		)
+-		libc_shared = shared_library('c', libc_all_sources + internal_dso_sources,
++		libc_shared = shared_library(host_machine.system() == 'hamix' ? 'hxc' : 'c', libc_all_sources + internal_dso_sources,
+ 			cpp_args: [libc_cpp_args],
+ 			include_directories: libc_include_dirs,
+ 			dependencies: libc_deps + rtlib_deps,

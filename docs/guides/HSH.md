@@ -1,6 +1,10 @@
-# hsh — the HamixOS shell
+# hsh — the former HamixOS shell
 
-hsh is an ordinary userspace program (`/usr/bin/hsh`, source in `apps/hsh`).
+Status: historical · Disabled 2026-09-28 (ADR-0012B): the system shell is bash, see
+`SHELL.md`. The source stays in `userland/core/hsh`; remove `disabled = true` from its
+`Cargo.toml` to build it again. The builtins below are now separate programs.
+
+hsh is an ordinary userspace program (`/usr/bin/hsh`, source in `userland/core/hsh`).
 The kernel only handles the console login.
 
 ## Which shell starts after login

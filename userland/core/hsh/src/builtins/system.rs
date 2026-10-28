@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{fs, sys, users};
+use hxstd::{fs, sys, users};
 
 use super::basic::print_kv;
 use super::files::human;
@@ -71,7 +71,7 @@ fn table_proc(io: Io, path: &str) -> i32 {
 
 fn uname(_: &mut Shell, args: &[String], io: Io) -> i32 {
     if args.iter().any(|a| a == "-a") {
-        outln!(io, "HamixOS {} 0.6.1 #1 {} hsh", read_hostname(), hamix_std::sys::ARCH);
+        outln!(io, "HamixOS {} 0.6.1 #1 {} hsh", read_hostname(), hxstd::sys::ARCH);
     } else if args.iter().any(|a| a == "-r") {
         outln!(io, "0.6.1");
     } else {
@@ -271,7 +271,7 @@ fn drivers(_: &mut Shell, _: &[String], io: Io) -> i32 {
 
 fn pci_ids_name(id: &str) -> Option<String> {
     let (vendor, device) = id.split_once(':')?;
-    let text = ["/opt/linux/usr/share/hwdata/pci.ids", "/usr/share/hwdata/pci.ids", "/opt/linux/usr/share/misc/pci.ids"]
+    let text = ["/usr/share/hwdata/pci.ids", "/usr/share/misc/pci.ids"]
         .iter()
         .find_map(|p| fs::read_to_string(p))?;
     let mut inside = false;
@@ -454,7 +454,7 @@ fn fetch(_: &mut Shell, _: &[String], io: Io) -> i32 {
     let user = users::name_of(sys::geteuid() as u32);
     let lines = [
         format!("\x1b[1m{}@{}\x1b[0m", user, read_hostname()),
-        format!("\x1b[96mOS\x1b[0m      HamixOS 0.6.1 {}", hamix_std::sys::ARCH),
+        format!("\x1b[96mOS\x1b[0m      HamixOS 0.6.1 {}", hxstd::sys::ARCH),
         format!("\x1b[96mUptime\x1b[0m  {}", format_duration(info.uptime_ms)),
         format!("\x1b[96mShell\x1b[0m   hsh"),
         format!("\x1b[96mCPU\x1b[0m     {}", cpu),
@@ -526,22 +526,17 @@ fn run_foreground(sh: &mut Shell, program: &str, args: &[&str], io: Io) -> i32 {
     sh.wait_foreground(pid)
 }
 
-fn start_session_bus() {
-    let uid = sys::getuid().max(0);
-    let runtime = hamix_std::env::var("XDG_RUNTIME_DIR")
-        .map(String::from)
-        .unwrap_or_else(|| format!("/tmp/runtime-{}", uid));
-    sys::mkdir(&runtime);
-    let socket = format!("{}/bus", runtime);
-    if sys::stat(&socket).is_ok() {
+const SESSION_HOOKS: &str = "/etc/hamix/session.d";
+
+fn run_session_hooks() {
+    let Some(entries) = sys::read_dir(SESSION_HOOKS) else {
         return;
+    };
+    let mut hooks: Vec<String> = entries.into_iter().filter(|e| !e.is_dir && e.name.ends_with(".start")).map(|e| format!("{}/{}", SESSION_HOOKS, e.name)).collect();
+    hooks.sort();
+    for hook in hooks {
+        sys::spawn::<&str>(&hook, &[], sys::SPAWN_DETACH);
     }
-    let daemon = "/opt/linux/usr/bin/dbus-daemon";
-    if sys::stat(daemon).is_err() {
-        return;
-    }
-    let address = format!("--address=unix:path={}", socket);
-    sys::spawn(daemon, &["--session", address.as_str(), "--nopidfile"], sys::SPAWN_DETACH);
 }
 
 fn startx(sh: &mut Shell, _: &[String], io: Io) -> i32 {
@@ -549,7 +544,7 @@ fn startx(sh: &mut Shell, _: &[String], io: Io) -> i32 {
         errln!(io, "startx: the desktop is already running");
         return 1;
     }
-    start_session_bus();
+    run_session_hooks();
     let desktop = fs::read_to_string("/etc/hamix/login.conf")
         .and_then(|t| super::basic::parse_conf(&t).into_iter().find(|(k, _)| k == "desktop").map(|(_, v)| v))
         .unwrap_or_else(|| String::from("/usr/bin/hxserver"));

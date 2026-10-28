@@ -1,0 +1,4 @@
+description = Mount CD/DVD discs and USB drives under /media
+exec = /usr/bin/hxmount watch
+start = boot
+restart = on-failure

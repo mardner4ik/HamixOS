@@ -1,7 +1,8 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::syscall::{copy_out, user_slice, EFAULT, EINVAL, EPERM, ESRCH};
+use crate::usercopy::{copy_out, user_slice};
+use crate::errno::{EFAULT, EINVAL, EPERM, ESRCH};
 use crate::task::switch::InterruptFrame;
 use crate::task::{self, Abi, Pid, SigAction};
 
@@ -36,7 +37,7 @@ pub(super) const SA_RESTORER: u64 = 0x0400_0000;
 pub(super) const SS_ONSTACK: u32 = 1;
 pub(super) const SS_DISABLE: u32 = 2;
 
-pub const EINTR: i64 = -4;
+pub use crate::errno::EINTR;
 
 const UNBLOCKABLE: u64 = (1 << (SIGKILL - 1)) | (1 << (SIGSTOP - 1));
 
@@ -53,6 +54,17 @@ fn default_ignored(sig: u32) -> bool {
 fn terminate(pid: Pid, sig: u32) {
     task::with_task(pid, |t| t.exit_signal = sig as u8);
     task::kill(pid, 128 + sig as i32);
+}
+
+pub fn take_sender(sig: u32) -> (u32, u32) {
+    let packed = task::with_current_thread(|t| core::mem::take(&mut t.sig_sender[sig as usize]));
+    ((packed >> 32) as u32, packed as u32)
+}
+
+pub fn fill_siginfo(raw: &mut [u8], sig: u32, sender: (u32, u32)) {
+    raw[0..4].copy_from_slice(&sig.to_le_bytes());
+    raw[16..20].copy_from_slice(&sender.0.to_le_bytes());
+    raw[20..24].copy_from_slice(&sender.1.to_le_bytes());
 }
 
 pub fn send(pid: Pid, sig: u32) -> bool {
@@ -130,7 +142,11 @@ pub fn send_thread(tid: Pid, sig: u32) -> bool {
 }
 
 fn queue(tid: Pid, sig: u32) {
-    task::with_task(tid, |t| t.sig_pending |= bit(sig));
+    let sender = if task::current_tid() == 0 { 0 } else { task::with_current(|t| ((t.leader as u64) << 32) | t.ruid as u64) };
+    task::with_task(tid, |t| {
+        t.sig_pending |= bit(sig);
+        t.sig_sender[sig as usize] = sender;
+    });
     PENDING_HINT.fetch_add(1, Ordering::Relaxed);
     task::interrupt(tid);
 }
@@ -365,7 +381,7 @@ pub fn deliver(frame: &mut InterruptFrame, fx: *mut u8, syscall: Option<(u64, i6
             }
             return;
         };
-        let _ = PENDING_HINT.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+        let _ = PENDING_HINT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         let action = task::with_current(|t| {
             let action = t.sig_actions[sig as usize];
             if action.flags & SA_RESETHAND != 0 && action.handler > SIG_IGN {
@@ -391,7 +407,8 @@ pub fn deliver(frame: &mut InterruptFrame, fx: *mut u8, syscall: Option<(u64, i6
                 frame.set_ret(result as u64);
             }
         }
-        if !sigframe::setup(frame, fx, sig, &action, mask, altstack) {
+        let sender = take_sender(sig);
+        if !sigframe::setup(frame, fx, sig, &action, mask, altstack, sender) {
             let pid = task::current_pid();
             task::with_task(pid, |t| t.exit_signal = 11);
             task::exit_current(128 + 11);
@@ -640,9 +657,10 @@ pub fn sys_rt_sigtimedwait(set: u64, info: u64, timeout: u64, sigsetsize: u64) -
             Some(sig)
         });
         if let Some(sig) = got {
+            let sender = take_sender(sig);
             if info != 0 {
                 let mut raw = [0u8; 128];
-                raw[0..4].copy_from_slice(&sig.to_le_bytes());
+                fill_siginfo(&mut raw, sig, sender);
                 copy_out(info, 128, &raw);
             }
             return sig as i64;
@@ -678,7 +696,8 @@ fn remaining(at: u64) -> (u64, u64) {
 }
 
 pub fn sys_alarm(seconds: u64) -> i64 {
-    let at = if seconds == 0 { 0 } else { task::ticks() + seconds * task::TICK_HZ };
+    let seconds = seconds as u32 as u64;
+    let at = if seconds == 0 { 0 } else { task::ticks().saturating_add(seconds.saturating_mul(task::TICK_HZ)) };
     let old = task::with_current(|t| {
         let old = t.alarm_at;
         t.alarm_at = at;

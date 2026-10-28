@@ -1,0 +1,6 @@
+#!/bin/sh
+runtime="${XDG_RUNTIME_DIR:-/tmp/runtime-0}"
+mkdir -p "$runtime"
+[ -e "$runtime/bus" ] && exit 0
+[ -x /usr/bin/dbus-daemon ] || exit 0
+exec /usr/bin/dbus-daemon --session "--address=unix:path=$runtime/bus" --nopidfile

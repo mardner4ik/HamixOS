@@ -1,0 +1,17 @@
+pkgname=libXdmcp
+pkgver=1.1.5
+pkgdesc="X display manager control protocol library"
+source="https://www.x.org/releases/individual/lib/libXdmcp-$pkgver.tar.xz"
+sha256="d8a5222828c3adab70adf69a5583f1d32eb5ece04304f7f8392b6a353aa2228c"
+builddir="libXdmcp-$pkgver"
+depends="xorgproto"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-docs
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

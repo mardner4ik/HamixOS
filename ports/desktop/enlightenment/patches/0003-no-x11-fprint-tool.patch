@@ -1,0 +1,7 @@
+--- a/src/bin/tools/meson.build	2026-09-29 22:40:38.423617845 +0300
++++ b/src/bin/tools/meson.build	2026-09-29 22:40:38.425810818 +0300
+@@ -3,4 +3,3 @@
+ subdir('open')
+ subdir('askpass')
+ subdir('remote')
+-subdir('fprint')

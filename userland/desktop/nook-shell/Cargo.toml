@@ -1,0 +1,24 @@
+[package]
+name = "nook-shell"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nook-shell"
+path = "src/main.rs"
+
+[features]
+default = ["hxserver", "wayland"]
+hxserver = []
+wayland = ["dep:wlclient"]
+
+[dependencies]
+wlclient = { path = "../../../crates/wlclient", optional = true }
+hxstd = { path = "../../libs/hxstd" }
+vellum = { path = "../../../crates/vellum" }
+imago = { path = "../../../crates/imago" }
+hxproto = { path = "../../../crates/hxproto" }
+hxclient = { path = "../../libs/hxclient" }
+
+[package.metadata.hamix]
+desktop = "nook"

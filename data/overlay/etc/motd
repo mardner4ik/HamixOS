@@ -1,0 +1,4 @@
+HamixOS live system -- everything you change stays in RAM until you install.
+  startx        start the Nook desktop     fastfetch  system summary
+  lsblk         disks and partitions       sudo       run a command as root
+Install to a disk from Nook ("Install HamixOS") or read /usr/share/hamix/install.sh.

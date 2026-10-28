@@ -1,7 +1,11 @@
 pub mod aspace;
 pub mod frame;
-mod heap;
+pub mod heap;
 pub mod page_cache;
+pub mod tlb;
+
+pub static BOOT_INFO_SIZE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static BOOT_INFO_ADDR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 pub mod vmalloc;
 #[cfg(target_arch = "x86_64")]
 mod multiboot;
@@ -13,6 +17,7 @@ pub use devicetree::{init_devicetree, set_boot_initrd};
 #[cfg(target_arch = "x86_64")]
 pub use multiboot::init;
 
+use alloc::vec::Vec;
 use spin::Mutex;
 
 pub fn early_heap_init() {
@@ -60,6 +65,17 @@ impl ModuleInfo {
 
 pub static RSDP: Mutex<Option<[u8; 36]>> = Mutex::new(None);
 
+pub const TAG_VENTOY: u32 = 0x4858_5601;
+static VENTOY: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+pub fn set_ventoy(data: Vec<u8>) {
+    *VENTOY.lock() = Some(data);
+}
+
+pub fn ventoy() -> Option<Vec<u8>> {
+    VENTOY.lock().clone()
+}
+
 pub static MODULES: Mutex<[Option<ModuleInfo>; 8]> = Mutex::new([None; 8]);
 static CMDLINE: Mutex<alloc::string::String> = Mutex::new(alloc::string::String::new());
 
@@ -104,6 +120,37 @@ pub fn heap_stats() -> (usize, usize) {
 
 pub fn heap_trim() -> usize {
     heap::trim()
+}
+
+pub fn reclaim() {
+    crate::drivers::block::trim_read_cache(16);
+    if let Some(mut guard) = crate::fs::VFS.try_lock() {
+        if let Some(vfs) = guard.as_mut() {
+            vfs.evict_files(0);
+        }
+    }
+    heap::trim();
+}
+
+pub fn try_reserved<T>(len: usize) -> Result<Vec<T>, i64> {
+    let mut out = Vec::new();
+    if out.try_reserve_exact(len).is_err() {
+        reclaim();
+        out.try_reserve_exact(len).map_err(|_| crate::errno::ENOMEM)?;
+    }
+    Ok(out)
+}
+
+pub fn try_zeroed(len: usize) -> Result<Vec<u8>, i64> {
+    let mut out = try_reserved(len)?;
+    out.resize(len, 0);
+    Ok(out)
+}
+
+pub fn try_copy(data: &[u8]) -> Result<Vec<u8>, i64> {
+    let mut out = try_reserved(data.len())?;
+    out.extend_from_slice(data);
+    Ok(out)
 }
 
 pub fn release_module(key: &str) -> usize {

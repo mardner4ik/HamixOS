@@ -1,6 +1,6 @@
 # hxserver: the Nook display server
 
-`apps/hxserver` is HamixOS's display server and the Nook desktop. It is an
+`userland/desktop/hxserver` is HamixOS's display server and the Nook desktop. It is an
 ordinary ring-3 program (`/usr/bin/hxserver`, started with `startx`); the
 kernel only provides generic building blocks that any process may use:
 
@@ -17,7 +17,7 @@ copies the screen into a RAM shadow and remaps the server's framebuffer
 pages onto it, so the desktop keeps running in the background and is put
 back exactly as it was when you return.
 
-## Window protocol (`libs/hxproto`)
+## Window protocol (`crates/hxproto`)
 
 hxserver registers the service name `hxserver`. Messages are small
 little-endian records; the first `u32` is the message kind.
@@ -95,7 +95,7 @@ A window's pixels live in a shared memory segment the client creates
 (`width * height` × `0x00RRGGBB` u32). The client draws into it and sends
 `Present` with the changed rectangle; the server composites only that area.
 
-## Writing a client (`libs/hxclient`)
+## Writing a client (`userland/libs/hxclient`)
 
 ```rust
 use hxclient::{ui, Event, Window};
@@ -111,16 +111,38 @@ while let Some(event) = window.wait_event(-1) {
 
 `Window` implements `vellum::Canvas`, coalesces mouse-move and resize events
 and turns the death of the server into a `Close` event. Examples:
-`apps/hxhello`, `apps/hxmon` (system monitor), `apps/hxfiles` (file browser)
-and `apps/hxcmd` (command registry).
+`userland/core/hxhello`, `userland/core/hxmon` (system monitor), `userland/apps/hxfiles` (file browser)
+and `userland/core/hxcmd` (command registry).
+
+## Writing a client in C (`libhxproto`)
+
+`libhxproto.so.0` wraps `hxproto::client` for C and C++ (`pkg-config hxproto`):
+
+```c
+#include <hamix/hxproto.h>
+
+hx_window *w = hx_window_create("Hello", 320, 200);
+uint32_t *px = hx_window_pixels(w);
+for (uint32_t i = 0; i < 320 * 200; i++)
+	px[i] = 0x003060a0;
+hx_window_present(w);
+hx_event ev;
+while (hx_window_next_event(w, &ev, -1) > 0 && ev.type != HX_EVENT_CLOSE)
+	if (ev.type == HX_EVENT_RESIZE && hx_window_resize(w, ev.width, ev.height) == 1)
+		hx_window_present(w);
+hx_window_destroy(w);
+```
+
+`hx_window_fd` gives the socket for an existing `poll`/`epoll` loop. A complete example is
+`tests/hxlibc/hxproto-window.c` (boot test `native-libhxproto`).
 
 ## Wayland clients
 
-`apps/hxwayland` translates the Wayland protocol into this protocol: it is
+`userland/desktop/hxwayland` translates the Wayland protocol into this protocol: it is
 an ordinary client that owns one Nook window per `xdg_toplevel`, copies the
 client's `wl_shm` buffer into the window on every commit and turns Nook's
 mouse, key, focus, resize and close events into Wayland events. hxserver
-starts it at startup. Details are in `docs/LINUXULATOR.md` ("Wayland
+starts it at startup. Details are in `docs/architecture/LINUXULATOR.md` ("Wayland
 bridge").
 
 The `Key` event now also carries `mods` (bit 0 Shift, bit 1 Alt, bit 2
@@ -157,7 +179,7 @@ and snapping.
   Wi-Fi networks and switches between Ethernet and Wi-Fi, sound (speaker icon:
   popup with the device, volume slider and mute; scroll over it to change the
   volume; keyboard volume keys show an on-screen level above the dock -- see
-  `docs/AUDIO.md`), user menu and power.
+  `docs/architecture/AUDIO.md`), user menu and power.
 * Alt+Tab switches windows, Alt+F4 closes the focused one, Super opens the
   launcher.
 * When the resolution changes (Settings → Display) the server remaps the
@@ -176,5 +198,5 @@ and snapping.
   happens once per resolution.
 * Windows that are completely hidden behind opaque windows are skipped while
   composing; shadows are drawn only inside their real bounds.
-* PNG decoding (`libs/mini_png`) inflates into a presized buffer, unfilters in
+* PNG decoding (`crates/imago`) inflates into a presized buffer, unfilters in
   place and converts straight to ARGB -- about five times faster than before.

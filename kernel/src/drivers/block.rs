@@ -9,8 +9,66 @@ use crate::drivers::{ahci, ata};
 pub enum Backend {
     Ata(ata::Drive),
     Ahci { controller: usize, port: usize },
+    AtaOptical(ata::Drive),
+    AhciOptical { controller: usize, port: usize },
     Virtio(usize),
     Module(usize),
+    Usb(usize),
+    Ehci(usize),
+    Mapped(usize),
+    Removed,
+}
+
+struct MappedDisk {
+    parent: usize,
+    runs: Vec<(u64, u64, u64)>,
+}
+
+static MAPPED_DISKS: Mutex<Vec<MappedDisk>> = Mutex::new(Vec::new());
+
+pub fn register_mapped_disk(parent: usize, model: &str, runs: Vec<(u64, u64)>) -> usize {
+    let mut table = Vec::with_capacity(runs.len());
+    let mut at = 0;
+    for (lba, sectors) in runs {
+        table.push((at, lba, sectors));
+        at += sectors;
+    }
+    let slot = {
+        let mut list = MAPPED_DISKS.lock();
+        list.push(MappedDisk { parent, runs: table });
+        list.len() - 1
+    };
+    let index = {
+        let mut disks = DISKS.lock();
+        let name = format!("loop{}", slot);
+        crate::drivers::klog::log(&format!("block: {} {} {} (file on {})", name, human_size(at * 512), model, disks.get(parent).map(|d| d.name.as_str()).unwrap_or("?")));
+        disks.push(Disk { name, model: String::from(model), sectors: at, bus: "loop", backend: Backend::Mapped(slot) });
+        disks.len() - 1
+    };
+    rescan();
+    crate::fs::refresh_block_nodes();
+    index
+}
+
+fn mapped_read(slot: usize, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let sector = lba + (done / 512) as u64;
+        let (parent, target, available) = {
+            let list = MAPPED_DISKS.lock();
+            let disk = list.get(slot).ok_or(())?;
+            let run = disk.runs.partition_point(|r| r.0 <= sector).checked_sub(1).ok_or(())?;
+            let (start, parent_lba, sectors) = disk.runs[run];
+            if sector >= start + sectors {
+                return Err(());
+            }
+            (disk.parent, parent_lba + (sector - start), start + sectors - sector)
+        };
+        let take = ((buf.len() - done) / 512).min(available as usize) * 512;
+        read(parent, target, &mut buf[done..done + take])?;
+        done += take;
+    }
+    Ok(())
 }
 
 struct ModuleDisk {
@@ -41,12 +99,43 @@ pub fn register_module_disk(owner: &str, name: &str, model: &str, ops: crate::mo
     if INITIALISED.load(core::sync::atomic::Ordering::Acquire) {
         let mut disk = module_disk(slot, owner);
         let mut disks = DISKS.lock();
-        disk.name = disk_letter(disks.len());
+        disk.name = next_name(&disks, name.contains("-cd"));
         disks.push(disk);
         drop(disks);
         rescan();
     }
     slot
+}
+
+pub fn register_usb_disk(model: &str, sectors: u64, slot: usize) -> usize {
+    add_usb_disk(model, sectors, Backend::Usb(slot))
+}
+
+pub fn register_ehci_disk(model: &str, sectors: u64, slot: usize) -> usize {
+    add_usb_disk(model, sectors, Backend::Ehci(slot))
+}
+
+fn add_usb_disk(model: &str, sectors: u64, backend: Backend) -> usize {
+    let index = {
+        let mut disks = DISKS.lock();
+        let name = next_name(&disks, false);
+        crate::drivers::klog::log(&format!("block: {} {} {} (usb)", name, human_size(sectors * 512), model));
+        disks.push(Disk { name, model: String::from(model), sectors, bus: "usb", backend });
+        disks.len() - 1
+    };
+    rescan();
+    crate::fs::refresh_block_nodes();
+    index
+}
+
+pub fn detach(index: usize) {
+    READ_CACHE.lock().retain(|(disk, _), _| *disk != index);
+    if let Some(disk) = DISKS.lock().get_mut(index) {
+        disk.backend = Backend::Removed;
+        disk.sectors = 0;
+    }
+    rescan();
+    crate::fs::refresh_block_nodes();
 }
 
 pub fn forget_module(owner: &str) {
@@ -120,7 +209,14 @@ pub fn init() {
     ahci::init();
     ata::init();
     let mut disks = Vec::new();
-    for port in ahci::ports() {
+    let mut optical = Vec::new();
+    for port in ahci::ports().into_iter().filter(|p| p.atapi) {
+        optical.push(Disk { name: String::new(), model: port.model.clone(), sectors: port.sectors, bus: "cdrom", backend: Backend::AhciOptical { controller: port.controller, port: port.port } });
+    }
+    for drive in ata::drives().into_iter().filter(|d| d.drive.atapi) {
+        optical.push(Disk { name: String::new(), model: drive.model.clone(), sectors: drive.drive.sectors, bus: "cdrom", backend: Backend::AtaOptical(drive.drive) });
+    }
+    for port in ahci::ports().into_iter().filter(|p| !p.atapi) {
         disks.push(Disk {
             name: disk_letter(disks.len()),
             model: port.model.clone(),
@@ -129,7 +225,7 @@ pub fn init() {
             backend: Backend::Ahci { controller: port.controller, port: port.port },
         });
     }
-    for drive in ata::drives() {
+    for drive in ata::drives().into_iter().filter(|d| !d.drive.atapi) {
         disks.push(Disk {
             name: disk_letter(disks.len()),
             model: drive.model.clone(),
@@ -142,7 +238,8 @@ pub fn init() {
     for slot in 0..module_slots {
         if module_ops(slot).is_some() {
             let mut disk = module_disk(slot, "");
-            disk.name = disk_letter(disks.len());
+            let optical = MODULE_DISKS.lock().get(slot).map(|m| m.name.contains("-cd")).unwrap_or(false);
+            disk.name = next_name(&disks, optical);
             disks.push(disk);
         }
     }
@@ -154,6 +251,10 @@ pub fn init() {
             bus: "virtio",
             backend: Backend::Virtio(index),
         });
+    }
+    for (i, mut disk) in optical.into_iter().enumerate() {
+        disk.name = format!("sr{}", i);
+        disks.push(disk);
     }
     for disk in &disks {
         crate::drivers::klog::log(&format!(
@@ -177,16 +278,138 @@ pub fn disk(index: usize) -> Option<Disk> {
     DISKS.lock().get(index).cloned()
 }
 
+const WINDOW_SECTORS: u64 = 256;
+
+struct ReadWindow {
+    data: Vec<u8>,
+    used: u64,
+}
+
+static READ_CACHE: Mutex<alloc::collections::BTreeMap<(usize, u64), ReadWindow>> = Mutex::new(alloc::collections::BTreeMap::new());
+static READ_CLOCK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn read_cache_windows() -> usize {
+    let (_, total) = crate::memory::frame::memory_info();
+    (total / 128 / (WINDOW_SECTORS as usize * 512)).clamp(16, 128)
+}
+
+pub fn trim_read_cache(keep: usize) {
+    let mut cache = READ_CACHE.lock();
+    while cache.len() > keep {
+        let Some(oldest) = cache.iter().min_by_key(|(_, w)| w.used).map(|(k, _)| *k) else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+}
+
+fn slow(disk: &Disk) -> bool {
+    matches!(disk.backend, Backend::Usb(_) | Backend::Ehci(_) | Backend::AtaOptical(_) | Backend::AhciOptical { .. } | Backend::Ata(_) | Backend::Ahci { .. } | Backend::Module(_))
+}
+
+fn forget_cached(index: usize, lba: u64, sectors: u64) {
+    let first = lba / WINDOW_SECTORS;
+    let last = (lba + sectors).div_ceil(WINDOW_SECTORS);
+    let mut cache = READ_CACHE.lock();
+    for window in first..last {
+        cache.remove(&(index, window));
+    }
+}
+
+fn cached_read(index: usize, disk: &Disk, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let sector = lba + (done / 512) as u64;
+        let window = sector / WINDOW_SECTORS;
+        let within = ((sector % WINDOW_SECTORS) * 512) as usize;
+        let take = (buf.len() - done).min(WINDOW_SECTORS as usize * 512 - within);
+        let tick = READ_CLOCK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let hit = {
+            let mut cache = READ_CACHE.lock();
+            match cache.get_mut(&(index, window)) {
+                Some(w) if w.data.len() >= within + take => {
+                    w.used = tick;
+                    buf[done..done + take].copy_from_slice(&w.data[within..within + take]);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !hit {
+            let start = window * WINDOW_SECTORS;
+            let count = WINDOW_SECTORS.min(disk.sectors - start);
+            let mut data = alloc::vec![0u8; (count * 512) as usize];
+            read_uncached(disk, start, &mut data)?;
+            buf[done..done + take].copy_from_slice(&data[within..within + take]);
+            let mut cache = READ_CACHE.lock();
+            if cache.len() >= read_cache_windows() {
+                if let Some(oldest) = cache.iter().min_by_key(|(_, w)| w.used).map(|(k, _)| *k) {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert((index, window), ReadWindow { data, used: tick });
+        }
+        done += take;
+    }
+    Ok(())
+}
+
 pub fn read(index: usize, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
     let disk = disk(index).ok_or(())?;
     if buf.len() % 512 != 0 || lba + (buf.len() / 512) as u64 > disk.sectors {
         return Err(());
     }
+    if slow(&disk) && buf.len() < WINDOW_SECTORS as usize * 512 {
+        return cached_read(index, &disk, lba, buf);
+    }
+    read_uncached(&disk, lba, buf)
+}
+
+fn read_uncached(disk: &Disk, lba: u64, buf: &mut [u8]) -> Result<(), ()> {
     match disk.backend {
         Backend::Ata(drive) => ata::read(&drive, lba, buf),
         Backend::Ahci { controller, port } => ahci::read_sectors(controller, port, lba, buf),
         Backend::Virtio(index) => crate::drivers::virtio::blk::read(index, lba, buf),
         Backend::Module(slot) => module_io(slot, lba, buf.as_mut_ptr(), buf.len() / 512, false),
+        Backend::Usb(slot) => crate::drivers::usb::uhci::storage_io(slot, lba, buf, false),
+        Backend::Ehci(slot) => crate::drivers::usb::ehci::storage_io(slot, lba, buf, false),
+        Backend::Mapped(slot) => mapped_read(slot, lba, buf),
+        Backend::Removed => Err(()),
+        Backend::AtaOptical(drive) => optical_read(lba, buf, |block, count, out| ata::read_blocks(&drive, block, count, out)),
+        Backend::AhciOptical { controller, port } => optical_read(lba, buf, |block, count, out| ahci::read_blocks(controller, port, block, count, out)),
+    }
+}
+
+fn optical_read(lba: u64, buf: &mut [u8], mut read_blocks: impl FnMut(u64, usize, &mut [u8]) -> Result<(), ()>) -> Result<(), ()> {
+    let start = lba * 512;
+    let end = start + buf.len() as u64;
+    let first = start / 2048;
+    let last = end.div_ceil(2048);
+    let skip = (start - first * 2048) as usize;
+    if skip == 0 && buf.len() % 2048 == 0 {
+        return read_blocks(first, (last - first) as usize, buf);
+    }
+    let mut staging = alloc::vec![0u8; ((last - first) * 2048) as usize];
+    read_blocks(first, (last - first) as usize, &mut staging)?;
+    buf.copy_from_slice(&staging[skip..skip + buf.len()]);
+    Ok(())
+}
+
+pub fn is_optical(index: usize) -> bool {
+    disk(index)
+        .map(|d| match d.backend {
+            Backend::AtaOptical(_) | Backend::AhciOptical { .. } => true,
+            Backend::Module(slot) => MODULE_DISKS.lock().get(slot).map(|m| m.name.contains("-cd")).unwrap_or(false),
+            _ => false,
+        })
+        .unwrap_or(false)
+}
+
+fn next_name(disks: &[Disk], optical: bool) -> String {
+    if optical {
+        format!("sr{}", disks.iter().filter(|d| d.name.starts_with("sr")).count())
+    } else {
+        disk_letter(disks.iter().filter(|d| d.name.starts_with("sd")).count())
     }
 }
 
@@ -195,11 +418,21 @@ pub fn write(index: usize, lba: u64, buf: &[u8]) -> Result<(), ()> {
     if buf.len() % 512 != 0 || lba + (buf.len() / 512) as u64 > disk.sectors {
         return Err(());
     }
+    forget_cached(index, lba, (buf.len() / 512) as u64);
     match disk.backend {
         Backend::Ata(drive) => ata::write(&drive, lba, buf),
         Backend::Ahci { controller, port } => ahci::write_sectors(controller, port, lba, buf),
         Backend::Virtio(index) => crate::drivers::virtio::blk::write(index, lba, buf),
         Backend::Module(slot) => module_io(slot, lba, buf.as_ptr() as *mut u8, buf.len() / 512, true),
+        Backend::Usb(slot) => {
+            let mut copy = buf.to_vec();
+            crate::drivers::usb::uhci::storage_io(slot, lba, &mut copy, true)
+        }
+        Backend::Ehci(slot) => {
+            let mut copy = buf.to_vec();
+            crate::drivers::usb::ehci::storage_io(slot, lba, &mut copy, true)
+        }
+        Backend::AtaOptical(_) | Backend::AhciOptical { .. } | Backend::Mapped(_) | Backend::Removed => Err(()),
     }
 }
 
@@ -209,6 +442,7 @@ pub fn flush(index: usize) -> Result<(), ()> {
         Backend::Ata(drive) => ata::flush(&drive),
         Backend::Ahci { controller, port } => ahci::flush(controller, port),
         Backend::Virtio(index) => crate::drivers::virtio::blk::flush(index),
+        Backend::AtaOptical(_) | Backend::AhciOptical { .. } | Backend::Usb(_) | Backend::Ehci(_) | Backend::Mapped(_) | Backend::Removed => Ok(()),
         Backend::Module(slot) => match module_ops(slot).and_then(|o| o.flush.map(|f| f(o.context))) {
             Some(0) | None => Ok(()),
             Some(_) => Err(()),

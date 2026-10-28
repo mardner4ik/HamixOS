@@ -3,9 +3,11 @@ pub mod context;
 pub mod cpuid;
 pub mod gdt;
 pub mod idt;
+pub mod ioapic;
 pub mod lapic;
 pub mod paging;
 pub mod platform;
+pub mod protect;
 pub mod smp;
 
 #[inline]
@@ -201,6 +203,7 @@ pub fn write_msr(msr: u32, val: u64) {
         );
     }
 }
+
 static TSC_KHZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static TSC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -217,6 +220,16 @@ pub fn calibrate_tsc() -> u64 {
     TSC_BASE.store(unsafe { core::arch::x86_64::_rdtsc() }, Ordering::Relaxed);
     TSC_KHZ.store(khz, Ordering::Relaxed);
     khz
+}
+
+pub fn monotonic_ns() -> Option<u64> {
+    use core::sync::atomic::Ordering;
+    let khz = TSC_KHZ.load(Ordering::Relaxed);
+    if khz == 0 {
+        return None;
+    }
+    let delta = unsafe { core::arch::x86_64::_rdtsc() }.wrapping_sub(TSC_BASE.load(Ordering::Relaxed));
+    Some((delta as u128 * 1_000_000 / khz as u128) as u64)
 }
 
 pub fn vdso_clock_data() -> (u64, u64) {

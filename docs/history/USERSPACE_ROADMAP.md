@@ -6,20 +6,20 @@
 > `kernel/src/task/mod.rs`), 4 (ELF loader with argv, `kernel/src/task/elf.rs`)
 > and 5 (the syscall entry, now `kernel/src/syscall/mod.rs` plus
 > `syscall/native/` and `syscall/linux/`) are done, and `hsh` itself left the
-> kernel for `apps/hsh` — every program runs in its own address space at
+> kernel for `userland/core/hsh` — every program runs in its own address space at
 > `0x80_0000_0000`, several run at once, the timer preempts ring 3 and `exec`
 > returns to the shell. The text below is kept as the original design log; it
 > describes the state *before* that work, so read it as history, not as the
 > current shape of the system.
 >
 > **What is still open (milestone 6, the only remaining piece):**
-> `sudo` is still a builtin inside `hsh` (`apps/hsh/src/builtins/users.rs`)
+> `sudo` is still a builtin inside `hsh` (`userland/core/hsh/src/builtins/users.rs`)
 > backed by a root ticket, not a real `/bin/sudo` ELF binary with a `setuid`
 > bit on `fs::Node.mode`. The machinery it was waiting for now exists —
 > `sys_setuid` (`kernel/src/syscall/linux/misc.rs`), a real `execve` path
 > (`kernel/src/syscall/linux/process.rs`) and the user database
 > (`kernel/src/users.rs`) — so what is left is the permission work in
-> `docs/ARCHITECTURE_ROADMAP.md` point 6: honour the `setuid` bit at exec
+> `docs/roadmap/ARCHITECTURE_ROADMAP.md` point 6: honour the `setuid` bit at exec
 > time, ship `/bin/sudo` as its own binary, then extend `Vfs::can_write`'s
 > three-class check to reads and groups.
 
@@ -32,7 +32,7 @@ This is the same question asked three different ways:
 3. "How do I run a musl-compiled program on HamixOS?"
 
 All three are blocked on the same missing piece of the kernel, described
-already in `docs/MUSL.md`: there is no way to leave ring 0 and run
+already in `docs/architecture/MUSL.md`: there is no way to leave ring 0 and run
 independently loaded code today. This file lays out, in order, exactly what
 has to be built before that stops being true, so the work can be picked up
 milestone by milestone instead of all at once.
@@ -75,7 +75,7 @@ musl program all move to rootfs together.
    parse `e_entry` and `PT_LOAD` segments, map them at their `p_vaddr` in
    the new process's page tables, zero `.bss`, set up the initial stack
    (argv/envp/auxv the way the ABI musl's CRT expects), and point `RIP` at
-   `e_entry`. `docs/MUSL.md`'s existing build recipe (`-static -no-pie
+   `e_entry`. `docs/architecture/MUSL.md`'s existing build recipe (`-static -no-pie
    -nostdlib`) is exactly the shape of binary this loader needs to target
    first, precisely to avoid also having to write a dynamic linker and a
    PIE relocator in the same milestone.
@@ -88,18 +88,18 @@ musl program all move to rootfs together.
    (or a simpler `spawn`-style syscall if fork's copy-on-write semantics are
    more than you want yet), on a new one.
 
-6. **Move `hsh` and `sudo` into rootfs.** Once 1-5 exist, `apps/hsh` (today
+6. **Move `hsh` and `sudo` into rootfs.** Once 1-5 exist, `userland/core/hsh` (today
    an empty `#![no_std]` stub) and a new `apps/sudo` stop being placeholders:
-   they become real binaries built against `sdk/hamix_std`, calling
+   they become real binaries built against `libs/hxstd`, calling
    `read`/`write`/`open` the same way `kernel/src/hsh/mod.rs` calls
    `fs::Vfs` today, and `sudo`'s binary gets an actual setuid bit backed by
-   the `owner`/`mode` fields already on `fs::Node` (`docs/PERMISSIONS.md`
+   the `owner`/`mode` fields already on `fs::Node` (`docs/architecture/PERMISSIONS.md`
    has the detail). `kernel/src/main.rs`'s `rust_main` stops calling
    `hsh::run_login()` directly and instead `execve`s `/sbin/init`, which
    execs `/bin/hsh`.
 
 7. **musl binaries "just work" at that point** for anything that only
-   touches the syscalls in `docs/MUSL.md`'s table -- no separate musl
+   touches the syscalls in `docs/architecture/MUSL.md`'s table -- no separate musl
    milestone is needed once 1-5 land, which is the whole reason this is
    written as one roadmap instead of three.
 

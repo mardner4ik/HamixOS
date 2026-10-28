@@ -1,3 +1,360 @@
+# Невипущене -- план B (`docs/roadmap/STRATEGY_2026_B.md`), тижні W1-W8
+
+## План U: HamixOS як звичайна Unix-система (`docs/roadmap/UNIX_PLAN.md`)
+* **Флешки за USB-хабом:** на платах Intel 6/7 серії (наприклад, з Pentium G640) усі роз'єми USB 2.0 висять за
+  вбудованим хабом, і ядро флешку не бачило («вставте в роз'єм 2.0»). Тепер драйвер EHCI працює з хабами
+  (і з повільними пристроями за ними), забирає контролер у BIOS, а повідомлення про помилку радить пункт
+  меню «copy the whole system into RAM», де флешку читає BIOS.
+* **USB-миша й клавіатура на платах Intel 5/6/7 серії:** ядро залишало такі EHCI-контролери (без UHCI, усе за
+  вбудованим хабом) BIOS, і миша працювала лише через його емуляцію PS/2 -- на частині плат (Asus H61) через раз
+  або взагалі ні, а флешку для прямого завантаження ядро не бачило. Тепер EHCI береться завжди: періодичний
+  розклад з split-транзакціями для повільних пристроїв за хабом, миші й клавіатури в режимі boot protocol,
+  передача контролера від BIOS як у Linux (з SMI на зміну власника). `ehci=0` повертає старе поводження.
+  Тест `native-ehci-hid`.
+* **Ядро не панікує через нестачу пам'яті для буферів програми:** великі `read`/`write`/`pread`, запис у pipe,
+  memfd, блокові пристрої й сокети спершу звільняють кеші, а якщо пам'яті все одно немає -- повертають `ENOMEM`.
+* **Збірка на OpenBSD:** `cargo xtask build` працює зі звичайним rustc із пакетів (без rustup і nightly) і без
+  GNU-утиліт: `install`, `cp -al`, `head -c`, `sha256sum` замінено кодом xtask, builtins compiler-rt беруться з
+  Alpine, якщо clang хоста їх не має, C-модулі отримують власні freestanding-заголовки. `tools/openbsd/tune-build.sh`
+  налаштовує систему для швидшої збірки. Тести QEMU без KVM мають учетверо довші тайм-аути (`HX_TCG_FACTOR`).
+* **hxboot** -- власний завантажувач на Rust (`boot/hxboot`, план F §8): BIOS, El Torito і гібридна флешка,
+  multiboot2 для ядра (ядро не змінювалось), меню, VBE, E820, ACPI. За замовчуванням вантажить лише ядро й initfs
+  (система з флешки чи DVD читається вже ядром), тож не читає 323 МіБ через BIOS. `cargo xtask build --loader hxboot`;
+  xtask сам пише ISO 9660 + Joliet + El Torito + гібридний MBR, `grub-mkrescue` і `xorriso` не потрібні.
+* **Меню hxboot:** пошук інших ОС на дисках при кожному завантаженні (`probe yes`: Windows, FreeBSD/OpenBSD/NetBSD,
+  Linux з GRUB у розділі, DOS/Windows на FAT, інший диск зі своїм завантажувачем) і їх запуск ланцюгом
+  (`chain signature=... partition=N`, диск -- за підписом MBR, тож порядок дисків у BIOS не важить); `e` змінює
+  командний рядок ядра для одного завантаження; пункт `Reboot`.
+* **`hxbootctl`** -- керування меню з консолі: `list`, `default`, `timeout`, `add`, `add-chain`, `module`, `cmdline`,
+  `rename`, `remove`, `move`, `probe --add` (знайти інші ОС і додати), `auto on|off`, `check`, `edit`. `/boot/hxboot.cfg` --
+  звичайний текстовий файл з поясненнями всередині, його можна правити вручну (наприклад, дописати Windows чи
+  BSD); довідник -- `/usr/share/doc/hamix/hxboot.md`. Тест `native-hxbootctl-fakeos`.
+* **Захист ядра:** SMEP і UMIP вмикаються на кожному процесорі, що їх підтримує (ядро не може виконати код зі
+  сторінок програм, програми не бачать адрес таблиць ядра через `sgdt`/`sidt`); `nosmep`/`noumip` вимикають.
+  Ядро більше не одна RWX-область (W^X): код ядра -- лише читання й виконання, `.rodata` -- лише читання, дані,
+  стеки й уся пряма пам'ять -- без виконання; виконуваний лише код ядра й модулів. Після старту процесорів ядро
+  перевіряє, що жодна його сторінка не є водночас записуваною й виконуваною; `nokwx` вимикає. Тест
+  `native-hardening`.
+* **Мережа Realtek:** новий модуль `r8168` для дротових карт RTL8111/8168/8411 (`10ec:8168`, `10ec:8161`), які
+  стоять на більшості плат Asus, Gigabyte й MSI з чипсетами H61-H310. Покоління чипа (B-H) визначається за XID,
+  PHY отримує автоузгодження до 1 Гбіт/с, якщо BIOS його не ввімкнув.
+* **Повільний екран після перемикання режиму:** коли драйвер графіки (наприклад, `intel-display` на HD 520)
+  ставив рідну роздільність, новий буфер кадру лишався для ядра некешованим, і виведення кадрів було в десятки
+  разів повільнішим. Тепер write-combining вмикається для всього буфера кадру, також для неповних 2 МіБ на
+  краях і для апертури вище 4 ГіБ.
+* **Ventoy:** hxboot знаходить таблицю `ventoy_os_param` і передає її ядру; ядро відкриває ISO на флешці прямо за
+  списком фрагментів Ventoy -- без пошуку файла, і з NTFS-флешкою теж.
+* **Nook Wayland:** оболонка працює і як звичайний Wayland-клієнт (layer-shell), композитор приймає
+  Wayland-програми сам, без окремого процесу-мосту. Вибір при збірці (`hxserver`, `wayland` чи обидва) і
+  сеанс «Nook (Wayland)» у списку LightDM.
+* **hxdiag:** `sudo hxdiag` збирає в один файл усе для пошуку повільності на справжньому залізі: процесор,
+  пам'ять, час кроків завантаження, диски, переривання, процеси, прості заміри й 10-секундний профіль ядра.
+* Виправлено: сеанс «Nook (Wayland)» з LightDM не запускався (LightDM передає команду одним рядком).
+* **imago** -- нова бібліотека зображень замість mini_png: PNG, JPEG, GIF, BMP, ICO, QOI, TGA, PNM, SVG.
+  Значки Linux-програм у SVG, шпалери в JPEG, переглядач зображень відкриває всі ці формати.
+* **Nook плавніший:** кешовані тіні, плитки шарів, часткове оновлення вікон hxtoolkit, термінал малює лише
+  змінене. Виправлено: док під новим вікном, зрив анімацій, мерехтіння після налаштувань, курсор над полем
+  вводу, виділення значка правою кнопкою, «залиплі» підсвітки кнопок.
+* **Nook як Orbital у Redox:** панель, док, меню програм, значки робочого столу, мережа й звук винесені з
+  `hxserver` в окрему програму `nook-shell`. Сервер лишається дисплейним сервером, менеджером вікон і
+  композитором; оболонка -- звичайний клієнт hxproto v2 із шарами (як wlr-layer-shell). Якщо оболонка
+  впаде, вікна працюють далі, а сервер перезапускає її.
+* **Швидкість на кількох ядрах:** ядро, що щойно звільнилось, коротко (40 мкс) чекає нової роботи замість
+  негайного `hlt`, і пробудження не шле йому переривання -- обмін через pipe на 2 ядрах 27 -> 11-16 мкс.
+* **LightDM у живому образі:** більше не зависає на чорному екрані (гонка з запуском D-Bus), сеанс Nook
+  отримує мишу й клавіатуру (сеанс на VT 2), GLib бачить завершення дочірніх процесів через
+  `waitid(P_PIDFD)`; текстові консолі -- tty3..tty6.
+* **`println!` у hxstd** пише рядок одним `write` -- рядки програм більше не розриваються повідомленнями
+  ядра (через це падав тест `native-strtod`).
+* **Обидва ядра для потоків:** потоки однієї програми більше не прив'язані до одного CPU (браузер, GTK, Mesa
+  llvmpipe, Enlightenment отримують друге ядро). Виправлено дві гонки, які це раніше блокували: одночасний збій
+  двох потоків на одній лінивій сторінці (SIGSEGV) і помилку mlibc `pthread_rwlock_wrlock`, що псувала
+  лічильник читачів і зациклювала програму (LightDM/GLib на 2 ядрах).
+* **Швидкість:** завершені потоки (зомбі) прибирались лише в простої процесора; під навантаженням вони
+  накопичувались, і кожне перемикання задач та пробудження перебирало їх усіх -- система сповільнювалась із
+  часом (створення потоку 309 -> 37 мкс, pipe 107 -> 10 мкс). Тепер потік прибирається одразу після
+  перемикання з нього. Кеш файлів більше не стискається до 4 МіБ для кореня на диску (HDD перечитувався),
+  упереджене читання вікнами по 128 КіБ і для SATA/IDE; налагоджувальний вивід у COM-порт з вимкненими
+  перериваннями -- лише з `console=ttyS0`; пробудження `poll`/`select`/`epoll` більше не губляться між
+  перевіркою готовності й сном (раніше -- до 100 мс затримки на багатоядерних машинах).
+* **LightDM:** порти Xorg 21.1 (modesetting на `/dev/dri/card0`, libinput), xf86-input-libinput,
+  libpciaccess, Linux-PAM, libgcrypt/libgpg-error, libXi/Xrandr/Xcomposite/Xdamage, libxklavier,
+  iso-codes, LightDM 1.32 і lightdm-gtk-greeter 2.0.9; GTK 3 тепер має і X11-бекенд. Екран входу на
+  tty1 (служба `lightdm`, системна шина D-Bus -- служба `dbus-system`), у списку сеансів Nook
+  (`/usr/share/wayland-sessions/nook.desktop`) і Enlightenment. Якщо LightDM завершився (наприклад, Xorg
+  не стартував на залізі), на tty1 повертається текстовий вхід; `dm=none` у командному рядку ядра
+  вимикає графічний вхід. Тести `native-xorg`, `native-gtk-x11`, `native-lightdm`, `native-lightdm-login`.
+* **Ядро для Xorg/LightDM:** `/dev/tty0`, `/dev/ttyN` і ioctl `VT_*`/`KD*` як у Linux; збережені
+  uid/gid (`setresuid` і `setresgid` за правилами Linux -- LightDM тимчасово скидає права); `si_pid`/`si_uid`
+  відправника сигналу (раніше -- pid отримувача); `pidfd_open`, `pidfd_send_signal`; запис у відкритий
+  файл після `setuid` більше не повертає `EACCES` (права перевіряються при `open`, як у Unix).
+* **hxlibc:** `strtod` не поглинає `e`/`p` без цифр (`"1.5em"` давало залишок `"m"` -- помилки CSS у GTK);
+  GLib знає облікові дані сокетів на HamixOS (автентифікація D-Bus через GDBus). `hxsvc` зупиняє служби
+  SIGTERM, а SIGKILL -- лише через 5 с.
+* **USB 2.0 (EHCI):** новий драйвер `drivers/usb/ehci.rs` -- асинхронний розклад (QH + qTD по 16 КіБ,
+  до 64 КіБ за SCSI-команду, перемикач даних у QH, пробне читання перед реєстрацією диска -- інакше
+  флешка лишається компаньйону UHCI), флешки працюють на high speed (480 Мбіт/с) замість USB 1.1 через UHCI;
+  повільні пристрої (миші, клавіатури) і high-speed пристрої, що не є накопичувачами, передаються
+  компаньйонам UHCI. `ehci=0` у командному рядку -- старий шлях через UHCI. Для повільних носіїв --
+  кеш читання вікнами по 128 КіБ, а коли корінь на флешці/DVD, кеш файлів більше не стискається
+  до 0,5-4 МіБ через 4 с простою (раніше bash і бібліотеки перечитувались із флешки знову й знову).
+  Виправлено дедлок драйверів USB: `delay_ms` у потоці ядра засинав, тримаючи спін-замок контролера,
+  а системний виклик під BKL крутився на ньому (`bkl: cpu 1 is still waiting`) -- тепер під замками
+  драйверів лише активне очікування за TSC (`arch::spin_delay_us`).
+* **Живий корінь з флешки:** якщо GRUB не передав `hext.img` (BIOS не прочитав 323 МіБ із флешки),
+  ядро саме вмикає USB (EHCI -> компаньйони UHCI), чекає флешку до 10 с і читає `/boot/hext.img`
+  з ISO 9660 на ній, як із DVD; з **Ventoy** -- знаходить `.iso` на розділі exFAT (новий читач
+  `fs/exfat.rs`; спершу файли з `hamix` у назві, далі ISO з міткою тому `HAMIXOS`) і бере образ з
+  нього, навіть фрагментованого -- через loop-пристрій `/dev/loopN` з картою екстентів, а флешку, записану як FAT із файлами, -- з FAT-розділу. Новий
+  пункт меню «Live from a USB stick» узагалі не читає образ через BIOS. Тести `native-usbroot`
+  (EHCI + UHCI, як на ICH9) і `native-ventoy` (exFAT із фрагментованим ISO і зайвим ISO поруч).
+  ISO тепер має мітку тому `HAMIXOS`. Якщо образу не знайдено, екран
+  пояснює для кожного носія чому (помилка читання, немає ISO, файл фрагментований...).
+* **Паролі як у Unix:** `crypt(3)` SHA-512 (`$6$`) у hxlibc, `/etc/shadow` у форматі Linux;
+  старий 32-бітний хеш лише читається для вже встановлених систем і замінюється при зміні пароля.
+  Ядро більше не має облікових записів: прибрано типових користувачів із `fs::init`, виклики
+  `AUTH`, `USERS_RELOAD`, `SET_OWN_PASSWORD`, `GRANT_TICKET` і вхід у ядрі (без init -- аварійна
+  консоль з поясненням). Тест `native-passwords`.
+* **Ядро не падає через програми:** фазер системних викликів `syscall-fuzz` (тест
+  `native-syscall-fuzz`, `fuzz=N,виклики,seed[,trace]` у `HX_TEST_ARGS`) знайшов і закрито:
+  `rt_sigreturn`/обробник сигналу з неканонічною адресою (`iretq` -> #GP у ядрі), переповнення
+  в `munmap`, гігантські виділення пам'яті ядра з розміру від програми (`mremap`, `mincore`, приватний
+  `mmap` memfd); `MAP_SHARED|MAP_ANONYMOUS` тепер справді спільна після `fork`; нативні блокувальні
+  виклики (`SLEEP`, `WAIT_EVENT`, `MSG_RECV`) переривні сигналами; `user_slice_mut` перевіряє
+  право запису (`EFAULT`, а не вбивство процесу). Паніка показує системний виклик, у якому вона сталася.
+* **Диски й флешки:** драйвер USB-накопичувачів (UHCI + Bulk-Only + SCSI), ISO 9660/Joliet і
+  FAT32/VFAT лише для читання, `/dev/srN`, автомонтування в `/media/<мітка>` (`hxmount`,
+  служба `hx-automount`), у Files -- носії з кнопкою відмонтування.
+* **Enlightenment:** Wayland-програми (foot тощо) працюють -- `wl_seat` v5; програми Nook працюють
+  у E через новий Wayland-транспорт hxtoolkit; evas малює у XRGB8888 замість RGB888; кадр DRM
+  копіюється без проміжного буфера; точний `CLOCK_MONOTONIC` (TSC).
+* **fastfetch** нативно (порт `ports/core/fastfetch`, конфіг HamixOS); hxlibc: `loff_t`,
+  `get_nprocs*`, `SI_LOAD_SHIFT`, виправлено `CPU_ZERO` (обнуляв 16 з 128 байт). `/proc/<pid>/environ`.
+* Прибрано старі команди `diskls` (є `lsblk`) і `usb` (є `lsusb`).
+* **Захист пам'яті:** `mmap`/`mprotect` поважають `PROT_*`, W^X, NX для стеку й даних, ELF-сегменти
+  з їхніми правами (раніше вся пам'ять програм була RWX). `copy_out` повертає `EFAULT` замість
+  вбивства процесу. Ядро: `errno.rs`, `usercopy.rs`, `task/fdtable.rs`.
+* **Справжнє залізо:** коли GRUB не передав образ системи (флешка, 323 МіБ через BIOS), ядро
+  пояснює це на екрані; GRUB повторює завантаження образу; крок «Boot loader» показує, що передано.
+* `hwreport` -- звіт про залізо одним файлом для надсилання; екран паніки показує останні рядки
+  журналу ядра й що надіслати (`hxpanic=boot` -- перевірити екран); тести за замовчуванням з 2 CPU і
+  3 ГіБ ОЗП; `cargo xtask lint-unsafe` -- храповик кількості `unsafe` за підсистемами.
+* **Структура як у Redox (ADR-0018B):** ядро за підсистемами -- `syscall/` лише POSIX-шар
+  (+ `ext/`), Linux-особистість у `linux/`, procfs/epoll у `fs/`, сокети й netlink у `net/`, DRM у
+  `drivers/video/`, термінали в `tty/`; `crates/` -- переносні Rust-бібліотеки без викликів ОС
+  (hext, hxvt, wlan, hxproto, hxtoolkit, vellum, кодеки), `userland/libs/` -- лише бібліотеки, що
+  говорять з HamixOS; `hxlibc/` -- повне дерево mlibc з `sysdeps/hamix` (без завантаження й патчів
+  під час збирання), `hxlibc/rust/hxlibc-sys`.
+* **IOAPIC:** PCI-лінії > 15 маршрутизуються через IOAPIC (раніше такі пристрої лишались без
+  переривань). **initfs:** `/boot/initfs.tar` лише з драйверами `early = 1` замість усіх модулів.
+  Модуль більше не забирає контролер, яким уже користується вбудований драйвер (раніше це псувало
+  живий корінь). Тести `native-noinitfs`, `native-nomodules`.
+* **Справжнє залізо і стабільність (U10):** кроки hxinit показують `[ .... ] Назва` до запуску й
+  `starting <модуль>`; крок довше 10 с -- `[ SLOW ]` з назвою драйвера й підказкою
+  (`blacklist=` або безпечний пункт меню); спільна IRQ-лінія, яку ніхто не обслуговує, маскується
+  замість вічного шторму; купа ядра карантинує подвійні звільнення й зіпсовані заголовки
+  (`HeapCorrupt:` у `/proc/meminfo`) замість `#GP`; вікна hxtoolkit більше не мерехтять (задній
+  буфер). Тест `native-stress-desktop`. Розбір підходу Redox OS -- UNIX_PLAN U10.
+* **Дерево як у BSD:** власний код HamixOS -- `userland/<роль>/<назва>`, стороннє ПЗ з
+  рецептами `HXBUILD` -- `ports/<роль>/<назва>` (ті самі ролі: `apps`, `core`, `desktop`,
+  `services`, `libs`), сторонні Rust-крейти в дереві -- `vendor/` (smoltcp, rust_h264,
+  shiguredo_mp4). Бібліотеки Unix (`ports/libs/gtk3`) і HamixOS (`userland/libs/hxstd`)
+  більше не в одному каталозі. ADR-0017B.
+* **libhxproto** -- перша C-бібліотека HamixOS, як у Linux: `/usr/lib/libhxproto.so.0`,
+  `<hamix/hxproto.h>`, `pkg-config hxproto` (у корені розробки `out/hx-ports/ARCH/root`).
+  Клієнтський транспорт hxserver (AF_UNIX, `shm_open`) переїхав з hxtoolkit у
+  `hxproto::client`; hxtoolkit і libhxproto користуються ним спільно. xtask збирає крейти з
+  `clib = "..."` у `[package.metadata.hamix]`. Тест `native-libhxproto` (C-програма з вікном).
+* **hxtoolkit:** програма може обмежити, куди під'єднуватись:
+  `Settings::hxserver_only()`, `Settings::wayland_only()` або `display(DisplayServer::...)`;
+  без налаштування -- автоматичний пошук (hxserver, потім Wayland, потім X11). Користувач
+  звужує вибір змінною `HXTOOLKIT_DISPLAY=hxserver|wayland|auto`.
+* **Files:** «Properties» відкриває окреме вікно (`hxfiles --properties=ШЛЯХ`): тип і MIME,
+  розмір і місце на диску, вміст папки (рахується у фоні), власник, група, режим з
+  перемикачами прав і спецбітів, дати, файлова система й вільне місце, inode, посилання;
+  для картинок -- розміри, для ELF -- архітектура, тип, інтерпретатор, ABI, для тексту --
+  рядки, слова, кодування. Меню Help: «Keyboard shortcuts» і вікно «About Files»
+  (вкладки About/Credits/System). Тест `native-files-props`.
+* hxport: `metadata`/`symlink_metadata`, `read_link`, `fs_stats` (statvfs), `format_time`
+  (localtime_r), `permission_string`, `mount_of`, `current_exe`, `can_access`.
+* **Enlightenment 0.26 (E26)** нативно, як Wayland-компоситор на DRM і libinput:
+  EFL 1.27 (wayland, drm, elput, eeze), libinput 1.26, libevdev, mtdev, libudev-zero,
+  libjpeg-turbo, Lua 5.1, libsndfile, libuuid. Запуск: `startx enlightenment` (або
+  `session desktop enlightenment`, тоді й автостарт); `session list` показує сесії з
+  `/usr/share/wayland-sessions`. Мікшер E працює через новий бекенд OSS. Тест
+  `native-enlightenment`.
+* U3, пристрої замість власних викликів:
+  * evdev `/dev/input/event0..2` (клавіатура, миша, абсолютний вказівник) з ioctl
+    `EVIOCG*`, `EVIOCGRAB`, `EVIOCSCLOCKID`; sysfs у форматі udev, `st_rdev`,
+    `NETLINK_KOBJECT_UEVENT`. hxserver читає ввід з evdev (`hxstd::input`).
+  * DRM `/dev/dri/card0` для всіх POSIX-програм (не лише Linux-шару): формати RGB888,
+    `DIRTYFB` з прямокутниками, властивості `DPMS`/`EDID`/`type`. hxserver виводить
+    кадр через DRM (`hxstd::drm`).
+  * OSS `/dev/dsp` і `/dev/mixer`; `hxstd::audio`, hxsound, hxvideo і Nook -- поверх них.
+    Тест `native-audio-oss` (з `intel-hda` у QEMU для тестів `*-audio-*`).
+  * `mount(2)`/`umount2(2)`, `inotify` і `ptrace` (`EPERM`) доступні нативним програмам.
+  * Вкладений epoll (libinput сам є epoll-дескриптором).
+* hxlibc: `realpath` обрізав абсолютні посилання, `scanf("%[...]")` не повертав `EOF`
+  (нескінченний цикл з витоком пам'яті), `setvbuf` після виводу падав, бракувало
+  `SCN*` і `SIOC*`, `sched_get_priority_max`; `<sys/soundcard.h>`.
+* `locale` (hxutils); групи `input` і `video`; xtask: `HX_PORTS_PACKAGE_ONLY=1`,
+  grub-mkrescue більше не лишає гігабайти в `/tmp`.
+* Ядро: нативні виклики розкладено по файлах підсистем
+  (`kernel/src/syscall/native/{process,messages,term,files,disk,commands,auth,net,display,sound,gpu,power,debug}.rs`).
+* `hxstd` поверх POSIX: файли, каталоги, час, процеси (`waitpid`, `kill`), pipe, tty --
+  функції libc (`sys/posix.rs`); решта нативних викликів -- через `libhxc.so`
+  (`__do_syscall6`). Жодна програма на hxlibc більше не виконує `syscall` сама.
+* `.desktop` нативних програм лежать у їхніх каталогах
+  (`userland/<роль>/<назва>/share/applications/org.hamix.*.desktop`), xtask ставить
+  `share/` крейта в `/usr/share`.
+* Нативно на hxlibc: термінал **foot** 1.19, **Xwayland** 24.1.4 з усім стеком X11
+  (libX11, libxcb, xkbcomp, libXfont2, ...), браузер **dillo** 3.2.0 на FLTK 1.3.9.
+  hxwayland запускає нативний Xwayland, Linux-шар для X11 більше не потрібен.
+* TCP через 127.0.0.1 працює (раніше ядро відповідало `ECONNREFUSED`).
+* Програми запускаються через `posix_spawn` (hxlibc: `POSIX_SPAWN_SETPGROUP`,
+  `posix_spawn_file_actions_addclosefrom_np`); `ps`, `free`, `uptime`, hxmon читають
+  `/proc` у форматі Linux -- один `/proc` для нативних і Linux-програм.
+* IPC без власних викликів ядра: поштові скриньки -- `AF_UNIX`-датаграми в
+  `/run/hamix/ipc/<pid>` з відправником із `SCM_CREDENTIALS`, реєстр служб -- файли в
+  `/run/hamix/services` і `$XDG_RUNTIME_DIR/hamix-services`, буфери вікон -- `shm_open`.
+  Nook, hxproto, hxwayland, hx-authd, hxsvc працюють поверх цього без змін
+  (`docs/reference/ipc.md`). Тест `native-session-user`: hxserver від користувача,
+  клієнт від root.
+* hxlibc: `pselect` передавав ядру значення маски сигналів замість вказівника --
+  readline у bash отримував `EFAULT`, щойно маска була непорожньою. Тест `pselect-mask`.
+* hxlibc: `newlocale`/`uselocale` повертають справжні об'єкти, `backtrace()` не
+  падає, `<string.h>` підключає `<strings.h>` як у glibc; busybox має `stty`,
+  `timeout`, `base64` та ін.; порти: джерела `ім'я::url`, `.la` прибираються самі,
+  UAPI-заголовки для aarch64/riscv64 тягнуться з Alpine.
+
+## Mesa на hxlibc (щабель 3 драбини, ADR-0016B)
+* Mesa 24.2.8 (softpipe): OpenGL 3.3, OpenGL ES 3.1, EGL 1.4 для нативних програм;
+  libglvnd 1.7.0 (`libEGL`, `libOpenGL`, `libGLESv2`) і libdrm 2.4.123.
+  `GtkGLArea` малює в Nook через hxwayland. Тест `native-mesa`.
+* `cargo xtask ports` прибирає файли, яких перезібраний пакунок більше не ставить.
+
+## Одна розкладка userland, усі програми на hxlibc (ADR-0015B)
+* Усе, що працює нативно, лежить у `userland/<роль>/<назва>` -- і власні крейти, і
+  порти: `userland/core/bash`, `userland/services/dbus`, `userland/libs/gtk3`,
+  `userland/libs/hxstd`. `hx-ports/` зник, `libs/` -- лише крейти ядра й хоста.
+  `cargo xtask apps` показує все разом; опис портів -- `docs/guides/PORTS.md`.
+* Rust-програми HamixOS тепер динамічні програми hxlibc (`/lib/ld.hx`, `libhxc.so`,
+  ABI v1): `hxstd` стартує з `main` від libc, купа -- `malloc`, базовий ввід-вивід --
+  функції libc; `hxlibc-sys` -- FFI до libc. PID 1 теж.
+* Алокатор mlibc (frigg) більше не торкається всього 256-КіБ slab'а одразу: процес
+  hxlibc стартує в 1.1 МіБ замість 4; консоль у простої 19 МіБ, Nook 35 МіБ.
+  Тест `native-memory`.
+
+## GTK 3 на hxlibc (щабель 3 драбини портів, ADR-0014B)
+* Нативний GTK 3.24.43 (Wayland-бекенд) з новими портами `wayland-protocols`,
+  `khronos-headers`, `libepoxy`, `gdk-pixbuf`, `libxml2`, `atk`, `xkeyboard-config`;
+  `cairo` тепер із `cairo-gobject`. Тест `native-gtk`: вікно в Nook із темою Nook,
+  працює й у `hamix-core` без Linux-шару.
+* hxwayland і `wl-layer-check` -- нативні (`userland/desktop/`), є в обох профілях;
+  Xwayland лишається в Linux-шарі. Тема Nook переїхала в нативне дерево,
+  `/linux/usr/share/themes/Nook` -- симлінк.
+* hxlibc: `gettext`/`bindtextdomain`/`textdomain` більше не падають (тотожний каталог);
+  `hx-cc` бачить `-shared` у файлах відповідей `@file`.
+
+## Пам'ять, розкладка, Linux-оточення (ADR-0013B)
+* Жива система читає корінь прямо з CD/DVD (ATAPI в IDE/AHCI і в модулі `ahci`, ISO9660,
+  ледаче монтування лише для читання): у простої 22 МБ замість 118, з Nook 36 МБ замість
+  130. GRUB не вантажить образ при завантаженні з CD; `root=ram` -- колишній режим.
+  ISO: `hext.img` без стиснення, без `initramfs.tar`.
+* Весь софт Alpine -- в окремому корені `/linux`. Linux-процеси бачать `/linux` як `/`,
+  спільні `/home /tmp /run /dev /proc /sys /mnt /media` і облікові записи, а HamixOS -- як
+  `/hamix`. `pantry` ставить туди, `pantry migrate` переносить старі установки, команда
+  `linux [КОМАНДА]`, Linux-програми в меню Nook, `/linux/usr/bin/bash` -> нативний bash.
+* Нативна розкладка: служби й помічники -- у `/usr/libexec/hamix`, у `/usr/bin` лише
+  команди; немає `/sbin`, `/srv`, `/opt`; опис -- `docs/architecture/FILESYSTEM.md`.
+* Сесійна шина dbus стартує нативним `dbus-daemon`; mkhext пише симлінки.
+
+## Hamix ABI v1.0 заморожено
+* Тест `abi-core` викликає всі 207 викликів core-діапазону з некоректними аргументами:
+  ні `ENOSYS`, ні падінь, ні зависань. Знайдено й виправлено: `alarm(-1)` спрацьовував
+  одразу, `clone` із прапорцями просторів імен валив процес замість `EINVAL`, `execveat`
+  не вмів `dirfd`/`AT_EMPTY_PATH`; `pidfd_open` прибрано з таблиці (не підтримується).
+* `cargo xtask abi` генерує й `hamix/syscall-table.h` (таблиця викликів для тестів).
+
+## Оболонка: bash замість hsh (ADR-0012B)
+* GNU bash 5.2.37 зібрано нативно на hxlibc (`hx-ports/bash`) -- оболонка входу, hxterm,
+  `/bin/sh` (POSIX-режим), установника й тестів. `/etc/profile`, `/etc/bash.bashrc`.
+* hsh вимкнено (`[package.metadata.hamix] disabled = true`), код лишився в дереві.
+* Вбудовані команди hsh стали окремими програмами крейта `hxutils` (58 файлів у
+  `/usr/bin`): `sudo`, `su`, `fetch`, `gpuinfo`, `cpuinfo`, `startx`, `diskls`, `mount`,
+  `ip`, `ping`, ... ; загальні утиліти -- busybox на hxlibc через обгортки.
+* `sudo` пам'ятає вхід 5 хвилин на термінал (`hx-authd`), має `-i`, `-s`, `-k`, `-v`.
+* Ядро: групи процесів переднього плану (`TIOCSPGRP`/`TIOCGPGRP`) на VT і pty --
+  клавіатура й Ctrl+C ідуть активному завданню оболонки.
+* `cmd add` створює виконувану обгортку в `/var/lib/hamix/commands/bin` (є в `PATH`).
+* `date +ФОРМАТ`, `date -d @N`, `id -u/-g/-n/-G`, `uname -snrvmo`.
+* hxlibc: `C.UTF-8` приймається як C-локаль, `sysconf(_SC_NGROUPS_MAX/HOST_NAME_MAX/...)`.
+* xtask: крейти з кількома програмами (`src/bin`), `disabled`, `aliases`; тести --
+  `tests/boot/*.sh`, "command not found" у журналі провалює тест.
+
+## Структура, збірка, тести
+* Дерево за §10.1: `kernel/`, `modules/`, `libs/`, `userland/{core,services,desktop,apps}`,
+  `layers/linux/`, `hxlibc/`, `hx-ports/`, `data/`, `tests/`, `tools/`; `Cargo.lock` у git.
+* `cargo xtask` (build/run/test/abi/lint-layers/hxlibc-build/ports/kbench/membench/
+  prof/golden), профілі `full` і `core`, тести завантаження `tests/boot/*.hsh`.
+* `membench`, `kbench`, `hxprof`, детектор довгого очікування BKL, стрес `-smp 4`,
+  золотий еталон Nook (`tests/nook-golden`).
+
+## Hamix ABI v1, hxlibc, порти
+* Щабель 2 драбини портів на hxlibc: libffi, expat, pcre2, pixman, wayland (з нативним
+  `wayland-scanner`), libxkbcommon, glib (GLib/GObject/GIO), dbus, fribidi, cairo,
+  fontconfig (з нативним gperf), harfbuzz, pango -- разом 24 рецепти.
+* C++ на hxlibc: порт `libcxx` (LLVM 22 libc++/libc++abi/libunwind), `hx-c++` підхоплює
+  його сам; тест `cxx-runtime` (винятки, потоки, regex, filesystem, chrono).
+* Бібліотеки портів -- спільні `.so` (ld.hx), а не статичні копії в кожній програмі;
+  `mkhext` записує символьні посилання у форматі VFS (`\x7fHXLINK\n` + ціль), тож
+  `libfoo.so.1 -> libfoo.so.1.2.3` працюють і в образі.
+* Шрифти Noto Sans / Noto Sans Mono (TTF, OFL) у `/usr/share/fonts/noto` для fontconfig/pango.
+  Тести `glib-basic`, `cairo-draw`, `wayland-loop`, `xkb-keymap`, `posix-sockets` і
+  нативний `dbus-daemon` -- `tests/boot/native-ports-ladder2.sh`. Нативний dbus-daemon
+  обслуговує й `hx-login1` із Linux-шару.
+* Виправлено в hxlibc: `UINT_MAX` був знаковим `-1` (помилка mlibc), `gettext` без
+  `format_arg`, `getresuid/getresgid` писали у вказівники замість значень (обидві
+  помилки -- з `sysdeps/linux` mlibc), додано `setgroups`, `strxfrm_l`, `wcscoll_l`,
+  `wcsxfrm_l`, `strftime_l`, `memccpy` (був "not implemented"), `catopen/catgets`,
+  printf `%f/%e/%g/%a` через `fmt_fp` із musl (у mlibc `%g/%e` виводили буквально `%f`,
+  а `%f` не округлював і падав на числах >= 2^40, тест `printf-float`), `libc.so` у sysroot
+  веде на `libhxc.so` (інакше libtool вшивав статичну libc у кожну `.so`),
+  `_POSIX_TIMERS`/`_POSIX_MONOTONIC_CLOCK`; `hx-cc` визначає `__unix__`; stub-бібліотеки
+  `libm.so`, `libpthread.so`... тепер в образі.
+* Core-діапазон ABI v1 доповнено POSIX-викликами, які вже вміє ядро: `getresuid`,
+  `setres*`, `setgroups`, `renameat2`, `signalfd4`, `eventfd`, `epoll_pwait`,
+  `sched_*affinity`, `prctl`, `timer_*`, `*xattr` та ін. (213 core + 101 native).
+* `/etc/group` -- у нативній базі; `useradd`/`userdel` ведуть його.
+* `cargo xtask ports`: крос-файл meson, `HX_MESON`; тести `tests/hxlibc/*.c` беруть
+  прапорці з `NAME.pkg` через pkg-config.
+* `docs/reference/hamix-abi.md` -- джерело номерів; генератор таблиць і заголовків,
+  ELF-нота v1, нові виклики (futex, універсальний wait, ABI info, активатори сервісів).
+* hxlibc = mlibc 5.0.0 + `sysdeps/hamix`, динамічна `libhxc.so` з `/lib/ld.hx`, `hx-cc`;
+  `hx-ports`: busybox, zlib, lua, sqlite, libpng, freetype, openssl, curl.
+* `/etc/localtime` (UTC) у базовій системі: без нього mlibc панікує в `localtime`.
+  Порт busybox ставить `gzip`/`gunzip`/`zcat`, бо `tar -z` запускає зовнішній gzip.
+
+## Linux-шар
+* Особистості в ядрі, `hxctl linux on|off|status`, `linux=0`; `/opt/linux` прибрано,
+  pantry ставить у спільне дерево з мітками шару.
+* `hx-drm-compat`: `/dev/dri/card0` з dumb-буферами й legacy KMS (див. ADR-0011B),
+  вузол існує лише з увімкненим шаром.
+* hxwayland: layer-shell, foreign-toplevel, буфер обміну через hxproto,
+  `wp_viewporter`, `wp_fractional_scale_v1`, `zxdg_output_manager_v1`, неблокуюча
+  відправка з чергою на клієнта.
+* Адаптери: `hxsvc-openrc`, `hx-login1` (`org.freedesktop.login1` на системній шині),
+  `hx-upower` (`org.freedesktop.UPower`), `hx-polkit` (`org.freedesktop.PolicyKit1`,
+  CheckAuthorization із політикою root / активна сесія / sudoers), спільний крейт `hxdbus`;
+  `libudev-zero` через `/etc/pantry/prefer`; `pantry provider`.
+* Установник питає про Linux-сумісність (`/etc/hamix/linux.conf`), у Налаштуваннях ->
+  Session є перемикач шару.
+
+## init і робочий стіл
+* PID 1 -- `hxsvc` (юніти `.svc`, журнали `/var/log/hx`, `hxctl`), `hxlogin`, `hx-authd`.
+* hxproto v2: layer surface, toplevels, workspaces, selection, drag-and-drop, output.
+* COW для `fork` на x86_64 (2200 -> 990 мкс).
+
 # HamixOS 0.6.1 -- драйвери як KPI-модулі, Nook без жорстких списків
 
 ## Драйвери
@@ -65,7 +422,7 @@
 
 # HamixOS 0.6.0 -- переривання в KPI, ізоляція модулів, PI-ф'ютекси
 
-## KPI: пункти 1, 3 і 4 з `docs/KPI_ROADMAP.md` -- план завершено
+## KPI: пункти 1, 3 і 4 з `docs/roadmap/KPI_ROADMAP.md` -- план завершено
 
 * Дисплей ABI 3: конектори, режими з EDID (GMBUS, DP AUX, virtio `GET_EDID`),
   гаряче підключення до `hxwayland`, подвійна буферизація через `page_flip`.
@@ -107,9 +464,9 @@
   `try_reserve_exact`, нестача пам'яті повертає `ENOSPC` замість паніки.
 * AHCI будує PRD за фізичними сторінками буфера; `hamix_virt_to_phys`
   транслює vmalloc-адреси; `wget` пише у файл потоком.
-* Деталі й заміри -- `docs/OPTIMIZATION.md`, розділ "vmalloc".
+* Деталі й заміри -- `docs/architecture/OPTIMIZATION.md`, розділ "vmalloc".
 
-## Портування на aarch64 і riscv64: пункти 3 і 4 з `docs/PORTING.md`
+## Портування на aarch64 і riscv64: пункти 3 і 4 з `docs/guides/PORTING.md`
 
 * Винятки: таблиця векторів aarch64 і `stvec` riscv64 з повним кадром
   регістрів, `probe_read` з відновленням після відмови сторінки.
@@ -119,7 +476,7 @@
   самою розкладкою, що на x86_64 (тотожна мапа / користувач / vmalloc),
   `AddressSpace` з ізоляцією між процесами.
 
-## Портування на aarch64 і riscv64: пункти 1 і 2 з `docs/PORTING.md`
+## Портування на aarch64 і riscv64: пункти 1 і 2 з `docs/guides/PORTING.md`
 
 * `kernel/src/arch/mod.rs` -- спільні примітиви (`hlt`, переривання,
   `without_interrupts`, `HEAP_LIMIT`) для x86_64, aarch64 і riscv64;
@@ -135,7 +492,7 @@
 * `./build.sh aarch64` і `./build.sh riscv64` збирають ядро, яке в QEMU
   `virt` проходить ранній старт і самоперевірку heap.
 
-## KPI: пункти 2, 5 і 6 з `docs/KPI_ROADMAP.md`
+## KPI: пункти 2, 5 і 6 з `docs/roadmap/KPI_ROADMAP.md`
 
 ### Переривання (пункт 2)
 
@@ -150,7 +507,7 @@
 * `/proc/interrupts` і команда `interrupts` показують вектор, вид, лічильник
   і модуль-власник. Перевірено в QEMU: `virtio-gpu` бере лінію 11
   (вектор 0x2b), лічильник росте, spurious -- 0.
-* Не зроблено: таблиця **MSI-X** і IOAPIC (написано в `docs/MODULES.md`).
+* Не зроблено: таблиця **MSI-X** і IOAPIC (написано в `docs/architecture/MODULES.md`).
 
 ### Ізоляція модулів (пункт 5)
 
@@ -241,7 +598,7 @@ General protection fault ip=0x8004950558 ec=0x0 cs=0x2b
   (`memory_info` + `heap_stats`), і exec чесно повертає помилку замість
   паніки. Справжнє рішення -- ліниве відображення PT_LOAD із файла, як це
   вже зроблено для `mmap`; воно записане як наступний крок у
-  `docs/LINUXULATOR.md`.
+  `docs/architecture/LINUXULATOR.md`.
 * Chromium з `--single-process` більше не валить ядро і не вішає робочий
   стіл: система лишається живою, падає лише сам процес.
 
@@ -294,7 +651,7 @@ panel fitter, і вони в тій самій таблиці id.
 * `hamix_kpi_version()` = 2, `hamix_display_abi()` = 2.
 * У Налаштуваннях у полі "Driver" тепер ім'я самого модуля
   (`intel-display`), а не загальне "loadable display module".
-* `docs/KPI_ROADMAP.md` -- план розширення KPI на шість напрямків
+* `docs/roadmap/KPI_ROADMAP.md` -- план розширення KPI на шість напрямків
   (KMS-подібний клас дисплея, переривання й MSI, шини та класи пристроїв,
   шар імен linuxkpi, ізоляція модулів, життєвий цикл і діагностика).
 
@@ -414,7 +771,7 @@ panel fitter, і вони в тій самій таблиці id.
   таблицю можливостей `DisplayOps` (`flush`, `set_mode`, `cursor_set/move/
   hide`, `fill`, `copy`) і власний буфер сканаута. Далі саме цей буфер є
   фреймбуфером ядра: текстова консоль, `fbmap` і межі миші йдуть за ним.
-  `docs/GRAPHICS_ROADMAP.md` описує це як шар 4.
+  `docs/roadmap/GRAPHICS_ROADMAP.md` описує це як шар 4.
 * **Мова більше не йде про лінійний VBE-фреймбуфер.** Композитор віддає GPU
   рівно ту область, що змінилась: `hxserver` викликає `SYS_GPU_FLUSH` зі
   своїм дамеджем після кожного compose, а для текстової консолі `write_row`
@@ -487,7 +844,7 @@ Intel gen4. 3D-прискорення (Mesa/virgl) лишається окрем
   модуль; профіль `module` у `Cargo.toml` і крок збірки в `build.sh`.
 * Переривань для модулів навмисно немає -- у HamixOS немає диспетчеризації
   IRQ пристроїв, усі наявні мережеві драйвери опитують пристрій. Модуль
-  реєструє poll-колбек. Подробиці й решта обмежень -- `docs/MODULES.md`.
+  реєструє poll-колбек. Подробиці й решта обмежень -- `docs/architecture/MODULES.md`.
 
 ## Архітектура
 
@@ -509,7 +866,7 @@ Intel gen4. 3D-прискорення (Mesa/virgl) лишається окрем
 * Прибрано сміття з дерева: порожні `BSS` і `UART.` у корені,
   host-only частини вендореного smoltcp (`examples/`, `benches/`, `utils/`,
   `gen_config.py`), `examples/hello.c` і `overlay/bin/hello.hamix` --
-  артефакти з часів, коли ELF-завантажувача ще не було. `docs/MUSL.md`
+  артефакти з часів, коли ELF-завантажувача ще не було. `docs/architecture/MUSL.md`
   оновлено під стан, у якому завантажувач уже є.
 
 # HamixOS 0.5.5 -- вигляд Linux-програм і ще менше пам'яті
@@ -550,9 +907,9 @@ Intel gen4. 3D-прискорення (Mesa/virgl) лишається окрем
 * Записано правило в README («Two ABIs»): нова функціональність ОС спершу
   отримує нативний `SYS_HAMIX_*` виклик і API в `hamix_std`, а Linux-сумісність
   для тієї самої речі -- окрема робота під конкретну програму.
-* `docs/VIDEO.md` отримав розділ про те, коли бібліотека пишеться нативно, а
+* `docs/architecture/VIDEO.md` отримав розділ про те, коли бібліотека пишеться нативно, а
   коли береться з Linux (критичний шлях запуску ОС -- нативно, решта -- через
-  Linux ABI); `docs/USERSPACE_ROADMAP.md` позначено як історичний документ зі
+  Linux ABI); `docs/history/USERSPACE_ROADMAP.md` позначено як історичний документ зі
   списком того, що лишилось (окремий `/bin/sudo` з бітом setuid).
 
 ## Вигляд програм
@@ -989,7 +1346,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
 * `hxsound`: `info`, `volume`, `tone`, `play file.wav`.
 * Перевірено в QEMU записом звуку у WAV: HDA і AC'97, тон 3 с -- рівно
   3 с без жодного розриву; звук відео 10 с -- без розривів, частота точна.
-* Докладніше: `docs/AUDIO.md`.
+* Докладніше: `docs/architecture/AUDIO.md`.
 
 ## Відео
 
@@ -1020,7 +1377,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
 * У QEMU 480p і 720p грають без пропущених кадрів, 1080p -- синхронно з
   пропуском частини B-кадрів.
 * Файли відкривають `.mp4/.m4v/.mov` у Videos, `.wav` -- через hxsound.
-* Докладніше: `docs/VIDEO.md`, `libs/rust_h264/HAMIX.md`.
+* Докладніше: `docs/architecture/VIDEO.md`, `libs/rust_h264/HAMIX.md`.
 
 ## Nook: діалоги вибору файлів і звук
 
@@ -1031,7 +1388,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
   Відповідь приходить подією `FileChosen`. Nook приймає відповідь лише від
   процесу, який сам запустив. `hxclient`: `open_file_dialog`,
   `choose_folder_dialog`, `save_file_dialog`, `request_file`. Нотатки
-  використовують діалоги відкриття і збереження. Докладніше: `docs/XORG.md`.
+  використовують діалоги відкриття і збереження. Докладніше: `docs/architecture/XORG.md`.
 * **Кнопка звуку** у верхній панелі біля Wi-Fi: іконка показує рівень,
   спливаюче вікно з пристроєм, повзунком і вимкненням звуку, прокрутка над
   кнопкою змінює гучність. Кнопки гучності на клавіатурі показують індикатор
@@ -1090,7 +1447,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
 кожного модуля: пам'ять, ACPI, PCI, графіка, диски, корінь, USB, ядра
 процесора, режим екрана, мережеві адаптери, TCP/IP стек, логін.
 Список доступний у `/proc/hxinit` і в Налаштуваннях → System status.
-Докладніше: `docs/HXINIT.md`.
+Докладніше: `docs/architecture/HXINIT.md`.
 
 ## Швидкість hxserver
 
@@ -1113,7 +1470,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
   еталонними векторами і симуляцією точки доступу.
 * Команди: `ip`, `netmode`, `netconf`, `ping`, `nslookup`, `wifi`, `wget`.
 * Сокети TCP/UDP для програм (`hamix_std::net`).
-* Докладніше: `docs/NETWORK.md`.
+* Докладніше: `docs/architecture/NETWORK.md`.
 
 ## Nook
 
@@ -1314,7 +1671,7 @@ htop, btop, nano, vim, mc, tmux, bash, Python 3, BusyBox `sh` з пайпами 
 автовідступ, Ctrl+K / Ctrl+U (вирізати / вставити рядок), захист від виходу
 без збереження, файл передається аргументом (`hed <file>`).
 
-Документація: `docs/HEXT.md`, `docs/XORG.md`, `docs/COMMANDS.md`.
+Документація: `docs/architecture/HEXT.md`, `docs/architecture/XORG.md`, `docs/guides/COMMANDS.md`.
 
 ---
 

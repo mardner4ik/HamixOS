@@ -12,7 +12,7 @@ mod shell;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{entry, env, fs, sys};
+use hxstd::{entry, env, fs, sys};
 
 use shell::{write, Io, Shell};
 

@@ -1,0 +1,8 @@
+#!/bin/sh
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+[ -r /etc/profile ] && . /etc/profile
+[ -r "$HOME/.profile" ] && . "$HOME/.profile"
+if [ $# -eq 1 ]; then
+    eval "exec $1"
+fi
+exec "$@"

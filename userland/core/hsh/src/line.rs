@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::sys::{self, Key};
+use hxstd::sys::{self, Key};
 
 use crate::shell::write;
 

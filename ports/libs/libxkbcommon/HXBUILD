@@ -1,0 +1,17 @@
+pkgname=libxkbcommon
+pkgver=1.7.0
+pkgdesc="Keyboard keymap compiler and state machine"
+source="https://xkbcommon.org/download/libxkbcommon-$pkgver.tar.xz"
+sha256="65782f0a10a4b455af9c6baab7040e2f537520caa2ec2092805cdfd36863b247"
+builddir="libxkbcommon-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Denable-x11=false -Denable-wayland=false -Denable-docs=false -Denable-tools=false -Denable-xkbregistry=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

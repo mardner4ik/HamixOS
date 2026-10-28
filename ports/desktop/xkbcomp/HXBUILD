@@ -1,0 +1,17 @@
+pkgname=xkbcomp
+pkgver=1.4.7
+pkgdesc="XKB keymap compiler (used by Xwayland)"
+source="https://www.x.org/releases/individual/app/xkbcomp-$pkgver.tar.xz"
+sha256="0a288114e5f44e31987042c79aecff1ffad53a8154b8ec971c24a69a80f81f77"
+builddir="xkbcomp-$pkgver"
+depends="libxkbfile libX11"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --with-xkb-config-root=/usr/share/X11/xkb
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

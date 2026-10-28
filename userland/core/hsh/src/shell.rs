@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::{fs, sys};
+use hxstd::{fs, sys};
 
 use crate::lexer::{Part, Word};
 use crate::parser::{self, Node, Redir, RedirKind};
@@ -53,7 +53,7 @@ pub enum Flow {
     Return,
 }
 
-pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/sbin:/usr/sbin:/opt/linux/bin:/opt/linux/usr/bin";
+pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/sbin:/usr/sbin";
 
 pub fn binary_kind(path: &str) -> Option<&'static str> {
     let head = fs::read_prefix(path, 64)?;
@@ -128,9 +128,9 @@ impl Shell {
     pub fn new() -> Shell {
         let mut vars = BTreeMap::new();
         let uid = sys::geteuid() as u32;
-        let user = hamix_std::users::find_uid("", uid);
+        let user = hxstd::users::find_uid("", uid);
         let mut exported: Vec<String> = Vec::new();
-        for (name, value) in hamix_std::env::vars() {
+        for (name, value) in hxstd::env::vars() {
             if name != "PWD" {
                 vars.insert(name.clone(), value.clone());
             }
@@ -192,7 +192,7 @@ impl Shell {
             "!" => self.last_background.to_string(),
             "@" | "*" => self.args.iter().skip(1).cloned().collect::<Vec<_>>().join(" "),
             "PWD" => sys::getcwd(),
-            "RANDOM" => (hamix_std::users::random_salt() % 32768).to_string(),
+            "RANDOM" => (hxstd::users::random_salt() % 32768).to_string(),
             "UID" => sys::getuid().to_string(),
             "EUID" => sys::geteuid().to_string(),
             n if n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty() => {
@@ -284,7 +284,7 @@ impl Shell {
                     let home = if user.is_empty() {
                         self.home()
                     } else {
-                        hamix_std::users::find("", user).map(|u| u.home).unwrap_or_else(|| format!("~{}", user))
+                        hxstd::users::find("", user).map(|u| u.home).unwrap_or_else(|| format!("~{}", user))
                     };
                     fields.last_mut().unwrap().push_str(&home);
                 }

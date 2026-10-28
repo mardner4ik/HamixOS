@@ -1,0 +1,17 @@
+[package]
+name = "hxproto-check"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxproto-check"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../libs/hxstd" }
+hxclient = { path = "../../libs/hxclient" }
+hxproto = { path = "../../../crates/hxproto" }
+
+[package.metadata.hamix]
+desktop = "nook"
+install = "libexec"

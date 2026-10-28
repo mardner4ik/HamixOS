@@ -15,7 +15,7 @@ mod scripts;
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{entry, env, eprintln, println, sys};
+use hxstd::{entry, env, eprintln, println, sys};
 
 use crate::db::Db;
 use crate::repo::Catalog;
@@ -38,9 +38,15 @@ fn usage() -> i32 {
     println!("  list [--available]     list installed (or all available) packages");
     println!("  files <package>        list the files of an installed package");
     println!("  owner <path>           find which package installed a file");
+    println!("  provider <dependency>  show which package would satisfy a dependency");
     println!("  repos                  show the configured repositories");
+    println!("  layer [native|linux]   list the packages of a layer");
+    println!("  remove-layer linux     remove every package of the Linux layer");
+    println!("  lint                   check that native packages do not depend on the Linux layer");
+    println!("  migrate                move Linux packages from {} or the shared tree into {}", db::LEGACY_SYSROOT, ops::LINUX_ROOT);
     println!();
-    println!("Linux packages come from Alpine Linux and are installed under {}.", db::SYSROOT);
+    println!("Linux packages come from Alpine Linux and install into the same /usr, /etc and /lib as");
+    println!("HamixOS itself; files HamixOS already owns are never replaced.");
     2
 }
 
@@ -211,7 +217,7 @@ fn cmd_install(names: &[String]) -> i32 {
     match result {
         Ok(()) => {
             db.save();
-            println!("Done. Linux programs live in {}/bin and {}/usr/bin.", db::SYSROOT, db::SYSROOT);
+            println!("Done.");
             0
         }
         Err(e) => {
@@ -299,7 +305,7 @@ fn cmd_triggers() -> i32 {
         for pattern in &pkg.triggers {
             if pattern.contains('*') || pattern.contains('?') {
                 dirs.extend(owned.iter().filter(|dir| scripts::glob_matches(pattern, dir)).map(|dir| dir.as_str()));
-            } else if sys::stat(&alloc::format!("{}{}", db::SYSROOT, pattern)).is_ok() {
+            } else if sys::stat(pattern).is_ok() {
                 dirs.push(pattern.as_str());
             }
         }
@@ -352,7 +358,7 @@ fn cmd_files(name: &str) -> i32 {
     match db.find(name) {
         Some(p) => {
             for f in &p.files {
-                println!("{}/{}", db::SYSROOT, f);
+                println!("/{}", f);
             }
             0
         }
@@ -377,6 +383,24 @@ fn cmd_owner(path: &str) -> i32 {
     }
 }
 
+fn cmd_provider(dep: &str) -> i32 {
+    let Some(cat) = catalog() else {
+        return 1;
+    };
+    match ops::provider(&cat, &index::parse_dep(dep)) {
+        Some(i) => {
+            let p = &cat.pkgs[i];
+            let why = if cat.prefer.get(dep).map(|n| n == &p.name).unwrap_or(false) { " (preferred in /etc/pantry/prefer)" } else { "" };
+            println!("{} is provided by {} {}{}", dep, p.name, p.version, why);
+            0
+        }
+        None => {
+            println!("nothing provides {}", dep);
+            1
+        }
+    }
+}
+
 fn cmd_repos() -> i32 {
     match repo::load_repos() {
         Ok(repos) => {
@@ -394,6 +418,83 @@ fn cmd_repos() -> i32 {
             1
         }
     }
+}
+
+fn cmd_layer(args: &[String]) -> i32 {
+    let db = Db::load();
+    let layers: Vec<&str> = match args.first() {
+        Some(l) => alloc::vec![l.as_str()],
+        None => alloc::vec!["native", "linux"],
+    };
+    for layer in layers {
+        let mut pkgs = db.in_layer(layer);
+        pkgs.sort_by(|a, b| a.name.cmp(&b.name));
+        println!("{} layer: {} package(s)", layer, pkgs.len());
+        for p in pkgs {
+            println!("  {} {}{}", p.name, p.version, if p.is_system() { " (part of the image)" } else { "" });
+        }
+    }
+    0
+}
+
+fn cmd_remove_layer(args: &[String]) -> i32 {
+    let Some(layer) = args.first() else {
+        eprintln!("usage: pantry remove-layer linux [--yes]");
+        return 2;
+    };
+    if layer != "linux" {
+        eprintln!("pantry: only the Linux layer can be removed");
+        return 2;
+    }
+    if !require_root() {
+        return 1;
+    }
+    let mut db = Db::load();
+    let count = db.in_layer(layer).iter().filter(|p| !p.is_system()).count();
+    if !args.iter().any(|a| a == "--yes" || a == "-y") {
+        println!("This removes {} Linux package(s). Run 'pantry remove-layer linux --yes' to confirm.", count);
+        return 1;
+    }
+    match ops::remove_layer(&mut db, layer) {
+        Ok(n) => {
+            println!("Removed {} package(s) of the Linux layer.", n);
+            0
+        }
+        Err(e) => {
+            eprintln!("pantry: {}", e);
+            1
+        }
+    }
+}
+
+fn cmd_lint() -> i32 {
+    let db = Db::load();
+    let problems = ops::lint(&db);
+    for p in &problems {
+        println!("{}", p);
+    }
+    if problems.is_empty() {
+        println!("ok: no native package depends on the Linux layer");
+        0
+    } else {
+        1
+    }
+}
+
+fn cmd_migrate(args: &[String]) -> i32 {
+    if !require_root() {
+        return 1;
+    }
+    let db = db::Db::load();
+    let (moved, kept) = ops::migrate(&db);
+    if moved + kept == 0 {
+        if !args.iter().any(|a| a == "--quiet") {
+            println!("Nothing to migrate: the Linux packages are already in {}.", ops::LINUX_ROOT);
+        }
+    } else {
+        println!("Moved {} file(s) into the Linux environment {} ({} already present).", moved, ops::LINUX_ROOT, kept);
+    }
+    0
 }
 
 fn main() -> i32 {
@@ -421,7 +522,12 @@ fn main() -> i32 {
         "list" => cmd_list(rest),
         "files" => one(cmd_files),
         "owner" => one(cmd_owner),
+        "provider" => one(cmd_provider),
         "repos" => cmd_repos(),
+        "layer" | "layers" => cmd_layer(rest),
+        "remove-layer" => cmd_remove_layer(rest),
+        "lint" => cmd_lint(),
+        "migrate" => cmd_migrate(rest),
         "version" | "--version" => {
             println!("pantry {}", VERSION);
             0

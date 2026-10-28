@@ -1,0 +1,5 @@
+description = org.freedesktop.PolicyKit1 for Linux programs (hx-polkit)
+exec = /usr/libexec/hamix/hx-polkit
+start = boot
+restart = on-failure
+layer = linux

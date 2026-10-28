@@ -1,0 +1,18 @@
+pkgname=libinput
+pkgver=1.26.2
+pkgdesc="Input device management and event handling library"
+source="libinput-$pkgver.tar.gz::https://gitlab.freedesktop.org/libinput/libinput/-/archive/$pkgver/libinput-$pkgver.tar.gz"
+sha256="5c1c4150f217fea1db2d1fd88e2607b2f1928cfde65c34da65a9f24dcfd69464"
+builddir="libinput-$pkgver"
+depends="libudev-zero mtdev libevdev"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dlibwacom=false -Ddebug-gui=false -Dtests=false -Ddocumentation=false -Dudev-dir=/usr/lib/udev
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/zsh" "$pkgdir/usr/share/man" "$pkgdir/usr/lib/udev"
+}

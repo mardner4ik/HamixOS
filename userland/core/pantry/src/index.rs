@@ -3,7 +3,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-pub const ARCH: &str = hamix_std::sys::ARCH;
+pub const ARCH: &str = hxstd::sys::ARCH;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RepoKind {
@@ -16,6 +16,7 @@ pub struct Repo {
     pub kind: RepoKind,
     pub name: String,
     pub url: String,
+    pub layer: String,
 }
 
 impl Repo {
@@ -37,8 +38,8 @@ pub fn parse_repos(text: &str) -> (Vec<Repo>, Vec<String>) {
             continue;
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != 3 {
-            problems.push(format!("line {}: expected '<alpine|hamix> <name> <url>'", n + 1));
+        if fields.len() != 3 && fields.len() != 4 {
+            problems.push(format!("line {}: expected '<alpine|hamix> <name> <url> [layer=native|linux]'", n + 1));
             continue;
         }
         let kind = match fields[0] {
@@ -49,7 +50,16 @@ pub fn parse_repos(text: &str) -> (Vec<Repo>, Vec<String>) {
                 continue;
             }
         };
-        repos.push(Repo { kind, name: fields[1].to_string(), url: fields[2].to_string() });
+        let default_layer = if kind == RepoKind::Alpine { "linux" } else { "native" };
+        let layer = match fields.get(3).map(|f| f.strip_prefix("layer=")) {
+            None => default_layer.to_string(),
+            Some(Some(l @ ("native" | "linux"))) => l.to_string(),
+            Some(_) => {
+                problems.push(format!("line {}: the fourth field must be layer=native or layer=linux", n + 1));
+                continue;
+            }
+        };
+        repos.push(Repo { kind, name: fields[1].to_string(), url: fields[2].to_string(), layer });
     }
     (repos, problems)
 }

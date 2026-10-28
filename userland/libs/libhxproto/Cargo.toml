@@ -1,0 +1,21 @@
+[package]
+name = "libhxproto"
+version = "0.1.0"
+edition = "2021"
+description = "C library for the hxserver display protocol: libhxproto.so, <hamix/hxproto.h>, hxproto.pc"
+license = "MIT"
+
+[lib]
+name = "hxproto"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+proto = { package = "hxproto", path = "../../../crates/hxproto", features = ["client"] }
+
+[package.metadata.hamix]
+clib = "hxproto"
+soversion = "0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("hamix"))'] }

@@ -1,8 +1,8 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::audio;
-use hamix_std::sys;
+use hxstd::audio;
+use hxstd::sys;
 use hx264::Picture;
 use hxmp4::{Codec, Movie, Source, Track};
 
@@ -193,14 +193,6 @@ impl Player {
 
     pub fn has_audio(&self) -> bool {
         self.audio.as_ref().map(|a| a.stream.is_some()).unwrap_or(false)
-    }
-
-    pub fn video_size(&self) -> Option<(u32, u32)> {
-        let v = self.video.as_ref()?;
-        match &self.movie.tracks[v.track].codec {
-            Codec::Avc { width, height, .. } => Some((*width, *height)),
-            _ => None,
-        }
     }
 
     pub fn describe(&self) -> String {

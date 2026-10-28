@@ -47,6 +47,19 @@ const CONFIG_DATA: u16 = 0xCFC;
 /// enough for "is this a GPU".
 const CLASS_DISPLAY_CONTROLLER: u8 = 0x03;
 
+static BUILTIN: spin::Mutex<alloc::vec::Vec<(PciAddress, &'static str)>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+pub fn claim_builtin(address: PciAddress, owner: &'static str) {
+    let mut list = BUILTIN.lock();
+    if !list.iter().any(|(a, _)| *a == address) {
+        list.push((address, owner));
+    }
+}
+
+pub fn builtin_owner(address: PciAddress) -> Option<&'static str> {
+    BUILTIN.lock().iter().find(|(a, _)| *a == address).map(|(_, o)| *o)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PciAddress {
     pub bus: u8,

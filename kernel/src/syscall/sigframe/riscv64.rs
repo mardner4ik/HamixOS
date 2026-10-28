@@ -1,7 +1,7 @@
 use alloc::vec;
 
 use super::{SA_ONSTACK, SA_RESTORER, SS_DISABLE, SS_ONSTACK};
-use crate::syscall::{copy_out, user_slice};
+use crate::usercopy::{copy_out, user_slice};
 use crate::task::switch::{InterruptFrame, FX_SIZE};
 use crate::task::{self, SigAction};
 
@@ -21,7 +21,7 @@ fn get_u64(buf: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(buf[at..at + 8].try_into().unwrap())
 }
 
-pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigAction, mask: u64, altstack: (u64, u64, u32)) -> bool {
+pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigAction, mask: u64, altstack: (u64, u64, u32), sender: (u32, u32)) -> bool {
     let restorer = if action.flags & SA_RESTORER != 0 && action.restorer != 0 { action.restorer } else { crate::task::elf::SIGRETURN_TRAMPOLINE };
     let current_sp = frame.x[2];
     let on_alt = altstack.2 & SS_DISABLE == 0 && current_sp > altstack.0 && current_sp <= altstack.0 + altstack.1;
@@ -29,6 +29,8 @@ pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigActi
     let sp = (top - FRAME_SIZE) & !15;
     let mut raw = vec![0u8; FRAME_SIZE as usize];
     raw[0..4].copy_from_slice(&sig.to_le_bytes());
+    raw[16..20].copy_from_slice(&sender.0.to_le_bytes());
+    raw[20..24].copy_from_slice(&sender.1.to_le_bytes());
     raw[16..20].copy_from_slice(&task::current_pid().to_le_bytes());
     let uc = &mut raw[INFO_SIZE as usize..];
     put_u64(uc, UC_STACK, altstack.0);

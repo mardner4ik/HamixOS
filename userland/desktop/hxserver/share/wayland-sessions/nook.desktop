@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Nook
+Comment=The HamixOS desktop (hxserver)
+Exec=/usr/bin/nook-session
+TryExec=/usr/bin/hxserver
+Type=Application
+DesktopNames=Nook

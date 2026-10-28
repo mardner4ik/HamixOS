@@ -1,0 +1,5 @@
+#!/bin/sh
+mkdir -p /run/dbus /var/lib/dbus
+[ -s /etc/machine-id ] && [ ! -e /var/lib/dbus/machine-id ] && ln -s /etc/machine-id /var/lib/dbus/machine-id
+rm -f /run/dbus/system_bus_socket /run/dbus/dbus.pid
+exec /usr/bin/dbus-daemon --system --nofork --nopidfile

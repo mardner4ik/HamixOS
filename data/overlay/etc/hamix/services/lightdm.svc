@@ -1,0 +1,7 @@
+description = LightDM graphical login (greeter on tty1, sessions on tty2, Nook)
+exec = /usr/libexec/hamix/lightdm-start
+after = dbus-system
+start = boot
+restart = no
+console = yes
+vt = 1 2

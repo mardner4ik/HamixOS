@@ -2,12 +2,12 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{println, sys};
+use hxstd::{println, sys};
 
 use crate::db::{self, Db};
 
 pub const SCRIPTS_DIR: &str = "/var/lib/pantry/scripts";
-const SHELL: &str = "/opt/linux/bin/busybox";
+const SHELL: &str = "/linux/bin/busybox";
 const ENV: [&str; 5] = ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LANG=C.UTF-8", "TERM=dumb", "SHELL=/bin/sh"];
 
 fn script_path(pkg: &str, script: &str) -> String {
@@ -44,10 +44,11 @@ pub fn run(pkg: &str, script: &str, args: &[&str]) -> bool {
         return true;
     }
     if sys::stat(SHELL).is_err() {
-        println!("  cannot run {} of {}: no shell in the Linux sysroot", script, pkg);
+        println!("  cannot run {} of {}: {} is missing (install the Linux layer)", script, pkg, SHELL);
         return false;
     }
-    let mut argv: Vec<&str> = alloc::vec!["sh", path.as_str()];
+    let view = format!("/hamix{}", path);
+    let mut argv: Vec<&str> = alloc::vec!["sh", view.as_str()];
     argv.extend_from_slice(args);
     let pid = sys::spawn_io_env(SHELL, &argv, Some(&ENV[..]), 0, None, None, None);
     if pid < 0 {

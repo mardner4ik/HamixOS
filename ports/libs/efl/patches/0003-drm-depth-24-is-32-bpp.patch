@@ -1,0 +1,12 @@
+diff --color -ru a/src/lib/ecore_drm2/ecore_drm2_device.c b/src/lib/ecore_drm2/ecore_drm2_device.c
+--- a/src/lib/ecore_drm2/ecore_drm2_device.c	2026-10-05 22:39:09.639680910 +0300
++++ b/src/lib/ecore_drm2/ecore_drm2_device.c	2026-10-05 22:39:09.699717588 +0300
+@@ -899,7 +899,7 @@
+    if (ret == 0)
+      {
+         if (depth) *depth = caps;
+-        if (bpp) *bpp = caps;
++        if (bpp) *bpp = (caps == 24) ? 32 : caps;
+      }
+ }
+ 

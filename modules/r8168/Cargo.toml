@@ -1,0 +1,11 @@
+[package]
+name = "r8168"
+version = "0.1.0"
+edition = "2024"
+description = "HamixOS loadable network module for Realtek RTL8111/8168 PCI Express Gigabit Ethernet controllers"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+hamix_kpi = { path = "../../sdk/hamix_kpi" }

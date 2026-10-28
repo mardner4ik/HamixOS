@@ -1,0 +1,17 @@
+pkgname=libXau
+pkgver=1.0.11
+pkgdesc="X authorization library"
+source="https://www.x.org/releases/individual/lib/libXau-$pkgver.tar.xz"
+sha256="f3fa3282f5570c3f6bd620244438dbfbdd580fc80f02f549587a0f8ab329bbeb"
+builddir="libXau-$pkgver"
+depends="xorgproto"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

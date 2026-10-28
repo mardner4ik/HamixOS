@@ -1,0 +1,18 @@
+pkgname=xkeyboard-config
+pkgver=2.42
+pkgdesc="XKB keyboard layout database used by libxkbcommon"
+source="https://www.x.org/releases/individual/data/xkeyboard-config/xkeyboard-config-$pkgver.tar.xz"
+sha256="a6b06ebfc1f01fc505f2f05f265f95f67cc8873a54dd247e3c2d754b8f7e0807"
+builddir="xkeyboard-config-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dxorg-rules-symlinks=true -Dcompat-rules=true
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/locale" "$pkgdir/usr/share/man"
+}

@@ -1,0 +1,18 @@
+pkgname=libgcrypt
+pkgver=1.11.0
+pkgdesc="General purpose cryptographic library from GnuPG"
+source="https://gnupg.org/ftp/gcrypt/libgcrypt/libgcrypt-$pkgver.tar.bz2"
+sha256="09120c9867ce7f2081d6aaa1775386b98c2f2f246135761aae47d81f58685b9c"
+builddir="libgcrypt-$pkgver"
+depends="libgpg-error"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-static --enable-shared --disable-doc \
+        --disable-asm --disable-jent-support --with-libgpg-error-prefix="$HX_ROOT/usr" --disable-padlock-support
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/usr/share/info"
+}

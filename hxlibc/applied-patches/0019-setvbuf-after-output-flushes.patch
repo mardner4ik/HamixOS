@@ -1,0 +1,16 @@
+--- a/options/ansi/generic/file-io.cpp	2026-09-29 22:45:51.684930510 +0300
++++ b/options/ansi/generic/file-io.cpp	2026-09-29 22:45:51.699685297 +0300
+@@ -260,9 +260,10 @@
+ }
+ 
+ int abstract_file::update_bufmode(buffer_mode mode) {
+-	// setvbuf() has undefined behavior if I/O has been performed.
+-	__ensure(__dirty_begin == __dirty_end
+-			&& "update_bufmode() must only be called before performing I/O");
++	if (__dirty_begin != __dirty_end) {
++		if (int e = flush(); e)
++			return e;
++	}
+ 	_bufmode = mode;
+ 	return 0;
+ }

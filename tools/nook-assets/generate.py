@@ -8,8 +8,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-OUT = os.path.join(ROOT, "overlay", "usr", "share", "nook")
-WALLPAPERS = os.path.join(ROOT, "overlay", "usr", "share", "wallpapers")
+OUT = os.path.join(ROOT, "data", "overlay", "usr", "share", "nook")
+WALLPAPERS = os.path.join(ROOT, "data", "overlay", "usr", "share", "wallpapers")
 FONT_DIR = "/usr/share/fonts/noto"
 
 CHARSET = (
@@ -219,6 +219,9 @@ SYMBOLS = {
     "fullscreen": symbolic('<path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/>'),
     "video": symbolic('<rect x="2.5" y="3.5" width="11" height="9" rx="1.5"/><path d="M6.8 6.1v3.8L10 8z" fill="#fff"/>'),
     "sound": symbolic(volume_symbol(3)),
+    "eject": symbolic('<path d="M8 3.5l4.5 5h-9z"/><path d="M3.5 12h9"/>'),
+    "optical": symbolic('<circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="1.4"/>'),
+    "usb": symbolic('<rect x="4.5" y="6.5" width="7" height="7.5" rx="1.2"/><path d="M5.8 6.5V2.5h4.4v4M7 4.2h.1M9 4.2h.1"/>'),
 }
 
 
@@ -297,7 +300,7 @@ def wallpaper(name, base_top, base_bottom, blobs, size=(1920, 1080)):
     os.makedirs(WALLPAPERS, exist_ok=True)
     Image.fromarray(arr.clip(0, 255).astype("uint8")).save(os.path.join(WALLPAPERS, name + ".png"), optimize=True)
 
-ICON_THEME = os.path.join(ROOT, "overlay", "usr", "share", "icons", "Nook Icons")
+ICON_THEME = os.path.join(ROOT, "data", "overlay", "usr", "share", "icons", "Nook Icons")
 ICON_THEME_SIZES = [24, 48, 128]
 
 

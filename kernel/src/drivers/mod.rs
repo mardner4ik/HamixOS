@@ -2,6 +2,7 @@ pub mod ahci;
 pub mod audio;
 pub mod ata;
 pub mod block;
+pub mod block_node;
 pub mod input;
 pub mod irq;
 pub mod klog;

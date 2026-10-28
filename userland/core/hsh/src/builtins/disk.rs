@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{fs, sys};
+use hxstd::{fs, sys};
 
 use super::files::human;
 use super::{parse_opts, Builtin};
@@ -251,7 +251,7 @@ fn diskpart(_: &mut Shell, args: &[String], io: Io) -> i32 {
                 Err(e) => return fail(io, "read", e),
             };
             mbr[440..510].fill(0);
-            let signature = hamix_std::users::random_salt();
+            let signature = hxstd::users::random_salt();
             mbr[440..444].copy_from_slice(&signature.to_le_bytes());
             mbr[510] = 0x55;
             mbr[511] = 0xAA;
@@ -434,7 +434,7 @@ fn df(_: &mut Shell, _: &[String], io: Io) -> i32 {
 
 pub fn grub_cfg(uuid: &str) -> String {
     format!(
-        "set timeout=3\nset default=0\n\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1024x768x32,1024x768,800x600x32,800x600,auto\nset gfxpayload=keep\n\nmenuentry \"HamixOS 0.6\" {{\n    multiboot2 /boot/kernel.bin root=UUID={}\n    module2 /boot/kmods.tar kmods\n    boot\n}}\n\nmenuentry \"HamixOS 0.6 (text console)\" {{\n    set gfxpayload=text\n    multiboot2 /boot/kernel.bin root=UUID={}\n    module2 /boot/kmods.tar kmods\n    boot\n}}\n",
+        "set timeout=3\nset default=0\n\ninsmod all_video\ninsmod gfxterm\nset gfxmode=1024x768x32,1024x768,800x600x32,800x600,auto\nset gfxpayload=keep\n\nmenuentry \"HamixOS 0.6\" {{\n    multiboot2 /boot/kernel.bin root=UUID={}\n    module2 /boot/initfs.tar initfs\n    boot\n}}\n\nmenuentry \"HamixOS 0.6 (text console)\" {{\n    set gfxpayload=text\n    multiboot2 /boot/kernel.bin root=UUID={}\n    module2 /boot/initfs.tar initfs\n    boot\n}}\n",
         uuid, uuid
     )
 }

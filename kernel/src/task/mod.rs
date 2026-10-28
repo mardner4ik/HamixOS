@@ -14,11 +14,10 @@ use crate::arch::without_interrupts;
 pub mod bkl;
 pub mod display;
 pub mod elf;
+pub mod fdtable;
 pub mod fault;
 pub mod ipc;
-pub mod linux_loader;
 pub mod pipe;
-pub mod pty;
 pub mod registry;
 pub mod switch;
 pub mod vdso;
@@ -43,6 +42,7 @@ pub const WAIT_FUTEX: u32 = 64;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Abi {
     Native,
+    Hamix,
     Linux,
 }
 
@@ -50,8 +50,13 @@ impl Abi {
     pub fn name(self) -> &'static str {
         match self {
             Abi::Native => "native",
+            Abi::Hamix => "hamix",
             Abi::Linux => "linux",
         }
+    }
+
+    pub fn posix(self) -> bool {
+        matches!(self, Abi::Hamix | Abi::Linux)
     }
 }
 
@@ -69,15 +74,36 @@ pub struct DirEntry {
     pub kind: u8,
 }
 
+#[derive(Clone, Default)]
+pub struct Offset(Arc<AtomicUsize>);
+
+impl Offset {
+    pub fn new(value: usize) -> Offset {
+        Offset(Arc::new(AtomicUsize::new(value)))
+    }
+
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub fn set(&self, value: usize) {
+        self.0.store(value, Ordering::Release)
+    }
+
+    pub fn add(&self, n: usize) {
+        self.0.fetch_add(n, Ordering::AcqRel);
+    }
+}
+
 pub enum OpenFile {
-    File { node: usize, pos: usize, append: bool, written: bool, access: u8 },
+    File { node: usize, pos: Offset, append: bool, written: bool, access: u8 },
     PipeRead(u32),
     PipeWrite(u32),
     Console,
-    Dir { path: String, entries: Arc<Vec<DirEntry>>, pos: usize },
-    Mem { path: String, data: Arc<Vec<u8>>, pos: usize },
+    Dir { path: String, entries: Arc<Vec<DirEntry>>, pos: Offset },
+    Mem { path: String, data: Arc<Vec<u8>>, pos: Offset },
     Socket { id: u32, nonblock: bool },
-    Memfd { id: u32, pos: usize, name: String, access: u8 },
+    Memfd { id: u32, pos: Offset, name: String, access: u8 },
     Epoll(u32),
     Mailbox,
     Special(u32),
@@ -88,7 +114,7 @@ pub enum OpenFile {
 impl OpenFile {
     pub fn duplicate(&self) -> OpenFile {
         match self {
-            OpenFile::File { node, pos, append, access, .. } => OpenFile::File { node: *node, pos: *pos, append: *append, written: false, access: *access },
+            OpenFile::File { node, pos, append, access, .. } => OpenFile::File { node: *node, pos: pos.clone(), append: *append, written: false, access: *access },
             OpenFile::PipeRead(id) => {
                 pipe::retain(*id, true);
                 OpenFile::PipeRead(*id)
@@ -98,8 +124,8 @@ impl OpenFile {
                 OpenFile::PipeWrite(*id)
             }
             OpenFile::Console => OpenFile::Console,
-            OpenFile::Dir { path, entries, pos } => OpenFile::Dir { path: path.clone(), entries: entries.clone(), pos: *pos },
-            OpenFile::Mem { path, data, pos } => OpenFile::Mem { path: path.clone(), data: data.clone(), pos: *pos },
+            OpenFile::Dir { path, entries, pos } => OpenFile::Dir { path: path.clone(), entries: entries.clone(), pos: pos.clone() },
+            OpenFile::Mem { path, data, pos } => OpenFile::Mem { path: path.clone(), data: data.clone(), pos: pos.clone() },
             OpenFile::Socket { id, nonblock } => {
                 if crate::net::inet::is_inet(*id) {
                     crate::net::inet::retain(*id);
@@ -110,15 +136,15 @@ impl OpenFile {
             }
             OpenFile::Memfd { id, pos, name, access } => {
                 ipc::retain(*id);
-                OpenFile::Memfd { id: *id, pos: *pos, name: name.clone(), access: *access }
+                OpenFile::Memfd { id: *id, pos: pos.clone(), name: name.clone(), access: *access }
             }
             OpenFile::Epoll(id) => {
-                crate::syscall::linux::epoll::retain(*id);
+                crate::fs::epoll::retain(*id);
                 OpenFile::Epoll(*id)
             }
             OpenFile::Mailbox => OpenFile::Mailbox,
             OpenFile::Special(id) => {
-                crate::syscall::linux::special::retain(*id);
+                crate::syscall::special::retain(*id);
                 OpenFile::Special(*id)
             }
             OpenFile::PtyMaster { index, input, output } => {
@@ -147,14 +173,14 @@ impl OpenFile {
             }
             OpenFile::Console | OpenFile::Dir { .. } | OpenFile::Mem { .. } | OpenFile::Mailbox => false,
             OpenFile::Special(id) => {
-                crate::syscall::linux::special::release(id);
+                crate::syscall::special::release(id);
                 false
             }
             OpenFile::PtyMaster { index, input, output } => {
                 pipe::release(input, false);
                 pipe::release(output, true);
                 if !crate::syscall::pty_master_open(index) {
-                    pty::master_closed(index);
+                    crate::tty::pty::master_closed(index);
                 }
                 false
             }
@@ -176,7 +202,7 @@ impl OpenFile {
                 false
             }
             OpenFile::Epoll(id) => {
-                crate::syscall::linux::epoll::release(id);
+                crate::fs::epoll::release(id);
                 false
             }
         }
@@ -213,7 +239,11 @@ pub struct Task {
     pub vt: usize,
     pub uid: u32,
     pub ruid: u32,
-    pub root_ticket_until: u64,
+    pub suid: u32,
+    pub egid: u32,
+    pub rgid: u32,
+    pub sgid: u32,
+    pub groups: Vec<u32>,
     pub cwd: String,
     pub state: State,
     pub exit_code: i32,
@@ -224,7 +254,7 @@ pub struct Task {
     pub args: Vec<String>,
     pub umask: u32,
     pub started: u64,
-    pub termios: [u8; crate::syscall::linux::tty::TERMIOS_LEN],
+    pub termios: [u8; crate::tty::TERMIOS_LEN],
     pub tty_pending: VecDeque<u8>,
     pub tty_line: VecDeque<u8>,
     pub fs_base: u64,
@@ -235,6 +265,8 @@ pub struct Task {
     pub sig_actions: [SigAction; 65],
     pub sig_mask: u64,
     pub sig_pending: u64,
+    pub sig_sender: [u64; 65],
+    pub syscall: u64,
     pub altstack: (u64, u64, u32),
     pub alarm_at: u64,
     pub alarm_interval: u64,
@@ -325,7 +357,7 @@ impl Sched {
         let level = task.level as usize;
         self.ready[level].push_back(pid);
         self.mask |= 1 << level;
-        SCHED_GEN.fetch_add(1, Ordering::Relaxed);
+        SCHED_GEN.fetch_add(1, Ordering::SeqCst);
     }
 
     fn make_runnable(&mut self, pid: Pid) {
@@ -435,14 +467,15 @@ static SLICE_START: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CP
 static SLICE_LEN: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(SLICE[0]) }; MAX_CPUS];
 static ACCOUNTED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static NEED_RESCHED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
-static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+pub const INIT_PID: Pid = 1;
+static NEXT_PID: AtomicU32 = AtomicU32::new(2);
 static SCHED_GEN: AtomicU64 = AtomicU64::new(1);
 static NEXT_TIMER: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static INPUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 pub fn notify_runnable() {
-    SCHED_GEN.fetch_add(1, Ordering::Relaxed);
+    SCHED_GEN.fetch_add(1, Ordering::SeqCst);
     smp::kick_idle(cpu_id());
 }
 
@@ -470,6 +503,10 @@ pub fn uptime_ms() -> u64 {
     ticks() * 1000 / TICK_HZ
 }
 
+pub fn clock_ms() -> u64 {
+    crate::arch::monotonic_ns().map(|ns| ns / 1_000_000).unwrap_or_else(uptime_ms)
+}
+
 pub fn ms_to_ticks(ms: u64) -> u64 {
     (ms * TICK_HZ).div_ceil(1000).max(1)
 }
@@ -480,7 +517,7 @@ pub fn input_seq() -> u64 {
 
 pub fn notify_input() {
     INPUT_SEQ.fetch_add(1, Ordering::Relaxed);
-    SCHED_GEN.fetch_add(1, Ordering::Relaxed);
+    SCHED_GEN.fetch_add(1, Ordering::SeqCst);
 }
 
 pub fn current_tid() -> Pid {
@@ -499,8 +536,63 @@ pub fn current_vt() -> usize {
     CURRENT_VT[cpu_id()].load(Ordering::Relaxed)
 }
 
+pub fn move_current_to_vt(vt: usize) {
+    let pid = current_pid();
+    with_tasks(|tasks| {
+        for t in tasks.values_mut() {
+            if t.leader == pid {
+                t.vt = vt;
+                for slot in t.fds.iter_mut().take(3) {
+                    if let Some(old) = slot.replace(OpenFile::Console) {
+                        old.release();
+                    }
+                }
+            }
+        }
+    });
+    CURRENT_VT[cpu_id()].store(vt, Ordering::Relaxed);
+}
+
+pub fn adopt_vt(pid: Pid, vt: usize) {
+    with_tasks(|tasks| {
+        for t in tasks.values_mut() {
+            if t.leader == pid {
+                t.vt = vt;
+            }
+        }
+    });
+    if current_pid() == pid {
+        CURRENT_VT[cpu_id()].store(vt, Ordering::Relaxed);
+    }
+}
+
 pub fn cpu_is_idle(cpu: usize) -> bool {
     CURRENT_PID[cpu].load(Ordering::Relaxed) == 0
+}
+
+static POLLING: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+const IDLE_POLL_NS: u64 = 40_000;
+
+pub fn cpu_is_polling(cpu: usize) -> bool {
+    POLLING[cpu].load(Ordering::SeqCst)
+}
+
+fn idle_poll(cpu: usize, seen: u64) -> bool {
+    let Some(start) = crate::arch::monotonic_ns() else {
+        return false;
+    };
+    POLLING[cpu].store(true, Ordering::SeqCst);
+    loop {
+        if SCHED_GEN.load(Ordering::SeqCst) != seen || ticks() >= NEXT_TIMER.load(Ordering::Relaxed) {
+            break;
+        }
+        if crate::arch::monotonic_ns().map(|now| now.saturating_sub(start) >= IDLE_POLL_NS).unwrap_or(true) {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    POLLING[cpu].store(false, Ordering::SeqCst);
+    SCHED_GEN.load(Ordering::SeqCst) != seen || ticks() >= NEXT_TIMER.load(Ordering::Relaxed)
 }
 
 pub fn with_tasks<R>(f: impl FnOnce(&mut BTreeMap<Pid, alloc::boxed::Box<Task>>) -> R) -> R {
@@ -561,7 +653,11 @@ fn stack_top(kstack: *mut u8) -> u64 {
 }
 
 fn new_task(name: &str, parent: Pid, vt: usize, uid: u32, cwd: &str, kernel_thread: bool) -> Task {
-    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    new_task_as(None, name, parent, vt, uid, cwd, kernel_thread)
+}
+
+fn new_task_as(fixed: Option<Pid>, name: &str, parent: Pid, vt: usize, uid: u32, cwd: &str, kernel_thread: bool) -> Task {
+    let pid = fixed.unwrap_or_else(|| NEXT_PID.fetch_add(1, Ordering::Relaxed));
     let mut task = new_task_with_pid(pid, name, parent, vt, uid, cwd, kernel_thread);
     task.leader = pid;
     task.pgid = pid;
@@ -576,7 +672,11 @@ fn new_task_with_pid(pid: Pid, name: &str, parent: Pid, vt: usize, uid: u32, cwd
         vt,
         uid,
         ruid: uid,
-        root_ticket_until: 0,
+        suid: uid,
+        egid: 0,
+        rgid: 0,
+        sgid: 0,
+        groups: Vec::new(),
         cwd: String::from(cwd),
         state: State::Runnable,
         exit_code: 0,
@@ -587,7 +687,7 @@ fn new_task_with_pid(pid: Pid, name: &str, parent: Pid, vt: usize, uid: u32, cwd
         args: Vec::new(),
         umask: 0o022,
         started: ticks(),
-        termios: crate::syscall::linux::tty::DEFAULT_TERMIOS,
+        termios: crate::tty::DEFAULT_TERMIOS,
         tty_pending: VecDeque::new(),
         tty_line: VecDeque::new(),
         fs_base: 0,
@@ -598,6 +698,8 @@ fn new_task_with_pid(pid: Pid, name: &str, parent: Pid, vt: usize, uid: u32, cwd
         sig_actions: [SigAction::default(); 65],
         sig_mask: 0,
         sig_pending: 0,
+        sig_sender: [0; 65],
+        syscall: u64::MAX,
         altstack: (0, 0, 2),
         alarm_at: 0,
         alarm_interval: 0,
@@ -672,6 +774,8 @@ pub struct UserImage {
     pub exe: String,
     pub env: Vec<String>,
     pub args: Vec<String>,
+    pub set_uid: Option<u32>,
+    pub set_gid: Option<u32>,
 }
 
 pub fn clone_task(thread: bool, aspace: Option<AddressSpace>, frame: &switch::InterruptFrame, fx: &[u8], configure: impl FnOnce(&Task, &Task, &mut Task)) -> Option<Pid> {
@@ -701,17 +805,6 @@ pub fn clone_task(thread: bool, aspace: Option<AddressSpace>, frame: &switch::In
     };
     child.pid = pid;
     child.leader = if thread { leader_pid } else { pid };
-    if thread {
-        let cpu = cpu_id();
-        child.pinned = Some(cpu);
-        with_tasks(|tasks| {
-            for t in tasks.values_mut() {
-                if t.leader == leader_pid {
-                    t.pinned = Some(cpu);
-                }
-            }
-        });
-    }
     child.kstack = kstack;
     child.rsp = context::prepare_return_stack(stack_top(kstack), frame, fx);
     child.aspace = aspace;
@@ -731,14 +824,90 @@ pub fn replace_aspace(new: AddressSpace) -> Option<AddressSpace> {
 }
 
 pub fn spawn_user(name: &str, image: UserImage, parent: Pid, vt: usize, uid: u32, ruid: u32, cwd: &str) -> Option<Pid> {
+    spawn_user_as(None, name, image, parent, vt, uid, ruid, cwd)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub const MAX_GROUPS: usize = 32;
+
+#[derive(Clone, Copy)]
+pub struct Cred {
+    pub uid: u32,
+    pub gid: u32,
+    groups: [u32; MAX_GROUPS],
+    count: u8,
+}
+
+impl Cred {
+    pub const ROOT: Cred = Cred { uid: 0, gid: 0, groups: [0; MAX_GROUPS], count: 0 };
+
+    pub fn of(t: &Task) -> Cred {
+        let mut groups = [0u32; MAX_GROUPS];
+        let count = t.groups.len().min(MAX_GROUPS);
+        groups[..count].copy_from_slice(&t.groups[..count]);
+        Cred { uid: t.uid, gid: t.egid, groups, count: count as u8 }
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.uid == 0
+    }
+
+    pub fn in_group(&self, gid: u32) -> bool {
+        self.gid == gid || self.groups[..self.count as usize].contains(&gid)
+    }
+
+    pub fn allows(&self, owner: u32, group: u32, mode: u16, want: u16) -> bool {
+        if self.uid == 0 {
+            return want & 0o1 == 0 || mode & 0o111 != 0;
+        }
+        let bits = if self.uid == owner {
+            (mode >> 6) & 0o7
+        } else if self.in_group(group) {
+            (mode >> 3) & 0o7
+        } else {
+            mode & 0o7
+        };
+        bits & want == want
+    }
+}
+
+impl From<u32> for Cred {
+    fn from(uid: u32) -> Cred {
+        Cred { uid, gid: u32::MAX, groups: [0; MAX_GROUPS], count: 0 }
+    }
+}
+
+pub fn current_cred() -> Cred {
+    with_current(|t| Cred::of(t))
+}
+
+pub fn real_cred() -> Cred {
+    with_current(|t| Cred { uid: t.ruid, gid: t.rgid, ..Cred::of(t) })
+}
+
+pub fn spawn_user_as(fixed: Option<Pid>, name: &str, image: UserImage, parent: Pid, vt: usize, uid: u32, ruid: u32, cwd: &str) -> Option<Pid> {
+    if fixed.map(exists).unwrap_or(false) {
+        let mut aspace = image.aspace;
+        aspace.destroy();
+        return None;
+    }
     let kstack = alloc_kstack();
     if kstack.is_null() {
         let mut aspace = image.aspace;
         aspace.destroy();
         return None;
     }
-    let mut task = new_task(name, parent, vt, uid, cwd, false);
+    let mut task = new_task_as(fixed, name, parent, vt, uid, cwd, false);
     task.ruid = ruid;
+    if let Some((egid, rgid, groups)) = with_task(parent, |p| (p.egid, p.rgid, p.groups.clone())) {
+        task.egid = image.set_gid.unwrap_or(egid);
+        task.rgid = rgid;
+        task.groups = groups;
+    } else if let Some(g) = image.set_gid {
+        task.egid = g;
+    }
+    task.suid = task.uid;
+    task.sgid = task.egid;
     let inherited: Vec<Option<OpenFile>> = with_tasks(|tasks| match tasks.get(&parent) {
         Some(p) if !p.kernel_thread => (0..3).map(|i| p.fds.get(i).and_then(|f| f.as_ref()).map(|f| f.duplicate())).collect(),
         _ => Vec::new(),
@@ -768,14 +937,18 @@ pub fn finish_switch() {
     let previous = PREVIOUS_PID[cpu].swap(0, Ordering::Relaxed);
     if previous != 0 {
         let mut sched = SCHED.lock();
-        let still_ready = match sched.tasks.get_mut(&previous) {
+        let (still_ready, finished) = match sched.tasks.get_mut(&previous) {
             Some(task) if task.on_cpu == Some(cpu) => {
                 task.on_cpu = None;
-                task.state == State::Runnable
+                (task.state == State::Runnable, task.state == State::Zombie && task.parent == 0)
             }
-            _ => false,
+            _ => (false, false),
         };
-        if still_ready {
+        if finished {
+            let dead = sched.tasks.remove(&previous);
+            drop(sched);
+            drop(dead);
+        } else if still_ready {
             sched.enqueue(previous);
             drop(sched);
             smp::kick_idle(cpu);
@@ -996,6 +1169,7 @@ pub fn wake_futex(leader: Pid, addr: u64, count: usize) -> usize {
 }
 
 pub fn wake_all(flag: u32) {
+    INPUT_SEQ.fetch_add(1, Ordering::Relaxed);
     let woke = without_interrupts(|| {
         let mut sched = SCHED.lock();
         let pids: Vec<Pid> = sched.tasks.iter().filter(|(_, t)| t.state == State::Blocked && t.wait & flag != 0).map(|(pid, _)| *pid).collect();
@@ -1115,7 +1289,7 @@ pub fn exit_current(code: i32) -> ! {
     ipc::cleanup(pid);
     crate::net::cleanup(pid);
     crate::drivers::audio::cleanup(pid);
-    crate::vt::on_process_exit(pid);
+    crate::tty::vt::on_process_exit(pid);
     crate::syscall::close_all_files();
 
     let aspace = with_tasks(|tasks| {
@@ -1146,6 +1320,7 @@ pub fn exit_current(code: i32) -> ! {
     };
     crate::debug_println!("task: pid {} exited with code {}", pid, code);
     wake(parent, WAIT_CHILD);
+    wake_all(WAIT_PIPE);
     crate::syscall::notify_child_exit(parent, pid);
     loop {
         schedule();
@@ -1217,7 +1392,7 @@ pub fn wait_child(child: Pid) -> Option<i32> {
             WaitResult::Exited(code) => return Some(code),
             WaitResult::NoChild => return None,
             WaitResult::Running => {
-                crate::vt::service_pending();
+                crate::tty::vt::service_pending();
                 check_killed();
                 block(WAIT_CHILD, Some(TICK_HZ / 10), input_seq());
             }
@@ -1246,7 +1421,7 @@ fn reap_orphans() {
 fn idle_maintenance(cpu: usize) {
     if bkl::try_acquire() {
         if cpu == 0 {
-            crate::vt::service_pending();
+            crate::tty::vt::service_pending();
             static LAST_TRIM: AtomicU64 = AtomicU64::new(0);
             let now = ticks();
             if now.saturating_sub(LAST_TRIM.load(Ordering::Relaxed)) >= TICK_HZ {
@@ -1265,14 +1440,27 @@ pub fn idle_loop() -> ! {
     let cpu = cpu_id();
     let mut seen = 0u64;
     let mut last_scan = 0u64;
+    let mut active = false;
     loop {
-        let generation = SCHED_GEN.load(Ordering::Relaxed);
+        let generation = SCHED_GEN.load(Ordering::SeqCst);
         let now = ticks();
         if generation != seen || now >= NEXT_TIMER.load(Ordering::Relaxed) || now.saturating_sub(last_scan) >= IDLE_SCAN_TICKS {
+            active = generation != seen;
             seen = generation;
             last_scan = now;
             idle_maintenance(cpu);
             schedule();
+        }
+        if active && smp::count() > 1 {
+            active = false;
+            if idle_poll(cpu, seen) {
+                continue;
+            }
+        }
+        crate::arch::disable_interrupts();
+        if SCHED_GEN.load(Ordering::SeqCst) != seen {
+            crate::arch::enable_interrupts();
+            continue;
         }
         crate::arch::idle_wait();
     }
@@ -1319,6 +1507,10 @@ pub fn list() -> Vec<TaskInfo> {
     })
 }
 
+pub fn wait_state(t: &Task) -> (u32, Option<usize>, u64) {
+    (t.wait, t.on_cpu, t.wake_at)
+}
+
 pub fn exists(pid: Pid) -> bool {
     with_tasks(|tasks| tasks.get(&pid).map(|t| t.state != State::Zombie).unwrap_or(false))
 }
@@ -1338,7 +1530,7 @@ fn slice_expired(cpu: usize) -> bool {
 
 fn preempt_user(cpu: usize) {
     let due = slice_expired(cpu) || NEED_RESCHED[cpu].load(Ordering::Relaxed) || ticks() >= NEXT_TIMER.load(Ordering::Relaxed);
-    if !due && !crate::vt::has_pending() {
+    if !due && !crate::tty::vt::has_pending() {
         return;
     }
     if !bkl::try_acquire() {
@@ -1350,7 +1542,7 @@ fn preempt_user(cpu: usize) {
     if let Some(code) = killed {
         exit_current(code);
     }
-    crate::vt::service_pending();
+    crate::tty::vt::service_pending();
     if due {
         schedule();
     }
@@ -1363,9 +1555,13 @@ pub fn on_tick(cpu: usize, primary: bool, frame: &mut switch::InterruptFrame, fx
         if now % (TICK_HZ / 50) == 0 {
             crate::drivers::usb::poll();
         }
+        if now % TICK_HZ == 0 {
+            crate::hxinit::watch();
+        }
         crate::drivers::virtio::input::poll();
     }
     account_tick(cpu);
+    crate::prof::sample(frame.pc(), CURRENT_PID[cpu].load(Ordering::Relaxed), frame.from_user());
     if frame.from_user() {
         preempt_user(cpu);
         crate::syscall::deliver_from_trap(frame, fx);

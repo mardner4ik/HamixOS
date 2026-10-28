@@ -1,0 +1,16 @@
+pkgname=sqlite
+pkgver=3.46.1
+pkgdesc="SQL database engine"
+source="https://www.sqlite.org/2024/sqlite-autoconf-3460100.tar.gz"
+sha256="67d3fe6d268e6eaddcae3727fce58fcc8e9c53869bdd07a0c61e38ddf2965071"
+builddir="sqlite-autoconf-3460100"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-shared --enable-static --disable-readline --disable-editline
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

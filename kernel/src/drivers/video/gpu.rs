@@ -254,6 +254,7 @@ pub fn adopt(fb: FramebufferInfo) {
     FB_W.store(fb.width, Ordering::SeqCst);
     FB_H.store(fb.height, Ordering::SeqCst);
     *FRAMEBUFFER.lock() = Some(fb);
+    crate::arch::paging::enable_kernel_write_combining(fb.addr, fb.byte_len());
     super::text_mode::cache_framebuffer();
     if !super::text_mode::graphics_owned() {
         super::text_mode::fb_clear_full();
@@ -532,10 +533,7 @@ static HOTPLUGS: AtomicU64 = AtomicU64::new(0);
 pub fn hotplug() {
     HOTPLUGS.fetch_add(1, Ordering::Relaxed);
     super::modes::bump_generation();
-    if let Some(owner) = crate::task::display::owner() {
-        let message = 11u32.to_le_bytes();
-        crate::task::ipc::send(0, owner, &message);
-    }
+    crate::net::netlink::uevent("change", "/devices/virtual/drm/card0", &[("SUBSYSTEM", "drm"), ("DEVNAME", "dri/card0"), ("DEVTYPE", "drm_minor"), ("HOTPLUG", "1")]);
 }
 
 pub fn hotplugs() -> u64 {

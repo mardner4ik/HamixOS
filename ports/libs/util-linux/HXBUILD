@@ -1,0 +1,22 @@
+pkgname=util-linux
+pkgver=2.40.2
+pkgdesc="libuuid from util-linux"
+source="https://www.kernel.org/pub/linux/utils/util-linux/v2.40/util-linux-$pkgver.tar.xz"
+sha256="d78b37a66f5922d70edf3bdfb01a6b33d34ed3c3cafd6628203b2a2b67c8e8b3"
+builddir="util-linux-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static \
+        --disable-all-programs --enable-libuuid --disable-nls --without-systemd --without-python --without-udev \
+        --disable-asciidoc --disable-bash-completion --without-tinfo --without-ncursesw --without-readline
+    make -j"$JOBS" libuuid.la libuuid/uuid.pc
+}
+
+package() {
+    install -Dm755 .libs/libuuid.so.1.3.0 "$pkgdir/usr/lib/libuuid.so.1.3.0"
+    ln -sf libuuid.so.1.3.0 "$pkgdir/usr/lib/libuuid.so.1"
+    ln -sf libuuid.so.1 "$pkgdir/usr/lib/libuuid.so"
+    install -Dm644 libuuid/src/uuid.h "$pkgdir/usr/include/uuid/uuid.h"
+    install -Dm644 libuuid/uuid.pc "$pkgdir/usr/lib/pkgconfig/uuid.pc"
+}

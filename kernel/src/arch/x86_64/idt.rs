@@ -155,7 +155,7 @@ extern "C" fn nmi(frame: &InterruptStackFrame, _ec: u64) {
 extern "C" fn breakpoint(frame: &InterruptStackFrame, _ec: u64) {
     crate::serial_println!("breakpoint at {:#x}", frame.ip);
     if frame.cs & 3 == 3 {
-        kill_faulting_process("breakpoint trap", frame.sp);
+        kill_faulting_process("breakpoint trap", frame.ip, frame.sp);
     }
 }
 
@@ -195,23 +195,20 @@ extern "C" fn general_protection(frame: &InterruptStackFrame, ec: u64) {
     fault("General protection fault", frame, ec);
 }
 
-extern "C" fn page_fault(frame: &InterruptStackFrame, ec: u64) {
+extern "C" fn page_fault(frame: &mut InterruptStackFrame, ec: u64) {
     let addr: u64;
     unsafe { asm!("mov {}, cr2", out(reg) addr, options(nomem, nostack)) };
     let user_mode = frame.cs & 3 == 3;
     let interruptible = user_mode || frame.flags & (1 << 9) != 0;
-    if ec & 1 == 0 && interruptible && crate::arch::paging::is_user_range(addr, 1) && crate::task::current_pid() != 0 && crate::task::is_user_process() {
-        crate::arch::enable_interrupts();
-        let had_lock = crate::task::bkl::held();
-        if !had_lock {
-            crate::task::bkl::acquire();
-        }
-        let handled = crate::syscall::linux::base::lazy_fault(addr);
-        if !had_lock {
-            crate::task::bkl::release();
-        }
-        crate::arch::disable_interrupts();
-        if handled {
+    if ec & 3 == 3 && crate::task::fault::resolve_cow_locked(addr, interruptible) {
+        return;
+    }
+    if ec & 1 == 0 && interruptible && crate::task::fault::user_fault(addr) {
+        return;
+    }
+    if !user_mode && crate::arch::paging::is_user_range(addr, 1) {
+        if let Some(target) = crate::usercopy::fixup(frame.ip) {
+            frame.ip = target;
             return;
         }
     }
@@ -220,10 +217,10 @@ extern "C" fn page_fault(frame: &InterruptStackFrame, ec: u64) {
         frame.ip, addr, ec, frame.cs, frame.sp
     );
     if frame.cs & 3 == 3 {
-        kill_faulting_process("page fault", frame.sp);
+        kill_faulting_process("page fault", frame.ip, frame.sp);
     }
     if crate::arch::paging::is_user_range(addr, 1) && crate::task::current_pid() != 0 && crate::task::is_user_process() {
-        kill_faulting_process("bad user pointer", 0);
+        kill_faulting_process("bad user pointer", frame.ip, 0);
     }
     panic!("Page fault at {:#x} accessing {:#x}, code={:#x}", frame.ip, addr, ec);
 }
@@ -254,18 +251,24 @@ fn fault(name: &str, frame: &InterruptStackFrame, ec: u64) {
         name, frame.ip, ec, frame.cs, frame.ss, frame.sp, frame.flags
     );
     if frame.cs & 3 == 3 {
-        kill_faulting_process(name, frame.sp);
+        kill_faulting_process(name, frame.ip, frame.sp);
     }
     panic!("{} at {:#x}, code={:#x}", name, frame.ip, ec);
 }
 
-fn kill_faulting_process(name: &str, sp: u64) -> ! {
+fn kill_faulting_process(name: &str, ip: u64, sp: u64) -> ! {
     crate::task::bkl::acquire_from_trap();
     let pid = crate::task::current_pid();
     if sp != 0 {
+        if let Some(origin) = crate::task::fault::describe(ip) {
+            crate::serial_println!("fault: pid {} at {}", pid, origin);
+        }
         let words = crate::syscall::user_stack_words(sp, 32);
         let text: alloc::vec::Vec<alloc::string::String> = words.iter().map(|w| alloc::format!("{:x}", w)).collect();
         crate::serial_println!("fault: pid {} stack at {:#x}: {}", pid, sp, text.join(" "));
+        let code = crate::syscall::user_stack_words(ip & !7, 4);
+        let bytes: alloc::vec::Vec<alloc::string::String> = code.iter().flat_map(|w| w.to_le_bytes()).map(|b| alloc::format!("{:02x}", b)).collect();
+        crate::serial_println!("fault: pid {} code at {:#x}: {}", pid, ip & !7, bytes.join(" "));
     }
     let message = alloc::format!("\n\x1b[91msegmentation fault: pid {} ({})\x1b[0m\n", pid, name);
     crate::syscall::emit(2, message.as_bytes());
@@ -298,6 +301,11 @@ extern "C" fn wake_handler(_frame: &InterruptStackFrame, _ec: u64) {
     crate::arch::x86_64::lapic::eoi();
 }
 
+extern "C" fn flush_handler(_frame: &InterruptStackFrame, _ec: u64) {
+    crate::arch::x86_64::smp::service_flush();
+    crate::arch::x86_64::lapic::eoi();
+}
+
 extern "C" fn apic_spurious_handler(_frame: &InterruptStackFrame, _ec: u64) {}
 
 isr_noerr!(isr_divide_by_zero, divide_by_zero);
@@ -322,6 +330,7 @@ isr_noerr!(isr_reserved, reserved_exception);
 isr_noerr!(isr_keyboard, keyboard_handler);
 isr_noerr!(isr_mouse, mouse_handler);
 isr_noerr!(isr_wake, wake_handler);
+isr_noerr!(isr_flush, flush_handler);
 isr_noerr!(isr_apic_error, wake_handler);
 isr_noerr!(isr_apic_spurious, apic_spurious_handler);
 
@@ -441,6 +450,7 @@ pub fn init() {
 
         (*idt_ptr)[crate::arch::x86_64::lapic::TIMER_VECTOR as usize].set_handler(crate::task::switch::lapic_timer_entry as *const () as u64, 0x8E, 0);
         (*idt_ptr)[crate::arch::x86_64::lapic::WAKE_VECTOR as usize].set_handler(isr_wake as *const () as u64, 0x8E, 0);
+        (*idt_ptr)[crate::arch::x86_64::lapic::FLUSH_VECTOR as usize].set_handler(isr_flush as *const () as u64, 0x8E, 0);
         (*idt_ptr)[crate::arch::x86_64::lapic::ERROR_VECTOR as usize].set_handler(isr_apic_error as *const () as u64, 0x8E, 0);
         (*idt_ptr)[crate::arch::x86_64::lapic::SPURIOUS_VECTOR as usize].set_handler(isr_apic_spurious as *const () as u64, 0x8E, 0);
     }

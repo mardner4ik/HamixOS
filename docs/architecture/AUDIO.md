@@ -11,8 +11,8 @@ kernel/src/drivers/audio/
   mod.rs     device trait, mixer, streams, master volume, audiod thread, hxinit unit
   hda.rs     Intel High Definition Audio (every HDA controller: Intel, AMD, NVIDIA, VIA, SiS…)
   ac97.rs    AC'97 (Intel ICH and compatible bus masters, SiS 7012 quirks)
-sdk/hamix_std/src/audio.rs   userspace API
-apps/hxsound                 command line tool
+userland/libs/hxstd/src/audio.rs   userspace API
+userland/services/hxsound                 command line tool
 ```
 
 ## Drivers

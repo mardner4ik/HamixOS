@@ -1,0 +1,5 @@
+description = org.freedesktop.UPower for Linux programs (hx-upower)
+exec = /usr/libexec/hamix/hx-upower
+start = boot
+restart = on-failure
+layer = linux

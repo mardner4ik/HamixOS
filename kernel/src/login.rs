@@ -13,37 +13,6 @@ fn out(text: &str) {
     TEXT_CONSOLE.lock().write_bytes_to(vt, text.as_bytes());
 }
 
-fn read_line(mask: bool) -> String {
-    let mut buf = String::new();
-    loop {
-        match keyboard::read_key_blocking() {
-            Key::Enter => {
-                out("\n");
-                return buf;
-            }
-            Key::Backspace => {
-                if buf.pop().is_some() {
-                    out("\x08");
-                }
-            }
-            Key::Ctrl('c') => {
-                out("^C\n");
-                return String::new();
-            }
-            Key::Char(ch) if ch.is_ascii() && !ch.is_control() && buf.len() < 64 => {
-                buf.push(ch);
-                if mask {
-                    out("*");
-                } else {
-                    let mut tmp = [0u8; 4];
-                    out(ch.encode_utf8(&mut tmp));
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 pub struct LoginConfig {
     pub shell: String,
     pub shell_args: Vec<String>,
@@ -53,7 +22,7 @@ pub struct LoginConfig {
 
 pub fn read_config() -> LoginConfig {
     let mut config = LoginConfig {
-        shell: String::from("/usr/bin/hsh"),
+        shell: String::from("/usr/bin/bash"),
         shell_args: alloc::vec![String::from("-l")],
         desktop: String::from("/usr/bin/hxserver"),
         autostart_desktop: false,
@@ -85,18 +54,13 @@ pub fn read_config() -> LoginConfig {
     config
 }
 
-fn executable(path: &str) -> bool {
-    let guard = fs::VFS.lock();
-    guard.as_ref().and_then(|v| v.resolve(0, path).map(|id| !v.is_dir(id))).unwrap_or(false)
-}
-
 fn run(path: &str, args: &[String], uid: u32, cwd: &str) -> Result<i32, &'static str> {
     let vt = crate::task::current_vt();
     let me = crate::task::current_pid();
     let child = crate::task::elf::spawn(path, args, &crate::task::elf::default_env(uid), me, vt, uid, uid, cwd)?;
-    crate::vt::set_input_owner(vt, child);
+    crate::tty::vt::set_input_owner(vt, child);
     let code = crate::task::wait_child(child).unwrap_or(-1);
-    crate::vt::set_input_owner(vt, 0);
+    crate::tty::vt::set_input_owner(vt, 0);
     Ok(code)
 }
 
@@ -117,58 +81,39 @@ fn banner(vt: usize) {
     out(&format!("\x1b[1;36mHamixOS 0.6\x1b[0m  {}  \x1b[90m(tty{}, {})\x1b[0m\n\n", hostname, vt + 1, mode));
 }
 
-pub fn run_login(vt: usize) -> ! {
+fn run_test(script: &str) -> ! {
+    let shell = read_config().shell;
+    let args = alloc::vec![String::from(script)];
+    let code = match run(&shell, &args, 0, "/") {
+        Ok(code) => code,
+        Err(e) => {
+            out(&format!("hxtest: cannot start {}: {}\n", shell, e));
+            -1
+        }
+    };
+    fs::sync();
+    crate::serial_println!("hxtest: exit {}", code);
+    crate::task::sleep_ticks(crate::task::TICK_HZ / 10);
+    crate::arch::disable_interrupts();
+    crate::arch::platform::poweroff();
     loop {
-        banner(vt);
-        let (user, record) = loop {
-            out("\x1b[96mhamix login:\x1b[0m ");
-            let name = read_line(false);
-            let name = String::from(name.trim());
-            if name.is_empty() {
-                continue;
-            }
-            out("\x1b[96mpassword:\x1b[0m ");
-            let password = read_line(true);
-            crate::users::reload();
-            match crate::users::find_by_name(&name) {
-                Some(record) if crate::users::verify_password(&name, password.trim()) => break (name, record),
-                _ => {
-                    out("\x1b[91mLogin incorrect.\x1b[0m\n\n");
-                    crate::task::sleep_ticks(crate::task::TICK_HZ);
-                }
-            }
-        };
+        crate::arch::hlt();
+    }
+}
 
-        let config = read_config();
-        let home = if executable(&record.home) || fs::VFS.lock().as_ref().map(|v| v.exists(0, &record.home)).unwrap_or(false) {
-            record.home.clone()
-        } else {
-            String::from("/")
-        };
-
-        let _ = user;
-        if config.autostart_desktop && crate::task::display::owner().is_none() && executable(&config.desktop) {
-            if let Err(e) = run(&config.desktop, &[], record.uid, &home) {
-                out(&format!("\x1b[91mdesktop {}: {}\x1b[0m\n", config.desktop, e));
-            }
-            out("\x1b[0m\x0C");
+pub fn run_login(vt: usize) -> ! {
+    if vt == 0 {
+        if let Some(script) = crate::memory::cmdline_value("hxtest") {
+            run_test(&script);
         }
-
-        if !executable(&config.shell) {
-            out(&format!(
-                "\x1b[91mlogin: the shell {} from {} does not exist\x1b[0m\n",
-                config.shell, CONFIG_PATH
-            ));
-            crate::task::sleep_ticks(crate::task::TICK_HZ * 3);
-            continue;
+    }
+    banner(vt);
+    out("\x1b[93mThe init process is not running, so there is no login on this console.\x1b[0m\n");
+    out("The kernel keeps no user accounts: they live in /etc/passwd and /etc/shadow of the root filesystem.\n");
+    out("Press Ctrl+Alt+Del to restart the computer.\n");
+    loop {
+        if let Key::Ctrl('c') = keyboard::read_key_blocking() {
+            out("^C\n");
         }
-        match run(&config.shell, &config.shell_args, record.uid, &home) {
-            Ok(_) => {}
-            Err(e) => {
-                out(&format!("\x1b[91mlogin: cannot start {}: {}\x1b[0m\n", config.shell, e));
-                crate::task::sleep_ticks(crate::task::TICK_HZ * 3);
-            }
-        }
-        fs::sync();
     }
 }

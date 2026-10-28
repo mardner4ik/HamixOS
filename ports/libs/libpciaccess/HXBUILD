@@ -1,0 +1,17 @@
+pkgname=libpciaccess
+pkgver=0.18.1
+pkgdesc="Generic PCI access library (reads /sys/bus/pci)"
+source="https://www.x.org/releases/individual/lib/libpciaccess-$pkgver.tar.xz"
+sha256="4af43444b38adb5545d0ed1c2ce46d9608cc47b31c2387fc5181656765a6fa76"
+builddir="libpciaccess-$pkgver"
+depends="zlib"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dzlib=enabled -Dpci-ids=/usr/share/hwdata -Dc_args="-I$HX_ROOT/usr/include -D_GNU_SOURCE -D__linux__=1"
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

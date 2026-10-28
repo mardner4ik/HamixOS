@@ -1,0 +1,13 @@
+pub const CHAIN: u32 = 0x2f000;
+pub const MBR_COPY: u32 = 0x600;
+pub const BOUNCE: u32 = 0x30000;
+pub const BOUNCE_SIZE: u32 = 0x10000;
+pub const MB_INFO: u32 = 0x40000;
+pub const MB_INFO_SIZE: u32 = 0x10000;
+pub const CONFIG: u32 = 0x50000;
+pub const CONFIG_SIZE: u32 = 0x4000;
+pub const SCRATCH: u32 = 0x54000;
+pub const SCRATCH_SIZE: u32 = 0x2000;
+pub const LOW: u32 = 0x56000;
+pub const MODES: u32 = 0x57000;
+pub const KERNEL_MIN: u32 = 0x100000;

@@ -1,0 +1,3 @@
+get_nprocs, get_nprocs_conf, get_phys_pages and get_avphys_pages (glibc <sys/sysinfo.h>)
+on top of sysconf. Applied in hxlibc/options/linux/generic/sys-sysinfo.cpp.
+SI_LOAD_SHIFT (Linux UAPI) in <sys/sysinfo.h>.

@@ -4,8 +4,8 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use hamix_std::audio::{self, Stream};
-use hamix_std::{entry, env, eprintln, fs, println, sys};
+use hxstd::audio::{self, Stream};
+use hxstd::{entry, env, eprintln, fs, println, sys};
 
 fn usage() -> i32 {
     println!("usage: hxsound info");

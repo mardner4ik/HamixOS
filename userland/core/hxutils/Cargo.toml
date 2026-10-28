@@ -1,0 +1,15 @@
+[package]
+name = "hxutils"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+hxstd = { path = "../../libs/hxstd" }
+
+[package.metadata.hamix]
+aliases = ["mkfs.hext=mkfs", "/bin/sh=sh", "/bin/bash=sh"]
+libexec = ["sh", "hxperm-exec", "hxsysconf"]
+setuid = ["sudo", "su", "hxperm-exec", "hxsysconf", "hxmount"]

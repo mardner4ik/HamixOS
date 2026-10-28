@@ -1,0 +1,19 @@
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin:/var/lib/hamix/commands/bin
+export PAGER=less
+export EDITOR=hed
+umask 022
+
+if [ -d /etc/profile.d ]; then
+    for script in /etc/profile.d/*.sh; do
+        [ -r "$script" ] && . "$script"
+    done
+    unset script
+fi
+
+if [ -n "$BASH_VERSION" ] && [ -n "$PS1" ] && [ -r /etc/bash.bashrc ]; then
+    . /etc/bash.bashrc
+fi
+
+if [ -n "$BASH_VERSION" ] && [ -n "$PS1" ] && [ -r /etc/motd ] && shopt -q login_shell; then
+    cat /etc/motd
+fi

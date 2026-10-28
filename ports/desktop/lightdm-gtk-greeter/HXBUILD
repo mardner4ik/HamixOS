@@ -1,0 +1,31 @@
+pkgname=lightdm-gtk-greeter
+pkgver=2.0.9
+pkgdesc="GTK+ greeter for LightDM"
+source="https://github.com/Xubuntu/lightdm-gtk-greeter/releases/download/lightdm-gtk-greeter-$pkgver/lightdm-gtk-greeter-$pkgver.tar.gz"
+sha256="c8fdf198aa9a3f9d0dad0b48dfe23c2277b79107e8fcfc62965290f1081f645d"
+builddir="lightdm-gtk-greeter-$pkgver"
+depends="lightdm gtk3 libxklavier"
+
+build() {
+    mkdir -p hx-tools
+    cat > hx-tools/xdt-csource <<'PY'
+#!/usr/bin/env python3
+import sys
+name = next(a.split('=', 1)[1] for a in sys.argv[1:] if a.startswith('--name='))
+data = open([a for a in sys.argv[1:] if not a.startswith('--')][-1], 'rb').read()
+body = ''.join('\\%03o' % b for b in data)
+print('static const char %s[] = "%s";' % (name, body))
+print('static const unsigned %s_length = %du;' % (name, len(data)))
+PY
+    chmod +x hx-tools/xdt-csource
+    export PATH="$PWD/hx-tools:$PATH:$HX_ROOT/usr/bin"
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --libexecdir=/usr/libexec \
+        --disable-nls --disable-indicator-services-command --disable-libindicator --disable-at-spi-command \
+        --enable-kill-on-sigterm --with-libxklavier
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/usr/share/doc"
+}

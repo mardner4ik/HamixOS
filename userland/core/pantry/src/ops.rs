@@ -3,11 +3,11 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use hamix_std::{fs, println, sys};
+use hxstd::{fs, println, sys};
 
 use crate::archive::{self, Kind};
 use crate::crypto;
-use crate::db::{self, Db, Installed, LINK_MAGIC, SYSROOT};
+use crate::db::{self, Db, Installed, LINK_MAGIC};
 use crate::http;
 use crate::index::{compare_versions, parse_dep, provided_name, Dep, Pkg};
 use crate::repo::Catalog;
@@ -70,6 +70,7 @@ pub fn provider(cat: &Catalog, dep: &Dep) -> Option<usize> {
     if best.is_some() {
         return best;
     }
+    let preferred = cat.prefer.get(&dep.name);
     for &i in cat.by_provide.get(&dep.name).map(|v| v.as_slice()).unwrap_or(&[]) {
         let p = &cat.pkgs[i];
         if !provides_dep(&p.name, &p.version, &p.provides, dep) {
@@ -79,7 +80,8 @@ pub fn provider(cat: &Catalog, dep: &Dep) -> Option<usize> {
             None => true,
             Some(b) => {
                 let q = &cat.pkgs[b];
-                p.priority > q.priority || (p.priority == q.priority && better(cat, i, b))
+                let (mine, theirs) = (preferred == Some(&p.name), preferred == Some(&q.name));
+                (mine && !theirs) || (mine == theirs && (p.priority > q.priority || (p.priority == q.priority && better(cat, i, b))))
             }
         };
         if wins {
@@ -222,8 +224,14 @@ fn is_script(name: &str) -> bool {
     name.starts_with('.') && (name.ends_with("-install") || name.ends_with("-upgrade") || name.ends_with("-deinstall") || name == ".trigger")
 }
 
-fn target_path(rel: &str) -> String {
-    format!("{}/{}", SYSROOT, rel)
+pub const LINUX_ROOT: &str = "/linux";
+
+pub fn root_of(layer: &str) -> &'static str {
+    if layer == "native" { "" } else { LINUX_ROOT }
+}
+
+fn target_path(layer: &str, rel: &str) -> String {
+    format!("{}/{}", root_of(layer), rel.trim_start_matches('/'))
 }
 
 pub fn fetch_verified(cat: &Catalog, pkg: &Pkg) -> Result<Vec<u8>, String> {
@@ -267,7 +275,7 @@ fn displace(db: &mut Db, name: &str, replacement: &str, changed: &mut BTreeSet<S
     println!("  replacing {} {} with {}", pkg.name, pkg.version, replacement);
     scripts::run(&pkg.name, ".pre-deinstall", &[&pkg.version]);
     for file in pkg.files.iter().rev() {
-        sys::unlink(&target_path(file));
+        sys::unlink(&target_path(&pkg.layer, file));
         changed.insert(scripts::changed_dir(file));
     }
     scripts::run(&pkg.name, ".post-deinstall", &[&pkg.version]);
@@ -287,6 +295,7 @@ fn may_take_over(replaces: &[String], pkg: &Pkg, owner: &Installed) -> bool {
 }
 
 pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTreeSet<String>) -> Result<(), String> {
+    let layer = cat.repos[cat.pkgs[index].repo].layer.clone();
     let pkg = &cat.pkgs[index];
     for stale in displaced_by(db, &pkg.name, &pkg.provides) {
         displace(db, &stale, &pkg.name, changed);
@@ -338,8 +347,13 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
         }
     }
     let mut taken: Vec<(String, String)> = Vec::new();
+    let mut native: BTreeSet<String> = BTreeSet::new();
     for (path, kind) in &listing {
         if *kind == Kind::Dir || *kind == Kind::Other {
+            continue;
+        }
+        if db.owner_of(path).is_none() && sys::stat(&target_path(&layer, path)).is_ok() {
+            native.insert(path.clone());
             continue;
         }
         if let Some(owner) = db.owner_of(path) {
@@ -379,7 +393,11 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
         let mut write = |event: archive::TarEvent| -> bool {
             match event {
                 archive::TarEvent::Begin(entry) => {
-                    let dest = target_path(&entry.path);
+                    let dest = target_path(&layer, &entry.path);
+                    if entry.kind != Kind::Dir && native.contains(&entry.path) {
+                        skipped_protected.push(entry.path.clone());
+                        return true;
+                    }
                     match &entry.kind {
                         Kind::Dir => {
                             db::mkdir_p(&dest);
@@ -412,7 +430,7 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
                             files.push(entry.path.clone());
                         }
                         Kind::Hardlink(target) => {
-                            let Some(data) = fs::read(&target_path(target)) else {
+                            let Some(data) = fs::read(&target_path(&layer, target)) else {
                                 failure = Some(format!("{}: hard link target {} missing", pkg.name, target));
                                 return false;
                             };
@@ -463,7 +481,7 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
     }
     if let Some(old) = &previous {
         for stale in old.files.iter().filter(|f| !files.contains(f)) {
-            sys::unlink(&target_path(stale));
+            sys::unlink(&target_path(&layer, stale));
             changed.insert(scripts::changed_dir(stale));
         }
     }
@@ -471,7 +489,11 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
         changed.insert(scripts::changed_dir(file));
     }
     if !skipped_protected.is_empty() {
-        println!("  kept HamixOS versions of /{}", skipped_protected.join(", /"));
+        if skipped_protected.len() > 6 {
+            println!("  kept {} HamixOS file(s) that were already there (/{}, ...)", skipped_protected.len(), skipped_protected[..6].join(", /"));
+        } else {
+            println!("  kept HamixOS versions of /{}", skipped_protected.join(", /"));
+        }
     }
     match &old_version {
         Some(old) => scripts::run(&pkg.name, ".post-upgrade", &[&pkg.version, old]),
@@ -488,11 +510,25 @@ pub fn install_one(cat: &Catalog, db: &mut Db, index: usize, changed: &mut BTree
         files,
         scripts,
         triggers,
+        layer: cat.repos[pkg.repo].layer.clone(),
     });
     if !db.save() {
         return Err(String::from("cannot save the package database"));
     }
     Ok(())
+}
+
+pub const HOOKS_DIR: &str = "/etc/pantry/hooks.d";
+
+pub fn run_hooks() {
+    let mut hooks: Vec<String> = sys::read_dir(HOOKS_DIR).unwrap_or_default().into_iter().filter(|e| !e.is_dir).map(|e| format!("{}/{}", HOOKS_DIR, e.name)).collect();
+    hooks.sort();
+    for hook in hooks {
+        let pid = sys::spawn::<&str>(&hook, &[], 0);
+        if pid > 0 {
+            sys::waitpid(pid, false);
+        }
+    }
 }
 
 pub fn run_plan(cat: &Catalog, db: &mut Db, order: &[usize]) -> Result<(), String> {
@@ -504,13 +540,14 @@ pub fn run_plan(cat: &Catalog, db: &mut Db, order: &[usize]) -> Result<(), Strin
     let mut changed = BTreeSet::new();
     let mut result = Ok(());
     for (n, &i) in order.iter().enumerate() {
-        hamix_std::print!("({}/{}) ", n + 1, order.len());
+        hxstd::print!("({}/{}) ", n + 1, order.len());
         if let Err(e) = install_one(cat, db, i, &mut changed) {
             result = Err(e);
             break;
         }
     }
     scripts::run_triggers(db, &changed);
+    run_hooks();
     result
 }
 
@@ -583,7 +620,7 @@ pub fn remove(db: &mut Db, names: &[String]) -> Result<(), String> {
             println!("Removing {} {}", pkg.name, pkg.version);
             scripts::run(&pkg.name, ".pre-deinstall", &[&pkg.version]);
             for file in pkg.files.iter().rev() {
-                sys::unlink(&target_path(file));
+                sys::unlink(&target_path(&pkg.layer, file));
                 changed.insert(scripts::changed_dir(file));
             }
             scripts::run(&pkg.name, ".post-deinstall", &[&pkg.version]);
@@ -591,6 +628,7 @@ pub fn remove(db: &mut Db, names: &[String]) -> Result<(), String> {
         }
     }
     scripts::run_triggers(db, &changed);
+    run_hooks();
     if db.save() { Ok(()) } else { Err(String::from("cannot save the package database")) }
 }
 
@@ -607,6 +645,105 @@ pub fn upgrades(cat: &Catalog, db: &Db) -> Vec<(String, String, String)> {
 }
 
 pub fn owner(db: &Db, path: &str) -> Option<String> {
-    let rel = path.trim_start_matches(SYSROOT).trim_start_matches('/').to_string();
+    let rel = path.trim_start_matches('/').to_string();
     db.owner_of(&rel).map(|p| p.name.clone())
+}
+
+pub fn remove_layer(db: &mut Db, layer: &str) -> Result<usize, String> {
+    let names: Vec<String> = db.packages.iter().filter(|p| p.layer == layer && !p.is_system()).map(|p| p.name.clone()).collect();
+    if names.is_empty() {
+        return Ok(0);
+    }
+    let removing: BTreeSet<String> = names.iter().cloned().collect();
+    if let Some((what, by)) = needed_by(db, &removing) {
+        return Err(format!("cannot remove the {} layer: {} (layer {}) needs {}", layer, by, db.find(&by).map(|p| p.layer.as_str()).unwrap_or("?"), what));
+    }
+    remove(db, &names).map(|_| names.len())
+}
+
+pub fn lint(db: &Db) -> Vec<String> {
+    let mut problems = Vec::new();
+    for pkg in db.packages.iter().filter(|p| p.layer == "native") {
+        for token in &pkg.depends {
+            let dep = parse_dep(token);
+            if dep.conflict {
+                continue;
+            }
+            let providers: Vec<&Installed> = db.packages.iter().filter(|q| provides_dep(&q.name, &q.version, &q.provides, &dep)).collect();
+            if !providers.is_empty() && providers.iter().all(|q| q.layer == "linux") {
+                problems.push(format!("{} (native) depends on {} which only the Linux layer provides ({})", pkg.name, token, providers.iter().map(|q| q.name.as_str()).collect::<Vec<_>>().join(", ")));
+            }
+        }
+    }
+    problems
+}
+
+fn move_file(old: &str, new: &str, mode: u32, legacy_prefix: &str, moved: &mut usize, kept: &mut usize) {
+    if sys::stat(new).is_ok() {
+        sys::unlink(old);
+        *kept += 1;
+        return;
+    }
+    db::mkdir_p(db::parent(new));
+    let head = fs::read_prefix(old, 64).unwrap_or_default();
+    let legacy_shebang = !legacy_prefix.is_empty() && head.starts_with(b"#!") && head[2..].starts_with(legacy_prefix.as_bytes());
+    if legacy_shebang {
+        if let Some(mut data) = fs::read(old) {
+            data.drain(2..2 + legacy_prefix.len());
+            if db::write_file(new, &data) {
+                sys::chmod(new, mode.max(0o644));
+                sys::unlink(old);
+            }
+        }
+    } else if sys::rename(old, new) < 0 {
+        if let Some(data) = fs::read(old) {
+            if db::write_file(new, &data) {
+                sys::chmod(new, mode.max(0o644));
+                sys::unlink(old);
+            }
+        }
+    }
+    *moved += 1;
+}
+
+fn migrate_dir(rel: &str, moved: &mut usize, kept: &mut usize) {
+    let old_dir = format!("{}{}", db::LEGACY_SYSROOT, rel);
+    let Some(entries) = sys::read_dir(&old_dir) else {
+        return;
+    };
+    for entry in entries {
+        let child = format!("{}/{}", rel, entry.name);
+        let old = format!("{}{}", db::LEGACY_SYSROOT, child);
+        if entry.is_dir {
+            migrate_dir(&child, moved, kept);
+            sys::unlink(&old);
+            continue;
+        }
+        move_file(&old, &format!("{}{}", LINUX_ROOT, child), entry.mode, db::LEGACY_SYSROOT, moved, kept);
+    }
+}
+
+pub fn migrate(db: &Db) -> (usize, usize) {
+    let mut moved = 0;
+    let mut kept = 0;
+    if sys::stat(db::LEGACY_SYSROOT).is_ok() {
+        migrate_dir("", &mut moved, &mut kept);
+        sys::unlink(db::LEGACY_SYSROOT);
+    }
+    for pkg in db.packages.iter().filter(|p| p.layer != "native" && !p.is_system()) {
+        for file in &pkg.files {
+            let old = format!("/{}", file.trim_start_matches('/'));
+            let Ok(stat) = sys::stat(&old) else {
+                continue;
+            };
+            if stat.is_dir() {
+                continue;
+            }
+            move_file(&old, &target_path(&pkg.layer, file), stat.mode, "", &mut moved, &mut kept);
+        }
+    }
+    if moved + kept > 0 {
+        sys::sync();
+    }
+    (moved, kept)
 }

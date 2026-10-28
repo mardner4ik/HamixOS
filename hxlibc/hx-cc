@@ -1,0 +1,91 @@
+#!/bin/sh
+set -e
+arch="${HX_ARCH:-x86_64}"
+here="$(cd "$(dirname "$0")" && pwd)"
+sysroot="${HXLIBC_SYSROOT:-$here/../out/hxlibc/$arch/sysroot}"
+cxxroot="${HX_CXX_ROOT:-$here/../out/hx-ports/$arch/root}"
+compiler=clang
+cxx=0
+case "$(basename "$0")" in
+    *c++*|*cxx*) compiler=clang++; cxx=1 ;;
+esac
+if [ ! -f "$sysroot/usr/lib/libhxc.so" ]; then
+    echo "hx-cc: no hxlibc sysroot at $sysroot (run: cargo xtask hxlibc-build --arch $arch)" >&2
+    exit 1
+fi
+PATH="$here/cross/bin:$PATH"
+if ! command -v gcc > /dev/null 2>&1 && [ -x "$here/../out/hxlibc/host-bin/gcc" ]; then
+    PATH="$here/../out/hxlibc/host-bin:$PATH"
+fi
+export PATH
+resource="$(clang -print-resource-dir)/include"
+if [ ! -f "$resource/stddef.h" ] && [ -f "$here/../out/hxlibc/clang-include/stddef.h" ]; then
+    resource="$here/../out/hxlibc/clang-include"
+fi
+if [ -f "$sysroot/usr/lib/libclang_rt.builtins-$arch.a" ]; then
+    builtins="$sysroot/usr/lib/libclang_rt.builtins-$arch.a"
+else
+    builtins="$(clang --target="$arch-unknown-linux-gnu" --rtlib=compiler-rt -print-libgcc-file-name)"
+fi
+link=1
+shared=0
+cxxinc=""
+cxxlibs=""
+if [ "$cxx" = 1 ] && [ -z "$HX_NO_CXX_RUNTIME" ] && [ -d "$cxxroot/usr/include/c++/v1" ]; then
+    cxxinc="-isystem $cxxroot/usr/include/c++/v1"
+    cxxlibs="-L$cxxroot/usr/lib -lc++ -lc++abi -lunwind"
+fi
+for a in "$@"; do
+    case "$a" in
+        -nostdlib++|-nodefaultlibs) cxxlibs="" ;;
+    esac
+done
+for a in "$@"; do
+    case "$a" in
+        -c|-S|-E|-M|-MM|-fsyntax-only) link=0 ;;
+        -shared) shared=1 ;;
+        -r) link=2 ;;
+        @*)
+            if [ -f "${a#@}" ]; then
+                grep -qE '(^|[[:space:]])-shared($|[[:space:]])' "${a#@}" && shared=1
+                grep -qE '(^|[[:space:]])-c($|[[:space:]])' "${a#@}" && link=0
+            fi
+            ;;
+    esac
+done
+archflags=""
+if [ "$arch" = riscv64 ]; then
+    archflags="-march=rv64gc -mabi=lp64d"
+fi
+flags="--target=$arch-unknown-hamix $archflags -nostdinc $cxxinc -isystem $sysroot/usr/include -isystem $resource -fPIC -D__hamix__ -D__unix__=1 -D__unix=1"
+if [ "$link" = 0 ]; then
+    exec "$compiler" $flags "$@"
+fi
+if [ "$link" = 2 ]; then
+    exec "$compiler" $flags $([ "$arch" = riscv64 ] && echo --target=riscv64-unknown-linux-gnu) -fuse-ld=lld -nostdlib "$@"
+fi
+filtered=""
+for a in "$@"; do
+    case "$a" in
+        -Wa,*) ;;
+        *) filtered="$filtered $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")" ;;
+    esac
+done
+eval "set -- $filtered"
+linktarget=""
+if [ "$arch" = riscv64 ]; then
+    linktarget="--target=riscv64-unknown-linux-gnu"
+fi
+hostld=""
+if [ "$(uname -s)" = OpenBSD ]; then
+    hostld="-Wl,--no-execute-only"
+fi
+common="$linktarget $hostld -fuse-ld=lld -nostdlib -Wl,-z,max-page-size=4096 -Wl,--build-id=none -Wl,--as-needed -L$sysroot/usr/lib"
+if [ "$shared" = 1 ]; then
+    exec "$compiler" $flags $common "$@" $cxxlibs -lhxc "$builtins"
+fi
+exec "$compiler" $flags $common -pie -Wl,--dynamic-linker=/lib/ld.hx \
+    "$sysroot/usr/lib/Scrt1.o" "$sysroot/usr/lib/crti.o" \
+    "$@" \
+    $cxxlibs -lhxc "$builtins" \
+    "$sysroot/usr/lib/crtn.o"

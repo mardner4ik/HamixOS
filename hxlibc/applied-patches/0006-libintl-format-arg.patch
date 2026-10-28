@@ -1,0 +1,28 @@
+--- a/options/intl/include/libintl.h
++++ b/options/intl/include/libintl.h
+@@ -8,16 +8,19 @@
+ 
+ #ifndef __MLIBC_ABI_ONLY
+ 
+-char *gettext(const char *msgid);
+-char *dgettext(const char *domainname, const char *msgid);
++char *gettext(const char *msgid) __attribute__((__format_arg__(1)));
++char *dgettext(const char *domainname, const char *msgid) __attribute__((__format_arg__(2)));
+ char *dcgettext(const char *domainname, const char *msgid,
+-		int category);
++		int category) __attribute__((__format_arg__(2)));
+ 
+-char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n);
++char *ngettext(const char *msgid, const char *msgid_plural, unsigned long int n)
++		__attribute__((__format_arg__(1))) __attribute__((__format_arg__(2)));
+ char *dngettext(const char *domainname, const char *msgid,
+-		const char *msgid_plural, unsigned long int n);
++		const char *msgid_plural, unsigned long int n)
++		__attribute__((__format_arg__(2))) __attribute__((__format_arg__(3)));
+ char *dcngettext(const char *domainname, const char *msgid,
+-		const char *msgid_plural, unsigned long int n, int category);
++		const char *msgid_plural, unsigned long int n, int category)
++		__attribute__((__format_arg__(2))) __attribute__((__format_arg__(3)));
+ 
+ char *textdomain(const char *domainname);
+ char *bindtextdomain(const char *domainname, const char *dirname);

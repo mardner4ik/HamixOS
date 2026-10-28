@@ -1,0 +1,21 @@
+pkgname=fontconfig
+pkgver=2.15.0
+pkgdesc="Font configuration and matching library"
+source="https://www.freedesktop.org/software/fontconfig/release/fontconfig-$pkgver.tar.xz https://ftp.gnu.org/gnu/gperf/gperf-3.1.tar.gz"
+sha256="63a0658d0e06e0fa886106452b58ef04f21f58202ea02a94c39de0d3335d7c0e 588546b945bba4b70b6a3a616e80b4ab466e3f33024a352fc2198112cdbb3ae2"
+builddir="fontconfig-$pkgver"
+depends="freetype expat"
+
+build() {
+    (cd "$srcdir/gperf-3.1" && env -u CFLAGS -u CPPFLAGS -u CXXFLAGS -u LDFLAGS CC=gcc CXX=g++ CXXFLAGS="-O2 -std=gnu++11" \
+        ./configure --prefix="$srcdir/host" >/dev/null && make -j"$JOBS" >/dev/null && make install >/dev/null)
+    export PATH="$srcdir/host/bin:$PATH"
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Ddoc=disabled -Dtests=disabled -Dnls=disabled -Dcache-build=disabled \
+        -Diconv=disabled -Dtools=enabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

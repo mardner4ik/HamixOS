@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use super::{SA_ONSTACK, SA_RESTORER, SS_DISABLE, SS_ONSTACK};
-use crate::syscall::{copy_out, user_slice};
+use crate::usercopy::{copy_out, user_slice};
 use crate::task::switch::InterruptFrame;
 use crate::task::{self, SigAction};
 
@@ -19,6 +19,7 @@ const SIGMASK: usize = MCONTEXT + 256;
 const UC_SIZE: usize = SIGMASK + 8;
 const INFO_OFFSET: u64 = UC_OFFSET + UC_SIZE as u64;
 const FRAME_SIZE: u64 = INFO_OFFSET + 128;
+const CANONICAL_USER_END: u64 = 0x0000_8000_0000_0000;
 
 fn save_context(frame: &InterruptFrame, uc: &mut [u8], fpstate: u64, mask: u64, altstack: (u64, u64, u32), on_alt: bool) {
     put_u64(uc, 16, altstack.0);
@@ -37,8 +38,8 @@ fn save_context(frame: &InterruptFrame, uc: &mut [u8], fpstate: u64, mask: u64, 
     put_u64(uc, SIGMASK, mask);
 }
 
-pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigAction, mask: u64, altstack: (u64, u64, u32)) -> bool {
-    if action.flags & SA_RESTORER == 0 || action.restorer == 0 {
+pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigAction, mask: u64, altstack: (u64, u64, u32), sender: (u32, u32)) -> bool {
+    if action.flags & SA_RESTORER == 0 || action.restorer == 0 || action.handler >= CANONICAL_USER_END {
         return false;
     }
     let on_alt = altstack.2 & SS_DISABLE == 0 && frame.rsp > altstack.0 && frame.rsp <= altstack.0 + altstack.1;
@@ -55,7 +56,8 @@ pub fn setup(frame: &mut InterruptFrame, fx: *mut u8, sig: u32, action: &SigActi
     save_context(frame, &mut raw[UC_OFFSET as usize..UC_OFFSET as usize + UC_SIZE], fpstate, mask, altstack, on_alt);
     let info = &mut raw[INFO_OFFSET as usize..];
     info[0..4].copy_from_slice(&sig.to_le_bytes());
-    info[16..20].copy_from_slice(&(task::current_pid()).to_le_bytes());
+    info[16..20].copy_from_slice(&sender.0.to_le_bytes());
+    info[20..24].copy_from_slice(&sender.1.to_le_bytes());
     if copy_out(sp, FRAME_SIZE, &raw) < 0 {
         return false;
     }
@@ -74,6 +76,9 @@ pub fn restore(frame: &mut InterruptFrame, fx: *mut u8) -> Option<u64> {
     let uc_addr = base + UC_OFFSET;
     let raw: Vec<u8> = user_slice(uc_addr, UC_SIZE as u64).ok()?.to_vec();
     let reg = |i: usize| get_u64(&raw, MCONTEXT + i * 8);
+    if reg(16) >= CANONICAL_USER_END {
+        return None;
+    }
     frame.r8 = reg(0);
     frame.r9 = reg(1);
     frame.r10 = reg(2);

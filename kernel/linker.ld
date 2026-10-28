@@ -7,6 +7,9 @@ SECTIONS {
         KEEP(*(.multiboot_header))
     }
 
+    . = ALIGN(4096);
+    __text_start = .;
+
     .bootstrap ALIGN(4096) : {
         *(.bootstrap .bootstrap.*)
     }
@@ -15,9 +18,15 @@ SECTIONS {
         *(.text .text.*)
     }
 
+    . = ALIGN(4096);
+    __text_end = .;
+
     .rodata ALIGN(4096) : {
         *(.rodata .rodata.*)
     }
+
+    . = ALIGN(4096);
+    __data_start = .;
 
     .data ALIGN(4096) : {
         *(.data .data.*)

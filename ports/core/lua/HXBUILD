@@ -1,0 +1,20 @@
+pkgname=lua
+pkgver=5.4.7
+pkgdesc="Lua interpreter"
+source="https://www.lua.org/ftp/lua-$pkgver.tar.gz"
+sha256="9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30"
+builddir="lua-$pkgver"
+depends=""
+
+build() {
+    make -j"$JOBS" -C src CC="$CC" AR="$AR rcu" RANLIB="$RANLIB" MYCFLAGS="-DLUA_USE_POSIX" MYLIBS="" lua luac
+}
+
+package() {
+    install -Dm755 src/lua "$pkgdir/usr/bin/lua"
+    install -Dm755 src/luac "$pkgdir/usr/bin/luac"
+    install -Dm644 src/liblua.a "$pkgdir/usr/lib/liblua.a"
+    for h in lua.h luaconf.h lualib.h lauxlib.h lua.hpp; do
+        install -Dm644 "src/$h" "$pkgdir/usr/include/$h"
+    done
+}

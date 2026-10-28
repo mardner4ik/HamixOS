@@ -16,11 +16,12 @@ basename dirname pwd env printenv uname id whoami groups hostname date sleep usl
 md5sum sha1sum sha256sum sha512sum base64 hexdump od xxd rev tac nl fold expand unexpand cmp diff tee
 touch mkdir rmdir rm cp mv ln chmod chown realpath readlink which expr test cal factor free uptime ps
 strings dd truncate split paste comm shuf mktemp nproc tty stty clear reset less more vi hd sum cksum
-gzip gunzip zcat bzip2 bunzip2 bzcat xz unxz xzcat tar unzip cpio wget nc nslookup ping sh ash"
+gzip gunzip zcat bzip2 bunzip2 bzcat xz unxz xzcat tar unzip cpio wget nc nslookup ping sh ash
+addgroup adduser delgroup deluser"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SYSROOT="$REPO_DIR/overlay/opt/linux"
+SYSROOT="$REPO_DIR/layers/linux/root"
 WORK="${WORK_DIR:-$REPO_DIR/target/linux-sysroot}"
 PKG_ROOT="$WORK/root"
 
@@ -33,9 +34,14 @@ for pkg in "musl-$MUSL_VERSION" "musl-dev-$MUSL_VERSION" "linux-headers-$HEADERS
     tar xzf "$WORK/$pkg.apk" -C "$PKG_ROOT" 2>/dev/null
 done
 
+DRM_INCLUDE="$WORK/drm-include"
+mkdir -p "$DRM_INCLUDE"
+rm -rf "$DRM_INCLUDE/drm"
+cp -r "${HOST_DRM_HEADERS:-/usr/include/drm}" "$DRM_INCLUDE/drm"
+
 CC="${CC:-clang}"
 RESOURCE_INCLUDE="$("$CC" -print-resource-dir)/include"
-CFLAGS=(--target=x86_64-linux-musl -nostdinc -isystem "$PKG_ROOT/usr/include" -isystem "$RESOURCE_INCLUDE" -O2 -fPIE -fuse-ld=lld -nostdlib)
+CFLAGS=(--target=x86_64-linux-musl -nostdinc -isystem "$PKG_ROOT/usr/include" -isystem "$DRM_INCLUDE" -isystem "$RESOURCE_INCLUDE" -O2 -fPIE -fuse-ld=lld -nostdlib)
 LIB="$PKG_ROOT/usr/lib"
 
 mkdir -p "$SYSROOT/lib" "$SYSROOT/bin"
@@ -99,10 +105,7 @@ fi
 install -m 755 "$BUSYBOX_SRC/busybox" "$SYSROOT/bin/busybox"
 install -m 755 "$PKG_ROOT/bin/busybox" "$SYSROOT/bin/busybox-dynamic"
 
-mkdir -p "$SYSROOT/etc"
-printf 'root:x:0:\nuser:x:1000:\n' > "$SYSROOT/etc/group"
-
-PROVIDED="$REPO_DIR/overlay/etc/pantry/provided"
+PROVIDED="$REPO_DIR/layers/linux/overlay/etc/pantry/provided"
 mkdir -p "$(dirname "$PROVIDED")"
 cat > "$PROVIDED" <<PROVIDED_EOF
 P:musl
@@ -122,7 +125,7 @@ p:/bin/sh cmd:sh=$BUSYBOX_VERSION-r99
 PROVIDED_EOF
 
 for applet in $BUSYBOX_APPLETS; do
-    printf '#!/opt/linux/bin/busybox\n' > "$SYSROOT/bin/$applet"
+    printf '#!/bin/busybox\n' > "$SYSROOT/bin/$applet"
     chmod 755 "$SYSROOT/bin/$applet"
 done
 

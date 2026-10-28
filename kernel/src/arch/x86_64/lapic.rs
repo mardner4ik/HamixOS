@@ -20,6 +20,7 @@ const REG_TIMER_DIVIDE: u64 = 0x3E0;
 
 pub const TIMER_VECTOR: u8 = 0xF0;
 pub const WAKE_VECTOR: u8 = 0xF1;
+pub const FLUSH_VECTOR: u8 = 0xF2;
 pub const ERROR_VECTOR: u8 = 0xFE;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 

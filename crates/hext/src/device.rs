@@ -11,6 +11,24 @@ pub trait BlockDevice {
     fn sectors(&self) -> u64;
 }
 
+impl<D: BlockDevice + ?Sized> BlockDevice for &mut D {
+    fn read(&mut self, sector: u64, buf: &mut [u8]) -> Result<(), Error> {
+        (**self).read(sector, buf)
+    }
+
+    fn write(&mut self, sector: u64, buf: &[u8]) -> Result<(), Error> {
+        (**self).write(sector, buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Error> {
+        (**self).flush()
+    }
+
+    fn sectors(&self) -> u64 {
+        (**self).sectors()
+    }
+}
+
 pub struct MemDevice {
     base: *mut u8,
     len: usize,

@@ -2,7 +2,7 @@ use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 #[cfg(target_arch = "x86_64")]
@@ -17,6 +17,8 @@ pub const HANDLED: i32 = 1;
 
 pub const STALL_MS: u64 = 250;
 
+pub const STORM_LIMIT: u32 = 20_000;
+
 pub type Handler = extern "C" fn(*mut c_void) -> i32;
 pub type Work = extern "C" fn(*mut c_void);
 
@@ -26,6 +28,7 @@ pub struct Line {
     pub handler: Handler,
     pub context: u64,
     pub legacy: Option<u8>,
+    pub gsi: Option<u32>,
 }
 
 struct Job {
@@ -41,6 +44,31 @@ static SPURIOUS: AtomicU64 = AtomicU64::new(0);
 static WORKED: AtomicU64 = AtomicU64::new(0);
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static UNHANDLED: [AtomicU32; VECTORS] = [const { AtomicU32::new(0) }; VECTORS];
+static STORMED: AtomicU32 = AtomicU32::new(0);
+static REPORTED: AtomicU32 = AtomicU32::new(0);
+static STORMED_GSI: AtomicU64 = AtomicU64::new(0);
+static REPORTED_GSI: AtomicU64 = AtomicU64::new(0);
+
+fn report_storms() {
+    let gsis = STORMED_GSI.load(Ordering::Relaxed);
+    let fresh_gsi = gsis & !REPORTED_GSI.fetch_or(gsis, Ordering::Relaxed);
+    for gsi in (0..64u32).filter(|g| fresh_gsi & (1 << g) != 0) {
+        let owners: Vec<String> = LINES.lock().iter().filter(|l| l.gsi == Some(gsi)).map(|l| l.owner.clone()).collect();
+        crate::drivers::klog::log(&alloc::format!("irq: GSI {} fired {} times in a row with no handler claiming it; masked in the IOAPIC, {} fall back to polling", gsi, STORM_LIMIT, owners.join(", ")));
+    }
+    let mask = STORMED.load(Ordering::Relaxed);
+    let fresh = mask & !REPORTED.fetch_or(mask, Ordering::Relaxed);
+    for line in (0..16u8).filter(|l| fresh & (1 << l) != 0) {
+        let owners: Vec<String> = LINES.lock().iter().filter(|l| l.legacy == Some(line)).map(|l| l.owner.clone()).collect();
+        crate::drivers::klog::log(&alloc::format!(
+            "irq: line {} fired {} times in a row with no handler claiming it (shared with a device nobody drives?); masked, {} fall back to polling",
+            line,
+            STORM_LIMIT,
+            if owners.is_empty() { String::from("no driver") } else { owners.join(", ") }
+        ));
+    }
+}
 
 pub fn count(vector: u8) -> u64 {
     COUNTS[vector as usize].load(Ordering::Relaxed)
@@ -94,7 +122,7 @@ pub fn request(owner: &str, vector: u8, legacy: Option<u8>, handler: Handler, co
     if lines.iter().any(|l| l.owner == owner && l.vector == vector) {
         return false;
     }
-    lines.push(Line { vector, owner: owner.to_string(), handler, context, legacy });
+    lines.push(Line { vector, owner: owner.to_string(), handler, context, legacy, gsi: None });
     drop(lines);
     if let Some(line) = legacy {
         mask_legacy(line, false);
@@ -115,6 +143,44 @@ pub fn request_legacy(owner: &str, line: u8, handler: Handler, context: u64) -> 
     let vector = LEGACY_BASE + line;
     if request(owner, vector, Some(line), handler, context) { Some(vector) } else { None }
 }
+
+#[cfg(target_arch = "x86_64")]
+pub fn request_gsi(owner: &str, gsi: u32, handler: Handler, context: u64) -> Option<u8> {
+    use crate::arch::x86_64::{ioapic, lapic};
+    if gsi < 16 || !ioapic::covers(gsi) {
+        return None;
+    }
+    let shared = LINES.lock().iter().find(|l| l.gsi == Some(gsi)).map(|l| l.vector);
+    let vector = match shared {
+        Some(vector) => vector,
+        None => free_vector()?,
+    };
+    {
+        let mut lines = LINES.lock();
+        if lines.iter().any(|l| l.owner == owner && l.vector == vector) {
+            return None;
+        }
+        lines.push(Line { vector, owner: owner.to_string(), handler, context, legacy: None, gsi: Some(gsi) });
+    }
+    if shared.is_none() && !ioapic::route_pci(gsi, vector, lapic::id()) {
+        LINES.lock().retain(|l| !(l.owner == owner && l.vector == vector));
+        return None;
+    }
+    Some(vector)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn request_gsi(_owner: &str, _gsi: u32, _handler: Handler, _context: u64) -> Option<u8> {
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+fn mask_gsi(gsi: u32) {
+    crate::arch::x86_64::ioapic::set_masked(gsi, true);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn mask_gsi(_gsi: u32) {}
 
 pub fn request_message(owner: &str, handler: Handler, context: u64) -> Option<u8> {
     let vector = free_vector()?;
@@ -137,9 +203,16 @@ pub fn release_vector(owner: &str, vector: u8) {
 pub fn release(owner: &str) {
     let mut lines = LINES.lock();
     let freed: Vec<Option<u8>> = lines.iter().filter(|l| l.owner == owner).map(|l| l.legacy).collect();
+    let freed_gsi: Vec<u32> = lines.iter().filter(|l| l.owner == owner).filter_map(|l| l.gsi).collect();
     lines.retain(|l| l.owner != owner);
     let still: Vec<u8> = lines.iter().filter_map(|l| l.legacy).collect();
+    let still_gsi: Vec<u32> = lines.iter().filter_map(|l| l.gsi).collect();
     drop(lines);
+    for gsi in freed_gsi {
+        if !still_gsi.contains(&gsi) {
+            mask_gsi(gsi);
+        }
+    }
     for line in freed.into_iter().flatten() {
         if !still.contains(&line) {
             mask_legacy(line, true);
@@ -166,6 +239,9 @@ pub fn schedule(owner: &str, work: Work, context: u64) -> bool {
 }
 
 pub fn run_work() {
+    if STORMED.load(Ordering::Relaxed) != REPORTED.load(Ordering::Relaxed) || STORMED_GSI.load(Ordering::Relaxed) != REPORTED_GSI.load(Ordering::Relaxed) {
+        report_storms();
+    }
     loop {
         let job = crate::arch::without_interrupts(|| QUEUE.lock().pop_front());
         let Some(job) = job else {
@@ -207,8 +283,31 @@ pub fn dispatch(vector: u8) {
     }
     let spent = crate::task::uptime_ms().saturating_sub(start);
     ACTIVE.store(false, Ordering::Relaxed);
-    if !served {
+    if served {
+        UNHANDLED[vector as usize].store(0, Ordering::Relaxed);
+    } else {
         SPURIOUS.fetch_add(1, Ordering::Relaxed);
+        let streak = UNHANDLED[vector as usize].fetch_add(1, Ordering::Relaxed) + 1;
+        if streak >= STORM_LIMIT && !(vector >= LEGACY_BASE && vector < LEGACY_BASE + 16) {
+            let gsi = LINES.try_lock().and_then(|l| l.iter().find(|l| l.vector == vector).and_then(|l| l.gsi));
+            #[cfg(target_arch = "x86_64")]
+            if let Some(gsi) = gsi.filter(|g| *g < 64) {
+                if crate::arch::x86_64::ioapic::mask_from_interrupt(gsi) {
+                    STORMED_GSI.fetch_or(1 << gsi, Ordering::Relaxed);
+                    UNHANDLED[vector as usize].store(0, Ordering::Relaxed);
+                }
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            let _ = gsi;
+        }
+        if streak >= STORM_LIMIT && vector >= LEGACY_BASE && vector < LEGACY_BASE + 16 {
+            let line = vector - LEGACY_BASE;
+            if !(cfg!(target_arch = "x86_64") && (line == 0 || line == 2)) {
+                mask_legacy(line, true);
+                STORMED.fetch_or(1 << line, Ordering::Relaxed);
+                UNHANDLED[vector as usize].store(0, Ordering::Relaxed);
+            }
+        }
     }
     if spent >= STALL_MS {
         let owner = LINES.try_lock().and_then(|l| l.iter().find(|l| l.vector == vector).map(|l| l.owner.clone()));

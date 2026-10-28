@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::sys::{MOUSE_LEFT, MOUSE_RIGHT};
+use hxstd::sys::{MOUSE_LEFT, MOUSE_RIGHT};
 use hxclient::ui::theme;
 use vellum::gfx::ellipsize;
 use vellum::Area;
@@ -142,11 +142,11 @@ impl Nook {
         if py >= self.core.screen.height - 2 {
             return false;
         }
-        if self.dock_offset < self.dock_hidden_offset() / 2 && shown.expand(6).contains(px, py) && !matches!(self.grab, Grab::Move { .. } | Grab::Resize { .. }) {
+        if self.dock_offset < self.dock_hidden_offset() / 2 && shown.expand(6).contains(px, py) {
             return false;
         }
         let zone = shown.expand(4);
-        self.core.windows.iter().any(|w| !w.minimized && w.outer().overlaps(&zone))
+        self.core.windows.iter().any(|w| self.core.shown(w) && w.outer().overlaps(&zone))
     }
 
     pub fn dock_animating(&self) -> bool {

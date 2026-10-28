@@ -1,0 +1,3 @@
+loff_t is declared next to off_t (glibc and musl expose it through <fcntl.h>),
+so programs that use it for splice/copy_file_range build without <sys/types.h>.
+Applied directly to the tree in hxlibc/options/internal/include/bits/off_t.h.

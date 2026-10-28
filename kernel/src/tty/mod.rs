@@ -1,6 +1,11 @@
+pub mod pty;
+pub mod vt;
+
 use alloc::vec::Vec;
 
-use crate::syscall::{copy_out, target, user_slice, Target, EINVAL};
+use crate::task::fdtable::{target, Target};
+use crate::usercopy::{copy_out, user_slice, user_slice_mut};
+use crate::errno::EINVAL;
 use crate::drivers::input::keyboard::{self, Key};
 use crate::drivers::video::text_mode::TEXT_CONSOLE;
 use crate::task::{self, pipe};
@@ -54,18 +59,19 @@ const fn build_default() -> [u8; TERMIOS_LEN] {
 pub const DEFAULT_TERMIOS: [u8; TERMIOS_LEN] = build_default();
 
 pub fn output_cooked() -> bool {
-    task::with_current(|t| t.abi != task::Abi::Linux || field(&t.termios, 4) & (OPOST | ONLCR) == OPOST | ONLCR)
+    task::with_current(|t| !t.abi.posix() || field(&t.termios, 4) & (OPOST | ONLCR) == OPOST | ONLCR)
 }
 
-pub fn cook(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len() + 16);
+pub fn cook(data: &[u8]) -> Result<Vec<u8>, i64> {
+    let newlines = data.iter().filter(|&&b| b == b'\n').count();
+    let mut out = crate::memory::try_reserved(data.len() + newlines)?;
     for &b in data {
         if b == b'\n' {
             out.push(b'\r');
         }
         out.push(b);
     }
-    out
+    Ok(out)
 }
 
 pub fn signals_enabled(termios: &[u8; TERMIOS_LEN]) -> bool {
@@ -141,9 +147,10 @@ fn fill_pending(src: Source) -> bool {
     match src {
         Source::Console => {
             let vt = task::current_vt();
+            let allowed = crate::tty::vt::input_allowed(task::current_pid(), vt);
             let (mut bytes, modes) = {
                 let mut console = TEXT_CONSOLE.lock();
-                let injected = if crate::vt::input_allowed(task::current_pid(), vt) { console.take_input(vt) } else { Vec::new() };
+                let injected = if allowed { console.take_input(vt) } else { Vec::new() };
                 (injected, console.modes(vt))
             };
             let isig = task::with_current(|t| signals_enabled(&t.termios));
@@ -172,14 +179,14 @@ fn fill_pending(src: Source) -> bool {
             let mut kept = Vec::with_capacity(n as usize);
             for &b in &buf[..n as usize] {
                 let sig = match b {
-                    0x03 if isig => Some(super::signal::SIGINT),
-                    0x1c if isig => Some(super::signal::SIGQUIT),
-                    0x1a if isig => Some(super::signal::SIGTSTP),
+                    0x03 if isig => Some(crate::syscall::signal::SIGINT),
+                    0x1c if isig => Some(crate::syscall::signal::SIGQUIT),
+                    0x1a if isig => Some(crate::syscall::signal::SIGTSTP),
                     _ => None,
                 };
                 match sig {
                     Some(sig) => {
-                        super::signal::send(task::current_pid(), sig);
+                        crate::syscall::signal::send(task::current_pid(), sig);
                     }
                     None => kept.push(b),
                 }
@@ -206,7 +213,7 @@ fn wait_input(src: Source, deadline: Option<u64>) -> bool {
         if pending_len() > 0 || fill_pending(src) {
             return true;
         }
-        if at_eof(src) || super::signal::pending() {
+        if at_eof(src) || crate::syscall::signal::pending() {
             return false;
         }
         let now = task::ticks();
@@ -221,7 +228,7 @@ fn wait_input(src: Source, deadline: Option<u64>) -> bool {
         };
         task::block(flag, Some(slice.max(1)), task::input_seq());
         task::check_killed();
-        crate::vt::service_pending();
+        crate::tty::vt::service_pending();
     }
 }
 
@@ -283,13 +290,13 @@ fn read_canonical(src: Source, buf: u64, count: u64, termios: &[u8; TERMIOS_LEN]
     let mut line: Vec<u8> = Vec::new();
     loop {
         if !wait_input(src, None) {
-            if super::signal::pending() {
+            if crate::syscall::signal::pending() {
                 task::with_current(|t| {
                     for &b in line.iter().rev() {
                         t.tty_pending.push_front(b);
                     }
                 });
-                return super::signal::EINTR;
+                return crate::syscall::signal::EINTR;
             }
             break;
         }
@@ -354,7 +361,7 @@ fn read_raw(src: Source, buf: u64, count: u64, termios: &[u8; TERMIOS_LEN]) -> i
         _ => wait_input(src, None),
     };
     if !ready {
-        return if super::signal::pending() { super::signal::EINTR } else { 0 };
+        return if crate::syscall::signal::pending() { crate::syscall::signal::EINTR } else { 0 };
     }
     fill_pending(src);
     let data: Vec<u8> = task::with_current(|t| {
@@ -369,7 +376,7 @@ fn read_raw(src: Source, buf: u64, count: u64, termios: &[u8; TERMIOS_LEN]) -> i
 
 pub fn read(fd: u64, buf: u64, count: u64) -> Option<i64> {
     let src = source(fd)?;
-    if let Err(e) = user_slice(buf, count) {
+    if let Err(e) = user_slice_mut(buf, count) {
         return Some(e);
     }
     if count == 0 {
@@ -409,13 +416,17 @@ pub fn rdhup(fd: u64, events: u32) -> u32 {
 }
 
 pub fn sleep_for_events(slice: u64) {
-    let slice = match super::special::next_deadline() {
+    sleep_for_events_since(task::input_seq(), slice);
+}
+
+pub fn sleep_for_events_since(seq: u64, slice: u64) {
+    let slice = match crate::syscall::special::next_deadline() {
         Some(d) => slice.min(d.saturating_sub(task::ticks()).max(1)),
         None => slice,
     };
-    task::block(task::WAIT_INPUT | task::WAIT_PIPE | task::WAIT_MSG, Some(slice.max(1)), task::input_seq());
+    task::block(task::WAIT_INPUT | task::WAIT_PIPE | task::WAIT_MSG, Some(slice.max(1)), seq);
     task::check_killed();
-    crate::vt::service_pending();
+    crate::tty::vt::service_pending();
 }
 
 pub fn readiness(fd: u64, events: u16) -> u16 {
@@ -431,13 +442,13 @@ pub fn readiness(fd: u64, events: u16) -> u16 {
             (if r.readable { POLLIN } else { 0 }) | (if r.writable { POLLOUT } else { 0 }) | (if r.hangup { POLLHUP } else { 0 })
         }
         Target::Epoll(id) => {
-            if super::epoll::ready_count(id) > 0 {
+            if crate::fs::epoll::ready_count(id) > 0 {
                 POLLIN
             } else {
                 0
             }
         }
-        Target::Special(id) => (if super::special::readable(id) { POLLIN } else { 0 }) | (if super::special::writable(id) { POLLOUT } else { 0 }),
+        Target::Special(id) => (if crate::syscall::special::readable(id) { POLLIN } else { 0 }) | (if crate::syscall::special::writable(id) { POLLOUT } else { 0 }),
         Target::Mailbox => {
             if crate::task::ipc::has_message() {
                 POLLIN
@@ -491,6 +502,7 @@ pub fn poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
     };
     let deadline = if timeout_ms < 0 { None } else { Some(task::ticks() + task::ms_to_ticks(timeout_ms as u64)) };
     loop {
+        let seq = task::input_seq();
         let mut out = entries.clone();
         let mut ready = 0i64;
         for chunk in out.chunks_exact_mut(8) {
@@ -506,12 +518,12 @@ pub fn poll(fds: u64, nfds: u64, timeout_ms: i64) -> i64 {
             let r = copy_out(fds, len, &out);
             return if r < 0 { r } else { ready };
         }
-        if super::signal::pending() {
-            return super::signal::EINTR;
+        if crate::syscall::signal::pending() {
+            return crate::syscall::signal::EINTR;
         }
         let now = task::ticks();
         let slice = deadline.map(|d| d.saturating_sub(now)).unwrap_or(task::TICK_HZ / 10).clamp(1, task::TICK_HZ / 10);
-        sleep_for_events(slice);
+        sleep_for_events_since(seq, slice);
     }
 }
 
@@ -562,6 +574,7 @@ pub fn select(nfds: u64, readfds: u64, writefds: u64, exceptfds: u64, timeout_ms
     let deadline = if timeout_ms < 0 { None } else { Some(task::ticks() + task::ms_to_ticks(timeout_ms as u64)) };
     let has = |set: &Option<Vec<u64>>, fd: usize| set.as_ref().map(|s| s[fd / 64] & (1 << (fd % 64)) != 0).unwrap_or(false);
     loop {
+        let seq = task::input_seq();
         let mut out_r = alloc::vec![0u64; words];
         let mut out_w = alloc::vec![0u64; words];
         let out_e = alloc::vec![0u64; words];
@@ -595,12 +608,12 @@ pub fn select(nfds: u64, readfds: u64, writefds: u64, exceptfds: u64, timeout_ms
             }
             return count;
         }
-        if super::signal::pending() {
-            return super::signal::EINTR;
+        if crate::syscall::signal::pending() {
+            return crate::syscall::signal::EINTR;
         }
         let now = task::ticks();
         let slice = deadline.map(|d| d.saturating_sub(now)).unwrap_or(task::TICK_HZ / 10).clamp(1, task::TICK_HZ / 10);
-        sleep_for_events(slice);
+        sleep_for_events_since(seq, slice);
     }
 }
 

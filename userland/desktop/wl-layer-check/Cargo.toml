@@ -1,0 +1,16 @@
+[package]
+name = "wl-layer-check"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wl-layer-check"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../libs/hxstd" }
+hxclient = { path = "../../libs/hxclient" }
+
+[package.metadata.hamix]
+desktop = "nook"
+install = "libexec"

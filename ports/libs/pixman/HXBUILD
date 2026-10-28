@@ -1,0 +1,17 @@
+pkgname=pixman
+pkgver=0.43.4
+pkgdesc="Low-level pixel manipulation library"
+source="https://cairographics.org/releases/pixman-$pkgver.tar.gz"
+sha256="a0624db90180c7ddb79fc7a9151093dc37c646d8c38d3f232f767cf64b85a226"
+builddir="pixman-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Dtests=disabled -Ddemos=disabled -Dgtk=disabled -Dlibpng=disabled -Dopenmp=disabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

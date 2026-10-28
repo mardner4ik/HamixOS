@@ -1,5 +1,4 @@
 #![no_std]
-#![no_main]
 
 extern crate alloc;
 
@@ -8,15 +7,104 @@ mod wire;
 mod xwm;
 
 use alloc::collections::{BTreeMap, VecDeque};
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::unix::{self, PollFd, POLLHUP, POLLIN};
-use hamix_std::{entry, env, eprintln, fs, println, sys};
+use hxstd::unix::{self, PollFd, POLLHUP, POLLIN, POLLOUT};
+use hxstd::{env, fs, println, sys};
 use hxproto::{Event, Request, Title, MESSAGE_MAX};
 use wire::{Message, Reader};
 
+pub trait Link {
+    fn request(&mut self, request: Request);
+    fn receive(&mut self, timeout_ms: i64) -> Option<Event>;
+    fn alive(&self) -> bool;
+    fn mailbox(&self) -> u64;
+    fn trusted_peer(&self, _pid: u32) -> bool {
+        false
+    }
+    fn direct(&self) -> bool {
+        false
+    }
+    fn attach(&mut self, _attach: Attach) {}
+}
+
+pub struct Attach {
+    pub window: u32,
+    pub pixels: *const u32,
+    pub stride: u32,
+    pub width: u32,
+    pub height: u32,
+    pub opaque: bool,
+    pub damage: (u32, u32, u32, u32),
+}
+
+struct Mapping {
+    ptr: *mut u8,
+    size: usize,
+}
+
+impl Mapping {
+    fn new(fd: u64, size: usize) -> Rc<Mapping> {
+        let actual = sys::fstat_size(fd).max(0) as usize;
+        let ptr = if size > 0 && size <= actual {
+            unix::map_shared(fd, size as u64, 0).unwrap_or(core::ptr::null_mut())
+        } else {
+            core::ptr::null_mut()
+        };
+        Rc::new(Mapping { ptr, size: if ptr.is_null() { 0 } else { size } })
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unix::unmap(self.ptr, self.size as u64);
+        }
+    }
+}
+
+pub struct IpcLink {
+    pub server: i64,
+    pub mailbox: u64,
+}
+
+impl Link for IpcLink {
+    fn request(&mut self, request: Request) {
+        let mut buf = [0u8; MESSAGE_MAX];
+        let n = request.encode(&mut buf);
+        sys::msg_send(self.server, &buf[..n]);
+    }
+
+    fn receive(&mut self, timeout_ms: i64) -> Option<Event> {
+        let mut buf = [0u8; MESSAGE_MAX];
+        let deadline = sys::uptime_ms() + timeout_ms.max(0) as u64;
+        loop {
+            let left = deadline.saturating_sub(sys::uptime_ms()) as i64;
+            let (sender, len) = sys::msg_recv(&mut buf, left)?;
+            if sender == self.server {
+                if let Some(event) = Event::decode(&buf[..len]) {
+                    return Some(event);
+                }
+            }
+            if sys::uptime_ms() >= deadline {
+                return None;
+            }
+        }
+    }
+
+    fn alive(&self) -> bool {
+        sys::proc_alive(self.server)
+    }
+
+    fn mailbox(&self) -> u64 {
+        self.mailbox
+    }
+}
+
 const DISPLAY: u32 = 1;
 const FRAME_MS: u64 = 16;
+const F_SEAL_SHRINK: u32 = 0x0002;
 const SERVER_DECORATION_MODE: u32 = 2;
 const PANEL_H: i32 = 32;
 
@@ -50,9 +138,21 @@ enum Kind {
     DecorationManager,
     ServerDecoration,
     ServerDecorationManager,
+    LayerShell,
+    LayerSurface,
+    ToplevelManager,
+    ToplevelHandle,
+    DataOffer,
+    Viewporter,
+    Viewport,
+    FractionalScaleManager,
+    FractionalScale,
+    XdgOutputManager,
+    XdgOutput,
+    HamixShell,
 }
 
-const GLOBALS: [(&str, u32, Kind); 9] = [
+const GLOBALS: [(&str, u32, Kind); 15] = [
     ("wl_compositor", 5, Kind::Compositor),
     ("wl_shm", 1, Kind::Shm),
     ("wl_seat", 7, Kind::Seat),
@@ -62,13 +162,45 @@ const GLOBALS: [(&str, u32, Kind); 9] = [
     ("wl_data_device_manager", 3, Kind::DataDeviceManager),
     ("zxdg_decoration_manager_v1", 1, Kind::DecorationManager),
     ("org_kde_kwin_server_decoration_manager", 1, Kind::ServerDecorationManager),
+    ("zwlr_layer_shell_v1", 4, Kind::LayerShell),
+    ("zwlr_foreign_toplevel_manager_v1", 3, Kind::ToplevelManager),
+    ("wp_viewporter", 1, Kind::Viewporter),
+    ("wp_fractional_scale_manager_v1", 1, Kind::FractionalScaleManager),
+    ("zxdg_output_manager_v1", 3, Kind::XdgOutputManager),
+    ("hamix_shell_v1", 1, Kind::HamixShell),
 ];
+
+fn privileged_global(kind: Kind) -> bool {
+    matches!(kind, Kind::LayerShell | Kind::ToplevelManager | Kind::HamixShell)
+}
+
+const SERVER_ID_BASE: u32 = 0xFF00_0000;
+
+#[derive(Clone)]
+struct ForeignToplevel {
+    state: u32,
+    title: String,
+    app_id: String,
+}
+
+#[derive(Clone, Copy)]
+struct LayerRole {
+    object: u32,
+    layer: u32,
+    anchor: u32,
+    exclusive: i32,
+    margins: [i32; 4],
+    size: (u32, u32),
+    keyboard: u32,
+    configured: bool,
+    dirty: bool,
+    sent: (u32, u32),
+}
 
 struct Pool {
     live: bool,
     fd: u64,
-    ptr: *mut u8,
-    size: usize,
+    map: Rc<Mapping>,
 }
 
 struct Buffer {
@@ -134,6 +266,11 @@ struct Surface {
     damage: Option<(i32, i32, i32, i32)>,
     csd: bool,
     decoration: bool,
+    layer: Option<LayerRole>,
+    viewport_src: Option<(i32, i32, i32, i32)>,
+    viewport_dst: Option<(i32, i32)>,
+    shown: Option<(u32, Rc<Mapping>)>,
+    scratch: Vec<u32>,
 }
 
 struct Client {
@@ -153,12 +290,22 @@ struct Client {
     dead: bool,
     decoration_manager: bool,
     pid: u32,
+    trusted: bool,
+    next_server_id: u32,
+    toplevel_managers: Vec<u32>,
+    handles: Vec<(u32, u32)>,
+    shells: Vec<u32>,
+    sources: BTreeMap<u32, Vec<String>>,
+    data_devices: Vec<u32>,
+    offers: Vec<u32>,
+    out: VecDeque<(Vec<u8>, Vec<u64>)>,
+    out_bytes: usize,
+    xdg_outputs: Vec<(u32, u32, u32)>,
 }
 
-struct Bridge {
-    server: i64,
+pub struct Bridge<L: Link> {
+    pub link: L,
     listen: u64,
-    mailbox: u64,
     clients: BTreeMap<u32, Client>,
     next_client: u32,
     windows: BTreeMap<u32, (u32, u32)>,
@@ -175,30 +322,81 @@ struct Bridge {
     xlisten: Option<u64>,
     xwm: Option<xwm::Xwm>,
     xcheck: u64,
+    toplevels: BTreeMap<u32, ForeignToplevel>,
+    subscribed: bool,
+    clipboard: Option<(String, Vec<u8>)>,
+    clipboard_owner: Option<(u32, u32)>,
+    path: String,
+    geometry: BTreeMap<u32, (i32, i32, i32, i32)>,
+}
+
+const MAX_CLIENT_OBJECTS: usize = 65_536;
+const MAX_CLIENT_INPUT: usize = 1 << 20;
+const MAX_CLIENT_MESSAGE: usize = 4 << 10;
+const MAX_CLIENT_FDS: usize = 256;
+const MAX_CLIENT_POOL_BYTES: usize = 512 << 20;
+const OUT_LIMIT: usize = 4 << 20;
+
+fn client_pool_bytes(client: &Client) -> usize {
+    client.pools.values().fold(0usize, |total, pool| total.saturating_add(pool.map.size))
 }
 
 fn send(client: &mut Client, data: Vec<u8>, fds: &[u64]) {
     if client.dead {
         return;
     }
-    let mut sent = 0;
-    let mut attempts = 0;
-    while sent < data.len() {
-        let r = unix::send_with_fds(client.fd, &data[sent..], if sent == 0 { fds } else { &[] }, 0);
-        if r < 0 {
-            if r == unix::EAGAIN && attempts < 200 {
-                attempts += 1;
-                sys::sleep_ms(1);
-                continue;
-            }
+    let mut data = data;
+    if client.out.is_empty() {
+        let r = unix::send_with_fds(client.fd, &data, fds, unix::MSG_DONTWAIT);
+        if r >= 0 && r as usize == data.len() {
+            return;
+        }
+        if r < 0 && r != unix::EAGAIN {
             client.dead = true;
             return;
         }
-        sent += r as usize;
+        if r > 0 {
+            data.drain(..r as usize);
+            client.out_bytes += data.len();
+            client.out.push_back((data, Vec::new()));
+            return;
+        }
+    }
+    let owned: Vec<u64> = fds.iter().map(|fd| sys::dup(*fd)).filter(|fd| *fd >= 0).map(|fd| fd as u64).collect();
+    client.out_bytes += data.len();
+    client.out.push_back((data, owned));
+    if client.out_bytes > OUT_LIMIT {
+        client.dead = true;
     }
 }
 
-impl Bridge {
+fn flush_out(client: &mut Client) {
+    while let Some((data, fds)) = client.out.front_mut() {
+        if client.dead {
+            return;
+        }
+        let r = unix::send_with_fds(client.fd, data, fds, unix::MSG_DONTWAIT);
+        if r == unix::EAGAIN {
+            return;
+        }
+        if r < 0 {
+            client.dead = true;
+            return;
+        }
+        for fd in fds.drain(..) {
+            sys::close(fd);
+        }
+        let n = r as usize;
+        client.out_bytes = client.out_bytes.saturating_sub(n);
+        if n < data.len() {
+            data.drain(..n);
+            return;
+        }
+        client.out.pop_front();
+    }
+}
+
+impl<L: Link> Bridge<L> {
     fn next_serial(&mut self) -> u32 {
         self.serial = self.serial.wrapping_add(1);
         self.serial
@@ -208,10 +406,8 @@ impl Bridge {
         (sys::uptime_ms() - self.started) as u32
     }
 
-    fn request(&self, request: Request) {
-        let mut buf = [0u8; MESSAGE_MAX];
-        let n = request.encode(&mut buf);
-        sys::msg_send(self.server, &buf[..n]);
+    fn request(&mut self, request: Request) {
+        self.link.request(request);
     }
 
     fn accept(&mut self) {
@@ -225,6 +421,8 @@ impl Bridge {
     }
 
     fn add_client(&mut self, fd: u64) -> u32 {
+        let pid = unix::peer_cred(fd).map(|cred| cred.pid).unwrap_or(0);
+        let trusted = pid > 0 && self.link.trusted_peer(pid);
         {
             let id = self.next_client;
             self.next_client += 1;
@@ -248,7 +446,18 @@ impl Bridge {
                     outputs: Vec::new(),
                     dead: false,
                     decoration_manager: false,
-                    pid: unix::peer_cred(fd).map(|c| c.pid).unwrap_or(0),
+                    pid,
+                    trusted,
+                    next_server_id: SERVER_ID_BASE,
+                    toplevel_managers: Vec::new(),
+                    handles: Vec::new(),
+                    shells: Vec::new(),
+                    sources: BTreeMap::new(),
+                    data_devices: Vec::new(),
+                    offers: Vec::new(),
+                    out: VecDeque::new(),
+                    out_bytes: 0,
+                    xdg_outputs: Vec::new(),
                 },
             );
             id
@@ -267,6 +476,18 @@ impl Bridge {
                     break;
                 }
                 Ok((n, fds)) => {
+                    if client.inbuf.len().saturating_add(n) > MAX_CLIENT_INPUT
+                        || client.fds.len().saturating_add(fds.len()) > MAX_CLIENT_FDS
+                    {
+                        for fd in fds {
+                            sys::close(fd);
+                        }
+                        for fd in client.fds.drain(..) {
+                            sys::close(fd);
+                        }
+                        client.dead = true;
+                        break;
+                    }
                     client.inbuf.extend_from_slice(&buf[..n]);
                     client.fds.extend(fds);
                 }
@@ -289,6 +510,10 @@ impl Bridge {
                     client.dead = true;
                     break;
                 };
+                if header.size > MAX_CLIENT_MESSAGE {
+                    client.dead = true;
+                    break;
+                }
                 if client.inbuf.len() < header.size {
                     break;
                 }
@@ -317,6 +542,10 @@ impl Bridge {
 
     fn add(&mut self, cid: u32, id: u32, kind: Kind, extra: u32) {
         if let Some(client) = self.clients.get_mut(&cid) {
+            if id == 0 || client.objects.contains_key(&id) || client.objects.len() >= MAX_CLIENT_OBJECTS {
+                client.dead = true;
+                return;
+            }
             client.objects.insert(id, (kind, extra));
         }
     }
@@ -329,6 +558,9 @@ impl Bridge {
     }
 
     fn dispatch(&mut self, cid: u32, object: u32, opcode: u16, args: &[u8]) {
+        if self.clients.get(&cid).map(|client| client.dead).unwrap_or(true) {
+            return;
+        }
         let Some(&(kind, extra)) = self.clients.get(&cid).and_then(|c| c.objects.get(&object)) else {
             return;
         };
@@ -343,7 +575,11 @@ impl Bridge {
             (Kind::Display, 1) => {
                 let registry = r.u32();
                 self.add(cid, registry, Kind::Registry, 0);
-                for (i, (name, version, _)) in GLOBALS.iter().enumerate() {
+                let trusted = self.clients.get(&cid).map(|client| client.trusted).unwrap_or(false);
+                for (i, (name, version, kind)) in GLOBALS.iter().enumerate() {
+                    if privileged_global(*kind) && !trusted {
+                        continue;
+                    }
                     self.post(cid, Message::new(registry, 0).u32(i as u32 + 1).string(name).u32(*version).finish());
                 }
             }
@@ -355,6 +591,12 @@ impl Bridge {
                 let Some((_, _, kind)) = GLOBALS.get(name.wrapping_sub(1) as usize) else {
                     return;
                 };
+                if privileged_global(*kind) && !self.clients.get(&cid).map(|client| client.trusted).unwrap_or(false) {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
                 self.add(cid, id, *kind, version);
                 self.bound(cid, id, *kind, version);
             }
@@ -379,13 +621,37 @@ impl Bridge {
                 let Some(fd) = self.take_fd(cid) else {
                     return;
                 };
-                let ptr = unix::map_shared(fd, size as u64, 0).unwrap_or(core::ptr::null_mut());
+                let used = self.clients.get(&cid).map(client_pool_bytes).unwrap_or(MAX_CLIENT_POOL_BYTES);
+                if size == 0 || used.saturating_add(size) > MAX_CLIENT_POOL_BYTES {
+                    sys::close(fd);
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                let seals = unix::get_seals(fd);
+                if seals >= 0 && (seals as u32 & F_SEAL_SHRINK) == 0 && unix::add_seals(fd, F_SEAL_SHRINK) < 0 {
+                    sys::close(fd);
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                let map = Mapping::new(fd, size);
+                if map.ptr.is_null() {
+                    sys::close(fd);
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
                 let Some(client) = self.clients.get_mut(&cid) else {
+                    sys::close(fd);
                     return;
                 };
                 let key = client.next_pool;
                 client.next_pool = client.next_pool.wrapping_add(1).max(1);
-                client.pools.insert(key, Pool { live: true, fd, ptr, size: if ptr.is_null() { 0 } else { size } });
+                client.pools.insert(key, Pool { live: true, fd, map });
                 self.add(cid, id, Kind::Pool, key);
             }
             (Kind::Shm, _) => self.destroy(cid, object),
@@ -416,13 +682,17 @@ impl Bridge {
             (Kind::Pool, 2) => {
                 let size = r.i32().max(0) as usize;
                 if let Some(client) = self.clients.get_mut(&cid) {
+                    let used = client_pool_bytes(client);
                     if let Some(pool) = client.pools.get_mut(&extra) {
-                        if size > pool.size {
-                            if !pool.ptr.is_null() {
-                                unix::unmap(pool.ptr, pool.size as u64);
+                        if size > pool.map.size {
+                            if used.saturating_add(size - pool.map.size) > MAX_CLIENT_POOL_BYTES {
+                                client.dead = true;
+                                return;
                             }
-                            pool.ptr = unix::map_shared(pool.fd, size as u64, 0).unwrap_or(core::ptr::null_mut());
-                            pool.size = if pool.ptr.is_null() { 0 } else { size };
+                            pool.map = Mapping::new(pool.fd, size);
+                            if pool.map.ptr.is_null() {
+                                client.dead = true;
+                            }
                         }
                     }
                 }
@@ -626,7 +896,8 @@ impl Bridge {
                     self.configure_popup(cid, extra);
                     let target = self.clients.get(&cid).and_then(|c| c.surfaces.get(&extra)).and_then(|s| Some((s.window.as_ref()?.id, s.popup?)));
                     if let Some((window, role)) = target {
-                        self.request(Request::MovePopup { window, x: role.x, y: role.y });
+                        let (_, x, y) = self.popup_parent(cid, role.parent, role.x, role.y);
+                        self.request(Request::MovePopup { window, x, y });
                     }
                 }
             }
@@ -665,6 +936,52 @@ impl Bridge {
                 }
                 self.destroy(cid, object);
             }
+            (Kind::Viewporter, 0) | (Kind::FractionalScaleManager, 0) | (Kind::FractionalScale, 0) | (Kind::XdgOutputManager, 0) => self.destroy(cid, object),
+            (Kind::Viewporter, 1) => {
+                let id = r.u32();
+                let surface = r.u32();
+                self.add(cid, id, Kind::Viewport, surface);
+            }
+            (Kind::Viewport, 0) => {
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&extra)) {
+                    s.viewport_src = None;
+                    s.viewport_dst = None;
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::Viewport, 1) => {
+                let rect = (r.i32(), r.i32(), r.i32(), r.i32());
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&extra)) {
+                    s.viewport_src = if rect == (-256, -256, -256, -256) || rect.2 <= 0 || rect.3 <= 0 { None } else { Some(rect) };
+                }
+            }
+            (Kind::Viewport, 2) => {
+                let size = (r.i32(), r.i32());
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&extra)) {
+                    s.viewport_dst = if size.0 <= 0 || size.1 <= 0 { None } else { Some(size) };
+                }
+            }
+            (Kind::FractionalScaleManager, 1) => {
+                let id = r.u32();
+                let surface = r.u32();
+                self.add(cid, id, Kind::FractionalScale, surface);
+                self.post(cid, Message::new(id, 0).u32(120).finish());
+            }
+            (Kind::XdgOutputManager, 1) => {
+                let id = r.u32();
+                let output = r.u32();
+                self.add(cid, id, Kind::XdgOutput, output);
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.xdg_outputs.push((id, output, extra));
+                }
+                self.advertise_xdg_output(cid, id, output, extra);
+            }
+            (Kind::XdgOutput, 0) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.xdg_outputs.retain(|o| o.0 != object);
+                }
+                self.destroy(cid, object);
+            }
             (Kind::Subcompositor, 1) => {
                 let id = r.u32();
                 self.add(cid, id, Kind::Subsurface, 0);
@@ -673,12 +990,65 @@ impl Bridge {
             (Kind::DataDeviceManager, 0) => {
                 let id = r.u32();
                 self.add(cid, id, Kind::DataSource, 0);
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.sources.insert(id, Vec::new());
+                }
             }
             (Kind::DataDeviceManager, 1) => {
                 let id = r.u32();
                 self.add(cid, id, Kind::DataDevice, 0);
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.data_devices.push(id);
+                }
             }
-            (Kind::DataSource, 1) | (Kind::DataDevice, 2) => self.destroy(cid, object),
+            (Kind::DataSource, 0) => {
+                let mime = r.string();
+                if let Some(list) = self.clients.get_mut(&cid).and_then(|c| c.sources.get_mut(&object)) {
+                    list.push(mime);
+                }
+            }
+            (Kind::DataSource, 1) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.sources.remove(&object);
+                }
+                if self.clipboard_owner == Some((cid, object)) {
+                    self.clipboard_owner = None;
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::DataDevice, 1) => {
+                let source = r.u32();
+                self.take_selection(cid, source);
+            }
+            (Kind::DataDevice, 2) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.data_devices.retain(|d| *d != object);
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::DataOffer, 1) => {
+                let _mime = r.string();
+                if let Some(fd) = self.take_fd(cid) {
+                    if let Some((_, data)) = self.clipboard.as_ref() {
+                        let mut done = 0;
+                        while done < data.len() {
+                            let n = sys::write(fd, &data[done..]);
+                            if n <= 0 {
+                                break;
+                            }
+                            done += n as usize;
+                        }
+                    }
+                    sys::close(fd);
+                }
+            }
+            (Kind::DataOffer, 2) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.offers.retain(|o| *o != object);
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::DataOffer, _) => {}
             (Kind::DecorationManager, 0) => self.destroy(cid, object),
             (Kind::DecorationManager, 1) => {
                 let id = r.u32();
@@ -702,6 +1072,84 @@ impl Bridge {
                 self.add(cid, id, Kind::ServerDecoration, 0);
                 self.post(cid, Message::new(id, 0).u32(SERVER_DECORATION_MODE).finish());
             }
+            (Kind::LayerShell, 0) => {
+                let id = r.u32();
+                let surface = r.u32();
+                let _output = r.u32();
+                let layer = r.u32().min(3);
+                self.add(cid, id, Kind::LayerSurface, surface);
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&surface)) {
+                    s.layer = Some(LayerRole { object: id, layer, anchor: 0, exclusive: 0, margins: [0; 4], size: (0, 0), keyboard: 0, configured: false, dirty: false, sent: (0, 0) });
+                }
+            }
+            (Kind::LayerShell, _) => self.destroy(cid, object),
+            (Kind::LayerSurface, 7) => {
+                self.unmap(cid, extra);
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&extra)) {
+                    s.layer = None;
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::LayerSurface, 5) => {
+                let popup = r.u32();
+                let target = self.clients.get(&cid).and_then(|c| c.objects.get(&popup)).map(|&(_, sid)| sid);
+                if let Some(psid) = target {
+                    if let Some(role) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&psid)).and_then(|s| s.popup.as_mut()) {
+                        role.parent = extra;
+                    }
+                }
+            }
+            (Kind::LayerSurface, 6) => {}
+            (Kind::LayerSurface, op) => {
+                let a = r.i32();
+                let b = r.i32();
+                let c = r.i32();
+                let d = r.i32();
+                if let Some(role) = self.clients.get_mut(&cid).and_then(|cl| cl.surfaces.get_mut(&extra)).and_then(|s| s.layer.as_mut()) {
+                    match op {
+                        0 => role.size = (a.max(0) as u32, b.max(0) as u32),
+                        1 => role.anchor = a as u32 & 15,
+                        2 => role.exclusive = a,
+                        3 => role.margins = [a, b, c, d],
+                        4 => role.keyboard = a as u32,
+                        8 => role.layer = (a as u32).min(3),
+                        _ => {}
+                    }
+                    role.dirty = true;
+                }
+            }
+            (Kind::HamixShell, 0) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.shells.retain(|s| *s != object);
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::ToplevelManager, 0) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.toplevel_managers.retain(|m| *m != object);
+                }
+                self.post(cid, Message::new(object, 1).finish());
+            }
+            (Kind::ToplevelHandle, 7) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.handles.retain(|(h, _)| *h != object);
+                }
+                self.destroy(cid, object);
+            }
+            (Kind::ToplevelHandle, op) => {
+                let action = match op {
+                    0 | 1 => Some(hxproto::ACTION_TOGGLE_MAXIMIZE),
+                    2 => Some(hxproto::ACTION_MINIMIZE),
+                    3 | 4 => Some(hxproto::ACTION_ACTIVATE),
+                    5 => Some(hxproto::ACTION_CLOSE),
+                    _ => None,
+                };
+                let state = self.toplevels.get(&extra).map(|t| t.state).unwrap_or(0);
+                let redundant = (op == 0 && state & hxproto::TOPLEVEL_MAXIMIZED != 0) || (op == 1 && state & hxproto::TOPLEVEL_MAXIMIZED == 0);
+                if let (Some(action), false) = (action, redundant) {
+                    self.request(Request::ToplevelAction { toplevel: extra, action });
+                }
+            }
             (Kind::ServerDecoration, 0) => self.destroy(cid, object),
             (Kind::ServerDecoration, _) => {
                 self.post(cid, Message::new(object, 0).u32(SERVER_DECORATION_MODE).finish());
@@ -718,6 +1166,29 @@ impl Bridge {
             Kind::DecorationManager => {
                 if let Some(client) = self.clients.get_mut(&cid) {
                     client.decoration_manager = true;
+                }
+            }
+            Kind::HamixShell => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.shells.push(id);
+                }
+                let known: Vec<(u32, u32)> = self.clients.get(&cid).map(|c| c.handles.clone()).unwrap_or_default();
+                for (handle, toplevel) in known {
+                    self.send_geometry(cid, handle, toplevel);
+                }
+            }
+            Kind::ToplevelManager => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.toplevel_managers.push(id);
+                }
+                if !self.subscribed {
+                    self.subscribed = true;
+                    self.request(Request::Hello { version: hxproto::VERSION });
+                    self.request(Request::SubscribeToplevels);
+                }
+                let known: Vec<u32> = self.toplevels.keys().copied().collect();
+                for toplevel in known {
+                    self.announce_toplevel(cid, id, toplevel);
                 }
             }
             Kind::Shm => {
@@ -756,6 +1227,24 @@ impl Bridge {
         }
     }
 
+    fn advertise_xdg_output(&mut self, cid: u32, id: u32, output: u32, version: u32) {
+        let (w, h) = self.screen;
+        self.post(cid, Message::new(id, 0).i32(0).i32(0).finish());
+        self.post(cid, Message::new(id, 1).i32(w as i32).i32(h as i32).finish());
+        if version >= 2 {
+            self.post(cid, Message::new(id, 3).string("NOOK-1").finish());
+            self.post(cid, Message::new(id, 4).string("Nook desktop").finish());
+        }
+        if version < 3 {
+            self.post(cid, Message::new(id, 2).finish());
+            return;
+        }
+        let output_version = self.clients.get(&cid).and_then(|c| c.outputs.iter().find(|o| o.0 == output).map(|o| o.1)).unwrap_or(0);
+        if output_version >= 2 {
+            self.post(cid, Message::new(output, 2).finish());
+        }
+    }
+
     fn screen_changed(&mut self, width: u32, height: u32) {
         if (width, height) == self.screen || width == 0 || height == 0 {
             return;
@@ -764,6 +1253,10 @@ impl Bridge {
         let targets: Vec<(u32, u32, u32)> = self.clients.iter().flat_map(|(cid, c)| c.outputs.iter().map(move |(id, v)| (*cid, *id, *v))).collect();
         for (cid, id, version) in targets {
             self.advertise_output(cid, id, version);
+        }
+        let xdg: Vec<(u32, u32, u32, u32)> = self.clients.iter().flat_map(|(cid, c)| c.xdg_outputs.iter().map(move |(id, o, v)| (*cid, *id, *o, *v))).collect();
+        for (cid, id, output, version) in xdg {
+            self.advertise_xdg_output(cid, id, output, version);
         }
         println!("hxwayland: screen is now {}x{}", width, height);
     }
@@ -861,8 +1354,20 @@ impl Bridge {
         let Some(surface) = client.surfaces.get_mut(&id) else {
             return;
         };
+        if let Some(layer) = surface.layer.filter(|l| !l.configured || l.dirty) {
+            self.configure_layer(cid, id, layer);
+            if buffer.is_none() {
+                return;
+            }
+        }
+        let Some(client) = self.clients.get_mut(&cid) else {
+            return;
+        };
+        let Some(surface) = client.surfaces.get_mut(&id) else {
+            return;
+        };
         let is_popup = surface.popup.is_some();
-        let role = surface.toplevel.is_some() || is_popup || surface.xwin.is_some();
+        let role = surface.toplevel.is_some() || is_popup || surface.xwin.is_some() || surface.layer.is_some();
         if surface.toplevel.is_some() && !surface.configured {
             surface.configured = true;
             let toplevel = surface.toplevel.unwrap();
@@ -888,24 +1393,35 @@ impl Bridge {
             }
             return;
         }
-        if role {
-            self.show(cid, id, buffer_id);
+        if role && self.show(cid, id, buffer_id) {
+            return;
         }
         self.post(cid, Message::new(buffer_id, 0).finish());
         let _ = is_popup;
     }
 
-    fn show(&mut self, cid: u32, sid: u32, buffer_id: u32) {
-        let (width, height, closed, origin, popup, damage, before) = {
+    fn show(&mut self, cid: u32, sid: u32, buffer_id: u32) -> bool {
+        let (width, height, closed, origin, popup, damage, before, scaling) = {
             let Some(client) = self.clients.get_mut(&cid) else {
-                return;
+                return false;
             };
             let Some(buffer) = client.buffers.get(&buffer_id) else {
-                return;
+                return false;
             };
-            let (bw, bh) = (buffer.width.max(1), buffer.height.max(1));
+            let (pw, ph) = (buffer.width.max(1), buffer.height.max(1));
             let Some(surface) = client.surfaces.get_mut(&sid) else {
-                return;
+                return false;
+            };
+            let (bw, bh) = match (surface.viewport_dst, surface.viewport_src) {
+                (Some((w, h)), _) => (w, h),
+                (None, Some((_, _, w, h))) => ((w >> 8).max(1), (h >> 8).max(1)),
+                _ => (pw, ph),
+            };
+            let scaling = if surface.viewport_dst.is_some() || surface.viewport_src.is_some() {
+                let (sx, sy, sw, sh) = surface.viewport_src.unwrap_or((0, 0, pw << 8, ph << 8));
+                Some((sx as i64, sy as i64, sw as i64, sh as i64, bw as i64, bh as i64))
+            } else {
+                None
             };
             let (gx, gy, gw, gh) = match surface.geometry {
                 Some((x, y, w, h)) => {
@@ -918,14 +1434,19 @@ impl Bridge {
             let closed = surface.closed || surface.popup.map(|p| p.done).unwrap_or(false);
             let damage = surface.damage.take();
             let before = surface.window.as_ref().map(|w| (w.id, w.width, w.height));
-            (gw as u32, gh as u32, closed, (gx as usize, gy as usize), surface.popup.is_some(), damage, before)
+            (gw as u32, gh as u32, closed, (gx as usize, gy as usize), surface.popup.is_some(), damage, before, scaling)
         };
         if closed {
-            return;
+            return false;
         }
         let xinfo = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.xwin).and_then(|w| self.xwm_window_info(w));
-        let popup_window = popup || xinfo.as_ref().map(|i| i.override_redirect).unwrap_or(false);
+        let layered = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).map(|s| s.layer.is_some()).unwrap_or(false);
+        let popup_window = popup || layered || xinfo.as_ref().map(|i| i.override_redirect).unwrap_or(false);
+        if layered {
+            self.ensure_layer(cid, sid, width, height);
+        }
         match xinfo {
+            _ if layered => {}
             Some(info) if info.override_redirect => self.ensure_xpopup(cid, sid, width, height, info.x, info.y),
             Some(info) => {
                 if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)) {
@@ -940,26 +1461,52 @@ impl Bridge {
             None if popup => self.ensure_popup(cid, sid, width, height),
             None => self.ensure_window(cid, sid, width, height),
         }
+        if self.link.direct() && !layered {
+            return self.show_direct(cid, sid, buffer_id, origin, popup_window, damage, before, scaling);
+        }
         let Some(client) = self.clients.get_mut(&cid) else {
-            return;
+            return false;
         };
         let Some(buffer) = client.buffers.get(&buffer_id) else {
-            return;
+            return false;
         };
         let Some(pool) = client.pools.get(&buffer.pool) else {
-            return;
+            return false;
         };
         let Some(surface) = client.surfaces.get_mut(&sid) else {
-            return;
+            return false;
         };
         let Some(window) = surface.window.as_mut() else {
-            return;
+            return false;
         };
-        if pool.ptr.is_null() {
-            return;
+        if pool.map.ptr.is_null() {
+            return false;
         }
         let (keep, force) = if popup_window { if buffer.alpha { (0xFFFF_FFFFu32, 0u32) } else { (0x00FF_FFFF, 0xFF00_0000) } } else { (0x00FF_FFFF, 0) };
         let stride = buffer.stride.max(0) as usize;
+        if let Some((sx, sy, sw, sh, lw, lh)) = scaling {
+            let (pw, ph) = (buffer.width.max(1) as i64, buffer.height.max(1) as i64);
+            let (ww, wh) = (window.width as usize, window.height as usize);
+            for y in 0..wh {
+                let ly = (y + origin.1) as i64;
+                let by = ((sy + ly * sh / lh) >> 8).clamp(0, ph - 1) as usize;
+                for x in 0..ww {
+                    let lx = (x + origin.0) as i64;
+                    let bx = ((sx + lx * sw / lw) >> 8).clamp(0, pw - 1) as usize;
+                    let at = buffer.offset + by * stride + bx * 4;
+                    if at + 4 > pool.map.size {
+                        continue;
+                    }
+                    unsafe {
+                        let pixel = *(pool.map.ptr.add(at) as *const u32);
+                        *window.pixels.add(y * ww + x) = (pixel & keep) | force;
+                    }
+                }
+            }
+            let id = window.id;
+            self.request(Request::Present { window: id, x: 0, y: 0, width: ww as u32, height: wh as u32 });
+            return false;
+        }
         let rows = (buffer.height.max(0) as usize).saturating_sub(origin.1).min(window.height as usize);
         let cols = (buffer.width.max(0) as usize).saturating_sub(origin.0).min(window.width as usize);
         let whole = before != Some((window.id, window.width, window.height));
@@ -974,17 +1521,17 @@ impl Bridge {
             None => (0, 0, cols, rows),
         };
         if x0 >= x1 || y0 >= y1 {
-            return;
+            return false;
         }
         let count = x1 - x0;
         let plain = keep == 0xFFFF_FFFF && force == 0;
         for y in y0..y1 {
             let start = buffer.offset + (y + origin.1) * stride + (x0 + origin.0) * 4;
-            if start + count * 4 > pool.size {
+            if start + count * 4 > pool.map.size {
                 break;
             }
             unsafe {
-                let src = core::slice::from_raw_parts(pool.ptr.add(start) as *const u32, count);
+                let src = core::slice::from_raw_parts(pool.map.ptr.add(start) as *const u32, count);
                 let dst = core::slice::from_raw_parts_mut(window.pixels.add(y * window.width as usize + x0), count);
                 if plain {
                     dst.copy_from_slice(src);
@@ -997,6 +1544,82 @@ impl Bridge {
         }
         let id = window.id;
         self.request(Request::Present { window: id, x: x0 as u32, y: y0 as u32, width: (x1 - x0) as u32, height: (y1 - y0) as u32 });
+        false
+    }
+
+    fn show_direct(&mut self, cid: u32, sid: u32, buffer_id: u32, origin: (usize, usize), popup: bool, damage: Option<(i32, i32, i32, i32)>, before: Option<(u32, u32, u32)>, scaling: Option<(i64, i64, i64, i64, i64, i64)>) -> bool {
+        let Some(client) = self.clients.get_mut(&cid) else {
+            return false;
+        };
+        let Some(buffer) = client.buffers.get(&buffer_id) else {
+            return false;
+        };
+        let Some(pool) = client.pools.get(&buffer.pool) else {
+            return false;
+        };
+        let map = pool.map.clone();
+        let (bw, bh, stride, offset, alpha) = (buffer.width.max(0) as usize, buffer.height.max(0) as usize, buffer.stride.max(0) as usize, buffer.offset, buffer.alpha);
+        let Some(surface) = client.surfaces.get_mut(&sid) else {
+            return false;
+        };
+        let Some(window) = surface.window.as_ref() else {
+            return false;
+        };
+        let (id, ww, wh) = (window.id, window.width as usize, window.height as usize);
+        if map.ptr.is_null() || ww == 0 || wh == 0 || stride % 4 != 0 {
+            return false;
+        }
+        let opaque = popup && !alpha;
+        if let Some((sx, sy, sw, sh, lw, lh)) = scaling {
+            let (pw, ph) = (bw.max(1) as i64, bh.max(1) as i64);
+            surface.scratch.resize(ww * wh, 0);
+            for y in 0..wh {
+                let ly = (y + origin.1) as i64;
+                let by = ((sy + ly * sh / lh) >> 8).clamp(0, ph - 1) as usize;
+                for x in 0..ww {
+                    let lx = (x + origin.0) as i64;
+                    let bx = ((sx + lx * sw / lw) >> 8).clamp(0, pw - 1) as usize;
+                    let at = offset + by * stride + bx * 4;
+                    if at + 4 <= map.size {
+                        surface.scratch[y * ww + x] = unsafe { *(map.ptr.add(at) as *const u32) };
+                    }
+                }
+            }
+            let pixels = surface.scratch.as_ptr();
+            surface.shown = None;
+            self.link.attach(Attach { window: id, pixels, stride: ww as u32, width: ww as u32, height: wh as u32, opaque, damage: (0, 0, ww as u32, wh as u32) });
+            return false;
+        }
+        let rows = bh.saturating_sub(origin.1).min(wh);
+        let cols = bw.saturating_sub(origin.0).min(ww);
+        if rows == 0 || cols == 0 {
+            return false;
+        }
+        let start = offset + origin.1 * stride + origin.0 * 4;
+        let end = start + (rows - 1) * stride + cols * 4;
+        if end > map.size {
+            return false;
+        }
+        let whole = before != Some((id, ww as u32, wh as u32));
+        let area = match damage.filter(|_| !whole) {
+            Some((dx, dy, dw, dh)) => {
+                let x0 = (dx - origin.0 as i32).max(0).min(cols as i32) as u32;
+                let y0 = (dy - origin.1 as i32).max(0).min(rows as i32) as u32;
+                let x1 = (dx.saturating_add(dw) - origin.0 as i32).max(0).min(cols as i32) as u32;
+                let y1 = (dy.saturating_add(dh) - origin.1 as i32).max(0).min(rows as i32) as u32;
+                (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+            }
+            None => (0, 0, cols as u32, rows as u32),
+        };
+        let pixels = unsafe { map.ptr.add(start) as *const u32 };
+        let previous = surface.shown.replace((buffer_id, map));
+        self.link.attach(Attach { window: id, pixels, stride: (stride / 4) as u32, width: cols as u32, height: rows as u32, opaque, damage: area });
+        if let Some((old, _)) = previous {
+            if old != buffer_id {
+                self.post(cid, Message::new(old, 0).finish());
+            }
+        }
+        true
     }
 
     fn announce_identity(&mut self, cid: u32, sid: u32) {
@@ -1031,19 +1654,25 @@ impl Bridge {
         };
         match existing {
             Some((_, _, _, w, h)) if (w, h) == (width, height) => {}
+            Some(_) if self.link.direct() => {
+                if let Some(w) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.as_mut()) {
+                    w.width = width;
+                    w.height = height;
+                }
+            }
             Some((window, shm, capacity, _, _)) => {
                 let bytes = width as usize * height as usize * 4;
                 let (new_shm, pixels, cap) = if bytes <= capacity {
                     (shm, self.window_pixels(cid, sid), capacity)
                 } else {
-                    let Some((id, ptr)) = alloc_buffer(bytes) else {
+                    let Some((id, ptr)) = self.window_buffer(bytes) else {
                         return;
                     };
                     (id, ptr, bytes)
                 };
                 self.request(Request::Attach { window, shm: new_shm, width, height });
                 if new_shm != shm {
-                    sys::shm_release(shm);
+                    release_shm(shm);
                 }
                 if let Some(w) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.as_mut()) {
                     w.shm = new_shm;
@@ -1055,12 +1684,12 @@ impl Bridge {
             }
             None => {
                 let bytes = width as usize * height as usize * 4;
-                let Some((shm, pixels)) = alloc_buffer(bytes) else {
+                let Some((shm, pixels)) = self.window_buffer(bytes) else {
                     return;
                 };
                 self.request(Request::CreateWindow { shm, width, height, title: Title::new(&title) });
                 let Some(window) = self.wait_created() else {
-                    sys::shm_release(shm);
+                    release_shm(shm);
                     return;
                 };
                 self.windows.insert(window, (cid, sid));
@@ -1224,19 +1853,19 @@ impl Bridge {
             let old = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.take());
             self.request(Request::Destroy { window });
             if let Some(old) = old {
-                sys::shm_release(old.shm);
+                release_shm(old.shm);
             }
             self.windows.remove(&window);
             self.placed.remove(&window);
         }
-        let parent_window = self.clients.get(&cid).and_then(|c| c.surfaces.get(&role.parent)).and_then(|s| s.window.as_ref()).map(|w| w.id).unwrap_or(0);
+        let (parent_window, px, py) = self.popup_parent(cid, role.parent, role.x, role.y);
         let bytes = width as usize * height as usize * 4;
-        let Some((shm, pixels)) = alloc_buffer(bytes) else {
+        let Some((shm, pixels)) = self.window_buffer(bytes) else {
             return;
         };
-        self.request(Request::CreatePopup { shm, width, height, parent: parent_window, x: role.x, y: role.y });
+        self.request(Request::CreatePopup { shm, width, height, parent: parent_window, x: px, y: py });
         let Some(window) = self.wait_created() else {
-            sys::shm_release(shm);
+            release_shm(shm);
             return;
         };
         self.request(Request::TrackPosition { window });
@@ -1255,17 +1884,17 @@ impl Bridge {
             let old = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.take());
             self.request(Request::Destroy { window });
             if let Some(old) = old {
-                sys::shm_release(old.shm);
+                release_shm(old.shm);
             }
             self.windows.remove(&window);
         }
         let bytes = width as usize * height as usize * 4;
-        let Some((shm, pixels)) = alloc_buffer(bytes) else {
+        let Some((shm, pixels)) = self.window_buffer(bytes) else {
             return;
         };
         self.request(Request::CreatePopup { shm, width, height, parent: 0, x, y });
         let Some(window) = self.wait_created() else {
-            sys::shm_release(shm);
+            release_shm(shm);
             return;
         };
         self.windows.insert(window, (cid, sid));
@@ -1274,23 +1903,198 @@ impl Bridge {
         }
     }
 
+    fn layer_size(&self, role: &LayerRole) -> (u32, u32) {
+        let (sw, sh) = (self.screen.0 as i32, self.screen.1 as i32);
+        let [top, right, bottom, left] = role.margins;
+        let w = if role.size.0 == 0 && role.anchor & 12 == 12 { (sw - left - right).max(1) as u32 } else { role.size.0.max(1) };
+        let h = if role.size.1 == 0 && role.anchor & 3 == 3 { (sh - top - bottom).max(1) as u32 } else { role.size.1.max(1) };
+        (w, h)
+    }
+
+    fn configure_layer(&mut self, cid: u32, sid: u32, role: LayerRole) {
+        let size = self.layer_size(&role);
+        let window = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.window.as_ref()).map(|w| w.id);
+        if let (Some(window), true) = (window, role.configured) {
+            self.request(Request::ConfigureLayer { window, anchor: role.anchor, exclusive: role.exclusive, margins: role.margins });
+        }
+        if let Some(r) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.layer.as_mut()) {
+            r.configured = true;
+            r.dirty = false;
+            if r.sent == size {
+                return;
+            }
+            r.sent = size;
+        }
+        let serial = self.next_serial();
+        self.post(cid, Message::new(role.object, 0).u32(serial).u32(size.0).u32(size.1).finish());
+    }
+
+    fn ensure_layer(&mut self, cid: u32, sid: u32, width: u32, height: u32) {
+        let Some((existing, role)) = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| Some((s.window.as_ref().map(|w| (w.id, w.shm, w.capacity, w.width, w.height)), s.layer?))) else {
+            return;
+        };
+        match existing {
+            Some((_, _, _, w, h)) if (w, h) == (width, height) => {}
+            Some((window, shm, capacity, _, _)) => {
+                let bytes = width as usize * height as usize * 4;
+                let (new_shm, pixels, cap) = if bytes <= capacity {
+                    (shm, self.window_pixels(cid, sid), capacity)
+                } else {
+                    let Some((id, ptr)) = alloc_buffer(bytes) else {
+                        return;
+                    };
+                    (id, ptr, bytes)
+                };
+                self.request(Request::Attach { window, shm: new_shm, width, height });
+                if new_shm != shm {
+                    release_shm(shm);
+                }
+                if let Some(w) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.as_mut()) {
+                    w.shm = new_shm;
+                    w.pixels = pixels;
+                    w.capacity = cap;
+                    w.width = width;
+                    w.height = height;
+                }
+            }
+            None => {
+                let bytes = width as usize * height as usize * 4;
+                let Some((shm, pixels)) = alloc_buffer(bytes) else {
+                    return;
+                };
+                self.request(Request::CreateLayer { shm, width, height, layer: role.layer, anchor: role.anchor, exclusive: role.exclusive, margins: role.margins, keyboard: (role.keyboard != 0) as u32 });
+                let Some(window) = self.wait_created() else {
+                    release_shm(shm);
+                    return;
+                };
+                self.windows.insert(window, (cid, sid));
+                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)) {
+                    s.window = Some(Window { id: window, shm, pixels, capacity: bytes, width, height });
+                }
+            }
+        }
+    }
+
+    fn popup_parent(&self, cid: u32, parent_sid: u32, x: i32, y: i32) -> (u32, i32, i32) {
+        let Some(surface) = self.clients.get(&cid).and_then(|c| c.surfaces.get(&parent_sid)) else {
+            return (0, x, y);
+        };
+        let window = surface.window.as_ref().map(|w| w.id).unwrap_or(0);
+        if surface.layer.is_some() {
+            let (ox, oy) = self.placed.get(&window).copied().unwrap_or((0, 0));
+            return (0, ox + x, oy + y);
+        }
+        (window, x, y)
+    }
+
+    fn toplevel_states(state: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (bit, value) in [(hxproto::TOPLEVEL_MAXIMIZED, 0u32), (hxproto::TOPLEVEL_MINIMIZED, 1), (hxproto::TOPLEVEL_ACTIVE, 2)] {
+            if state & bit != 0 {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    fn describe_toplevel(&mut self, cid: u32, handle: u32, toplevel: u32) {
+        let Some(t) = self.toplevels.get(&toplevel).cloned() else {
+            return;
+        };
+        self.post(cid, Message::new(handle, 0).string(&t.title).finish());
+        self.post(cid, Message::new(handle, 1).string(&t.app_id).finish());
+        self.post(cid, Message::new(handle, 4).array(&Self::toplevel_states(t.state)).finish());
+        self.post(cid, Message::new(handle, 5).finish());
+    }
+
+    fn announce_toplevel(&mut self, cid: u32, manager: u32, toplevel: u32) {
+        let Some(client) = self.clients.get_mut(&cid) else {
+            return;
+        };
+        let handle = client.next_server_id;
+        client.next_server_id += 1;
+        client.handles.push((handle, toplevel));
+        client.objects.insert(handle, (Kind::ToplevelHandle, toplevel));
+        let outputs: Vec<u32> = client.outputs.iter().map(|o| o.0).collect();
+        self.post(cid, Message::new(manager, 0).u32(handle).finish());
+        for output in outputs {
+            self.post(cid, Message::new(handle, 2).u32(output).finish());
+        }
+        self.describe_toplevel(cid, handle, toplevel);
+        self.send_geometry(cid, handle, toplevel);
+    }
+
+    fn send_geometry(&mut self, cid: u32, handle: u32, toplevel: u32) {
+        let Some(&(x, y, w, h)) = self.geometry.get(&toplevel) else {
+            return;
+        };
+        let shells = self.clients.get(&cid).map(|c| c.shells.clone()).unwrap_or_default();
+        for shell in shells {
+            self.post(cid, Message::new(shell, 0).u32(handle).i32(x).i32(y).i32(w).i32(h).finish());
+        }
+    }
+
+    fn geometry_changed(&mut self, toplevel: u32, area: (i32, i32, i32, i32)) {
+        self.geometry.insert(toplevel, area);
+        let targets: Vec<(u32, Vec<u32>)> = self.clients.iter().filter(|(_, c)| !c.shells.is_empty()).map(|(cid, c)| (*cid, c.handles.iter().filter(|(_, t)| *t == toplevel).map(|(h, _)| *h).collect())).collect();
+        for (cid, handles) in targets {
+            for handle in handles {
+                self.send_geometry(cid, handle, toplevel);
+            }
+        }
+    }
+
+    fn toplevel_changed(&mut self, toplevel: u32, state: u32, title: String, app_id: String) {
+        let fresh = !self.toplevels.contains_key(&toplevel);
+        self.toplevels.insert(toplevel, ForeignToplevel { state, title, app_id });
+        let targets: Vec<(u32, Vec<u32>, Vec<u32>)> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| !c.toplevel_managers.is_empty())
+            .map(|(cid, c)| (*cid, c.toplevel_managers.clone(), c.handles.iter().filter(|(_, t)| *t == toplevel).map(|(h, _)| *h).collect()))
+            .collect();
+        for (cid, managers, handles) in targets {
+            if fresh || handles.is_empty() {
+                for manager in managers {
+                    self.announce_toplevel(cid, manager, toplevel);
+                }
+            } else {
+                for handle in handles {
+                    self.describe_toplevel(cid, handle, toplevel);
+                }
+            }
+        }
+    }
+
+    fn toplevel_closed(&mut self, toplevel: u32) {
+        self.toplevels.remove(&toplevel);
+        let targets: Vec<(u32, Vec<u32>)> = self.clients.iter().map(|(cid, c)| (*cid, c.handles.iter().filter(|(_, t)| *t == toplevel).map(|(h, _)| *h).collect())).collect();
+        for (cid, handles) in targets {
+            for handle in handles {
+                self.post(cid, Message::new(handle, 6).finish());
+            }
+        }
+    }
+
+    fn window_buffer(&self, bytes: usize) -> Option<(u32, *mut u32)> {
+        if self.link.direct() {
+            return Some((0, core::ptr::null_mut()));
+        }
+        alloc_buffer(bytes)
+    }
+
     fn window_pixels(&self, cid: u32, sid: u32) -> *mut u32 {
         self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.window.as_ref()).map(|w| w.pixels).unwrap_or(core::ptr::null_mut())
     }
 
     fn wait_created(&mut self) -> Option<u32> {
-        let mut buf = [0u8; MESSAGE_MAX];
         for _ in 0..100 {
-            match sys::msg_recv(&mut buf, 50) {
-                Some((sender, len)) if sender == self.server => match Event::decode(&buf[..len]) {
-                    Some(Event::Created { window }) => return Some(window),
-                    Some(Event::Rejected { .. }) => return None,
-                    Some(other) => self.backlog.push_back(other),
-                    None => {}
-                },
-                Some(_) => {}
+            match self.link.receive(50) {
+                Some(Event::Created { window }) => return Some(window),
+                Some(Event::Rejected { .. }) => return None,
+                Some(other) => self.backlog.push_back(other),
                 None => {
-                    if !sys::proc_alive(self.server) {
+                    if !self.link.alive() {
                         return None;
                     }
                 }
@@ -1303,9 +2107,15 @@ impl Bridge {
         let window = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.take());
         if let Some(window) = window {
             self.request(Request::Destroy { window: window.id });
-            sys::shm_release(window.shm);
+            release_shm(window.shm);
             self.windows.remove(&window.id);
             self.placed.remove(&window.id);
+        }
+        let shown = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.shown.take());
+        if let Some((buffer, _)) = shown {
+            if self.clients.get(&cid).map(|c| c.buffers.contains_key(&buffer)).unwrap_or(false) {
+                self.post(cid, Message::new(buffer, 0).finish());
+            }
         }
         if self.pointer_focus.map(|(c, s)| c == cid && s == sid).unwrap_or(false) {
             self.pointer_focus = None;
@@ -1315,10 +2125,20 @@ impl Bridge {
         }
     }
 
-    fn surface_visible(surface: &Surface, placed: &BTreeMap<u32, (i32, i32)>, screen: (u32, u32)) -> bool {
+    fn surface_visible(
+        surface: &Surface,
+        placed: &BTreeMap<u32, (i32, i32)>,
+        toplevels: &BTreeMap<u32, ForeignToplevel>,
+        screen: (u32, u32),
+    ) -> bool {
         let Some(window) = surface.window.as_ref() else {
             return false;
         };
+        if let Some(toplevel) = toplevels.get(&window.id) {
+            if toplevel.state & hxproto::TOPLEVEL_MINIMIZED != 0 {
+                return false;
+            }
+        }
         let Some(&(x, y)) = placed.get(&window.id) else {
             return false;
         };
@@ -1334,11 +2154,12 @@ impl Bridge {
         self.last_frame = now;
         let time = self.now();
         let placed = &self.placed;
+        let toplevels = &self.toplevels;
         let screen = self.screen;
         let mut callbacks: Vec<(u32, u32)> = Vec::new();
         for (cid, client) in self.clients.iter_mut() {
             for surface in client.surfaces.values_mut() {
-                if Self::surface_visible(surface, placed, screen) {
+                if Self::surface_visible(surface, placed, toplevels, screen) {
                     callbacks.extend(core::mem::take(&mut surface.frames).into_iter().map(|callback| (*cid, callback)));
                 }
             }
@@ -1351,9 +2172,10 @@ impl Bridge {
 
     fn frames_waiting(&self) -> bool {
         let placed = &self.placed;
+        let toplevels = &self.toplevels;
         let screen = self.screen;
         self.clients.values().any(|client| {
-            client.surfaces.values().any(|surface| !surface.frames.is_empty() && Self::surface_visible(surface, placed, screen))
+            client.surfaces.values().any(|surface| !surface.frames.is_empty() && Self::surface_visible(surface, placed, toplevels, screen))
         })
     }
 
@@ -1400,6 +2222,30 @@ impl Bridge {
             Event::Screen { width, height } => {
                 self.screen_changed(width, height);
             }
+            Event::ToplevelState { toplevel, state, title, app_id, .. } => {
+                self.toplevel_changed(toplevel, state, String::from(title.as_str()), String::from(app_id.as_str()));
+            }
+            Event::ToplevelClosed { toplevel } => {
+                self.geometry.remove(&toplevel);
+                self.toplevel_closed(toplevel);
+            }
+            Event::ToplevelGeometry { toplevel, x, y, width, height } => self.geometry_changed(toplevel, (x, y, width, height)),
+            Event::LayerConfigured { window, x, y, width, height } => {
+                self.placed.insert(window, (x, y));
+                let Some(&(cid, sid)) = self.windows.get(&window) else {
+                    return;
+                };
+                let role = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.layer);
+                if let Some(role) = role {
+                    if role.sent != (width, height) {
+                        if let Some(r) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.layer.as_mut()) {
+                            r.sent = (width, height);
+                        }
+                        let serial = self.next_serial();
+                        self.post(cid, Message::new(role.object, 0).u32(serial).u32(width).u32(height).finish());
+                    }
+                }
+            }
             Event::Placed { window, x, y } => {
                 self.placed.insert(window, (x, y));
                 if let Some(xwin) = self.window_xwin(window) {
@@ -1416,7 +2262,7 @@ impl Bridge {
                     self.windows.remove(&window);
                     self.placed.remove(&window);
                     if let Some(w) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.take()) {
-                        sys::shm_release(w.shm);
+                        release_shm(w.shm);
                     }
                     return;
                 }
@@ -1429,7 +2275,7 @@ impl Bridge {
                     role.done = true;
                     let object = role.object;
                     if let Some(w) = s.window.take() {
-                        sys::shm_release(w.shm);
+                        release_shm(w.shm);
                     }
                     Some(object)
                 });
@@ -1445,7 +2291,7 @@ impl Bridge {
                 }
                 let toplevel = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| {
                     if let Some(w) = s.window.take() {
-                        sys::shm_release(w.shm);
+                        release_shm(w.shm);
                     }
                     s.closed = true;
                     s.toplevel
@@ -1522,10 +2368,108 @@ impl Bridge {
         }
     }
 
+    fn text_mime(mimes: &[String]) -> Option<String> {
+        ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"].iter().find(|m| mimes.iter().any(|x| x == *m)).map(|m| String::from(*m)).or_else(|| mimes.first().cloned())
+    }
+
+    fn take_selection(&mut self, cid: u32, source: u32) {
+        if let Some((ocid, osrc)) = self.clipboard_owner.take() {
+            if (ocid, osrc) != (cid, source) {
+                self.post(ocid, Message::new(osrc, 2).finish());
+            }
+        }
+        if source == 0 {
+            return;
+        }
+        let Some(mimes) = self.clients.get(&cid).and_then(|c| c.sources.get(&source)).cloned() else {
+            return;
+        };
+        let Some(mime) = Self::text_mime(&mimes) else {
+            return;
+        };
+        let Ok((read_end, write_end)) = sys::pipe_flags(0) else {
+            return;
+        };
+        self.post_fd(cid, Message::new(source, 1).string(&mime).finish(), write_end);
+        sys::close(write_end);
+        sys::set_nonblocking(read_end);
+        let mut data = Vec::new();
+        let deadline = sys::uptime_ms() + 1000;
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sys::read(read_end, &mut buf);
+            if n > 0 {
+                data.extend_from_slice(&buf[..n as usize]);
+                if data.len() > 1 << 20 {
+                    break;
+                }
+                continue;
+            }
+            if n == 0 || sys::uptime_ms() > deadline {
+                break;
+            }
+            sys::sleep_ms(2);
+        }
+        sys::close(read_end);
+        self.clipboard_owner = Some((cid, source));
+        let text = String::from_utf8_lossy(&data).into_owned();
+        self.request(Request::SetSelection { mime: Title::new("text/plain;charset=utf-8"), data: hxproto::Text::new(&text) });
+        self.clipboard = Some((String::from("text/plain;charset=utf-8"), data));
+    }
+
+    fn refresh_clipboard(&mut self) {
+        self.request(Request::GetSelection { mime: Title::new("") });
+        let deadline = sys::uptime_ms() + 300;
+        while sys::uptime_ms() < deadline {
+            let Some(event) = self.link.receive(50) else {
+                continue;
+            };
+            match Some(event) {
+                Some(Event::Selection { mime, data }) => {
+                    if !mime.as_str().is_empty() && self.clipboard_owner.is_none() {
+                        self.clipboard = Some((String::from(mime.as_str()), data.as_str().as_bytes().to_vec()));
+                    }
+                    return;
+                }
+                Some(other) => self.backlog.push_back(other),
+                None => {}
+            }
+        }
+    }
+
+    fn offer_selection(&mut self, cid: u32) {
+        let devices = self.clients.get(&cid).map(|c| c.data_devices.clone()).unwrap_or_default();
+        if devices.is_empty() {
+            return;
+        }
+        if self.clipboard_owner.map(|(c, _)| c != cid).unwrap_or(true) {
+            self.refresh_clipboard();
+        }
+        for device in devices {
+            if self.clipboard.is_none() {
+                self.post(cid, Message::new(device, 5).u32(0).finish());
+                continue;
+            }
+            let Some(client) = self.clients.get_mut(&cid) else {
+                return;
+            };
+            let offer = client.next_server_id;
+            client.next_server_id += 1;
+            client.offers.push(offer);
+            client.objects.insert(offer, (Kind::DataOffer, 0));
+            self.post(cid, Message::new(device, 0).u32(offer).finish());
+            for mime in ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"] {
+                self.post(cid, Message::new(offer, 0).string(mime).finish());
+            }
+            self.post(cid, Message::new(device, 5).u32(offer).finish());
+        }
+    }
+
     fn keyboard_enter(&mut self, cid: u32, sid: u32) {
         if self.keyboard_focus == Some((cid, sid)) {
             return;
         }
+        self.offer_selection(cid);
         self.keyboard_leave();
         let keyboards = self.clients.get(&cid).map(|c| c.keyboards.clone()).unwrap_or_default();
         let serial = self.next_serial();
@@ -1591,32 +2535,158 @@ impl Bridge {
                 for fd in client.fds {
                     sys::close(fd);
                 }
+                for (_, fds) in client.out {
+                    for fd in fds {
+                        sys::close(fd);
+                    }
+                }
                 sys::close(client.fd);
             }
         }
     }
 
-    fn pump_server(&mut self) {
+    pub fn pump_server(&mut self) {
         while let Some(event) = self.backlog.pop_front() {
             self.server_event(event);
         }
-        let mut buf = [0u8; MESSAGE_MAX];
-        while let Some((sender, len)) = sys::msg_recv(&mut buf, 0) {
-            if sender != self.server {
-                continue;
+        while let Some(event) = self.link.receive(0) {
+            self.server_event(event);
+        }
+    }
+
+    pub fn deliver(&mut self, event: Event) {
+        while let Some(old) = self.backlog.pop_front() {
+            self.server_event(old);
+        }
+        self.server_event(event);
+    }
+
+    pub fn start(link: L) -> Result<Bridge<L>, String> {
+        let dir = runtime_dir();
+        let mut partial = String::new();
+        for part in dir.split('/').filter(|p| !p.is_empty()) {
+            partial.push('/');
+            partial.push_str(part);
+            sys::mkdir(&partial);
+        }
+        sys::chmod(&dir, 0o700);
+        let name = env::var("WAYLAND_DISPLAY").unwrap_or("wayland-0");
+        let path = alloc::format!("{}/{}", dir, name);
+        sys::unlink(&path);
+        let listen = unix::listen_at(&path, unix::SOCK_STREAM | unix::SOCK_NONBLOCK);
+        if listen < 0 {
+            return Err(alloc::format!("cannot listen on {}: {}", path, sys::error_name(listen)));
+        }
+        let keymap = fs::read("/usr/share/hamix/xkb/us.xkb").map(|mut k| {
+            k.push(0);
+            k
+        });
+        let info = hxstd::display::info();
+        let screen = if info.current.width > 0 { (info.current.width, info.current.height) } else { (1024, 768) };
+        println!("hxwayland: listening on {}", path);
+        Ok(Bridge {
+            link,
+            listen: listen as u64,
+            clients: BTreeMap::new(),
+            next_client: 1,
+            windows: BTreeMap::new(),
+            serial: 0,
+            keymap: keymap.unwrap_or_default(),
+            pointer_focus: None,
+            keyboard_focus: None,
+            screen,
+            started: sys::uptime_ms(),
+            last_frame: 0,
+            backlog: VecDeque::new(),
+            placed: BTreeMap::new(),
+            popup_order: 0,
+            xlisten: None,
+            xwm: None,
+            xcheck: 0,
+            toplevels: BTreeMap::new(),
+            subscribed: false,
+            clipboard: None,
+            clipboard_owner: None,
+            path,
+            geometry: BTreeMap::new(),
+        })
+    }
+
+    pub fn fds(&mut self) -> Vec<(i32, bool)> {
+        self.xwm_prepare();
+        let mut fds = alloc::vec![(self.listen as i32, false)];
+        let xlisten = if self.xwm.is_none() { self.xlisten } else { None };
+        fds.push((xlisten.map(|f| f as i32).unwrap_or(-1), false));
+        fds.push((self.xwm.as_ref().map(|x| x.fd as i32).unwrap_or(-1), false));
+        for client in self.clients.values() {
+            fds.push((client.fd as i32, !client.out.is_empty()));
+        }
+        fds
+    }
+
+    pub fn timeout_ms(&self) -> Option<u64> {
+        if self.frames_waiting() {
+            Some(FRAME_MS)
+        } else if !self.backlog.is_empty() {
+            Some(0)
+        } else {
+            None
+        }
+    }
+
+    pub fn service(&mut self, wait_ms: i32) {
+        let order: Vec<u32> = self.clients.keys().copied().collect();
+        let mut fds: Vec<PollFd> = Vec::with_capacity(order.len() + 3);
+        let xlisten = if self.xwm.is_none() { self.xlisten } else { None };
+        let xfd = self.xwm.as_ref().map(|x| x.fd);
+        fds.push(PollFd { fd: self.listen as i32, events: POLLIN, revents: 0 });
+        fds.push(PollFd { fd: xlisten.map(|f| f as i32).unwrap_or(-1), events: POLLIN, revents: 0 });
+        fds.push(PollFd { fd: xfd.map(|f| f as i32).unwrap_or(-1), events: POLLIN, revents: 0 });
+        for cid in order.iter() {
+            let client = &self.clients[cid];
+            let events = if client.out.is_empty() { POLLIN } else { POLLIN | POLLOUT };
+            fds.push(PollFd { fd: client.fd as i32, events, revents: 0 });
+        }
+        unix::poll(&mut fds, wait_ms);
+        if fds[0].revents & POLLIN != 0 {
+            self.accept();
+        }
+        self.pump_server();
+        for (i, cid) in order.iter().enumerate() {
+            let revents = fds[i + 3].revents;
+            if revents & (POLLIN | POLLHUP) != 0 {
+                self.read_client(*cid);
             }
-            if let Some(event) = Event::decode(&buf[..len]) {
-                self.server_event(event);
+            if revents & POLLOUT != 0 {
+                if let Some(client) = self.clients.get_mut(cid) {
+                    flush_out(client);
+                }
             }
         }
+        if xlisten.is_some() && fds[1].revents & POLLIN != 0 {
+            self.xwm_launch();
+        }
+        if xfd.is_some() && fds[2].revents & (POLLIN | POLLHUP) != 0 {
+            self.xwm_read(true);
+        }
+        self.flush_frames();
+        self.xwm_idle_check();
+        self.reap();
+    }
+
+    pub fn shutdown(&mut self) {
+        sys::unlink(&self.path);
     }
 }
 
 fn release_pool(pool: Pool) {
-    if !pool.ptr.is_null() {
-        unix::unmap(pool.ptr, pool.size as u64);
-    }
     sys::close(pool.fd);
+}
+
+fn release_shm(shm: u32) {
+    if shm != 0 {
+        sys::shm_release(shm);
+    }
 }
 
 fn alloc_buffer(bytes: usize) -> Option<(u32, *mut u32)> {
@@ -1634,105 +2704,3 @@ fn runtime_dir() -> String {
     }
     alloc::format!("/tmp/runtime-{}", sys::getuid())
 }
-
-fn main() -> i32 {
-    let server = sys::service_lookup(hxproto::SERVICE);
-    sys::service_register("hxwayland");
-    if server < 0 {
-        eprintln!("hxwayland: hxserver is not running (start it with startx)");
-        return 1;
-    }
-    let dir = runtime_dir();
-    let mut partial = String::new();
-    for part in dir.split('/').filter(|p| !p.is_empty()) {
-        partial.push('/');
-        partial.push_str(part);
-        sys::mkdir(&partial);
-    }
-    sys::chmod(&dir, 0o700);
-    let name = env::var("WAYLAND_DISPLAY").unwrap_or("wayland-0");
-    let path = alloc::format!("{}/{}", dir, name);
-    sys::unlink(&path);
-    let listen = unix::listen_at(&path, unix::SOCK_STREAM | unix::SOCK_NONBLOCK);
-    if listen < 0 {
-        eprintln!("hxwayland: cannot listen on {}: {}", path, sys::error_name(listen));
-        return 1;
-    }
-    let mailbox = unix::mailbox_fd();
-    if mailbox < 0 {
-        eprintln!("hxwayland: no mailbox fd");
-        return 1;
-    }
-    let keymap = fs::read("/usr/share/hamix/xkb/us.xkb").map(|mut k| {
-        k.push(0);
-        k
-    });
-    let info = hamix_std::display::info();
-    let screen = if info.current.width > 0 { (info.current.width, info.current.height) } else { (1024, 768) };
-    println!("hxwayland: listening on {}", path);
-    let mut bridge = Bridge {
-        server,
-        listen: listen as u64,
-        mailbox: mailbox as u64,
-        clients: BTreeMap::new(),
-        next_client: 1,
-        windows: BTreeMap::new(),
-        serial: 0,
-        keymap: keymap.unwrap_or_default(),
-        pointer_focus: None,
-        keyboard_focus: None,
-        screen,
-        started: sys::uptime_ms(),
-        last_frame: 0,
-        backlog: VecDeque::new(),
-        placed: BTreeMap::new(),
-        popup_order: 0,
-        xlisten: None,
-        xwm: None,
-        xcheck: 0,
-    };
-    let mut fds: Vec<PollFd> = Vec::with_capacity(8);
-    let mut order: Vec<u32> = Vec::with_capacity(8);
-    loop {
-        bridge.xwm_prepare();
-        fds.clear();
-        order.clear();
-        fds.push(PollFd { fd: bridge.listen as i32, events: POLLIN, revents: 0 });
-        fds.push(PollFd { fd: bridge.mailbox as i32, events: POLLIN, revents: 0 });
-        let xlisten = if bridge.xwm.is_none() { bridge.xlisten } else { None };
-        let xfd = bridge.xwm.as_ref().map(|x| x.fd);
-        fds.push(PollFd { fd: xlisten.map(|f| f as i32).unwrap_or(-1), events: POLLIN, revents: 0 });
-        fds.push(PollFd { fd: xfd.map(|f| f as i32).unwrap_or(-1), events: POLLIN, revents: 0 });
-        order.extend(bridge.clients.keys().copied());
-        for cid in order.iter() {
-            fds.push(PollFd { fd: bridge.clients[cid].fd as i32, events: POLLIN, revents: 0 });
-        }
-        let timeout = if bridge.frames_waiting() { FRAME_MS as i32 } else if !bridge.backlog.is_empty() { 0 } else { 1000 };
-        unix::poll(&mut fds, timeout);
-        if fds[0].revents & POLLIN != 0 {
-            bridge.accept();
-        }
-        bridge.pump_server();
-        for (i, cid) in order.iter().enumerate() {
-            let revents = fds[i + 4].revents;
-            if revents & (POLLIN | POLLHUP) != 0 {
-                bridge.read_client(*cid);
-            }
-        }
-        if xlisten.is_some() && fds[2].revents & POLLIN != 0 {
-            bridge.xwm_launch();
-        }
-        if xfd.is_some() && fds[3].revents & (POLLIN | POLLHUP) != 0 {
-            bridge.xwm_read(true);
-        }
-        bridge.flush_frames();
-        bridge.xwm_idle_check();
-        bridge.reap();
-        if !sys::proc_alive(bridge.server) {
-            sys::unlink(&path);
-            return 0;
-        }
-    }
-}
-
-entry!(main);

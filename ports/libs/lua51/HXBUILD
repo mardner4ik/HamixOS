@@ -1,0 +1,32 @@
+pkgname=lua51
+pkgver=5.1.5
+pkgdesc="Lua 5.1 as a shared library for programs that embed it"
+source="https://www.lua.org/ftp/lua-$pkgver.tar.gz"
+sha256="2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333"
+builddir="lua-$pkgver"
+depends=""
+
+build() {
+    (cd src && for f in lapi lcode ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib ldblib liolib lmathlib loslib ltablib lstrlib loadlib linit; do
+        $CC -O2 -fPIC -DLUA_USE_POSIX -DLUA_USE_DLOPEN -c $f.c -o $f.o
+    done && $CC -shared -Wl,-soname,liblua5.1.so -o liblua5.1.so *.o -lm)
+}
+
+package() {
+    install -Dm755 src/liblua5.1.so "$pkgdir/usr/lib/liblua5.1.so"
+    for h in lua.h luaconf.h lualib.h lauxlib.h; do
+        install -Dm644 "src/$h" "$pkgdir/usr/include/lua5.1/$h"
+    done
+    mkdir -p "$pkgdir/usr/lib/pkgconfig"
+    cat > "$pkgdir/usr/lib/pkgconfig/lua51.pc" <<PC
+prefix=/usr
+libdir=\${prefix}/lib
+includedir=\${prefix}/include/lua5.1
+
+Name: Lua
+Description: Lua 5.1 language engine
+Version: $pkgver
+Libs: -L\${libdir} -llua5.1 -lm
+Cflags: -I\${includedir}
+PC
+}

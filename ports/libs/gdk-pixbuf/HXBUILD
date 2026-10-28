@@ -1,0 +1,18 @@
+pkgname=gdk-pixbuf
+pkgver=2.42.12
+pkgdesc="Image loading library"
+source="https://download.gnome.org/sources/gdk-pixbuf/2.42/gdk-pixbuf-$pkgver.tar.xz"
+sha256="b9505b3445b9a7e48ced34760c3bcb73e966df3ac94c95a148cb669ab748e3c7"
+builddir="gdk-pixbuf-$pkgver"
+depends="glib libpng"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dman=false -Dgtk_doc=false -Dintrospection=disabled -Dtests=false -Dinstalled_tests=false \
+        -Djpeg=disabled -Dtiff=disabled -Dothers=disabled -Dgio_sniffing=false -Dbuiltin_loaders=png
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

@@ -1,0 +1,11 @@
+--- a/options/ansi/include/setjmp.h
++++ b/options/ansi/include/setjmp.h
+@@ -36,6 +36,8 @@
+ #if __MLIBC_POSIX_OPTION
+ __attribute__((__returns_twice__)) int sigsetjmp(sigjmp_buf buffer, int savesigs);
+ __attribute__((__noreturn__)) void siglongjmp(sigjmp_buf buffer, int value);
++__attribute__((__returns_twice__)) int _setjmp(jmp_buf buffer);
++__attribute__((__noreturn__)) void _longjmp(jmp_buf buffer, int value);
+ #endif // __MLIBC_POSIX_OPTION
+ 
+ #endif /* !__MLIBC_ABI_ONLY */

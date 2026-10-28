@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use hamix_std::sys;
+use hxstd::sys;
 use hxclient::ui;
 use vellum::gfx::blend;
 use vellum::Area;
@@ -167,6 +167,25 @@ fn ease_out(t: f32) -> f32 {
 }
 
 
+fn cube_root(v: f32) -> f32 {
+    if v <= 0.0 {
+        return 0.0;
+    }
+    let mut x = if v > 1.0 { v } else { 1.0 };
+    for _ in 0..12 {
+        x = (2.0 * x + v / (x * x)) / 3.0;
+    }
+    x
+}
+
+fn ease_out_inverse(y: f32) -> f32 {
+    1.0 - cube_root((1.0 - y).clamp(0.0, 1.0))
+}
+
+fn reversing(effect: Effect) -> bool {
+    matches!(effect, Effect::Open | Effect::Restore)
+}
+
 fn smoothstep(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
@@ -294,7 +313,7 @@ impl Animation {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample_row(pixels: &[u32], size: (i32, i32), source_y: i32, x0: i32, width: i32, alpha: u32, frame: &mut [u32], frame_w: i32, y: i32, clip: Area) {
+fn sample_row(pixels: &[u32], size: (i32, i32), stride: i32, source_y: i32, x0: i32, width: i32, alpha: u32, frame: &mut [u32], frame_w: i32, y: i32, clip: Area) {
     if width <= 0 || size.0 <= 0 || source_y < 0 || source_y >= size.1 || y < clip.y || y >= clip.bottom() || alpha == 0 {
         return;
     }
@@ -303,7 +322,7 @@ fn sample_row(pixels: &[u32], size: (i32, i32), source_y: i32, x0: i32, width: i
     if start >= end {
         return;
     }
-    let row_start = (source_y * size.0) as usize;
+    let row_start = (source_y * stride) as usize;
     let row = &pixels[row_start..row_start + size.0 as usize];
     let step = ((size.0 as u64) << 16) / width as u64;
     let mut accumulator = (start - x0) as u64 * step;
@@ -331,6 +350,10 @@ fn edge_pixel(frame: &mut [u32], frame_w: i32, x: i32, y: i32, clip: Area, pixel
 }
 
 pub fn scaled_block(pixels: &[u32], size: (i32, i32), area: Area, alpha: u32, frame: &mut [u32], frame_w: i32, clip: Area) {
+    scaled_rows(pixels, size, size.0, area, alpha, frame, frame_w, clip);
+}
+
+pub fn scaled_rows(pixels: &[u32], size: (i32, i32), stride: i32, area: Area, alpha: u32, frame: &mut [u32], frame_w: i32, clip: Area) {
     if size.1 <= 0 || area.h <= 0 {
         return;
     }
@@ -339,7 +362,7 @@ pub fn scaled_block(pixels: &[u32], size: (i32, i32), area: Area, alpha: u32, fr
     let bottom = area.bottom().min(clip.bottom());
     for y in top..bottom {
         let source_y = ((((y - area.y) as u64) * step_y) >> 16) as i32;
-        sample_row(pixels, size, source_y, area.x, area.w, alpha, frame, frame_w, y, clip);
+        sample_row(pixels, size, stride, source_y, area.x, area.w, alpha, frame, frame_w, y, clip);
     }
 }
 
@@ -350,10 +373,6 @@ impl Nook {
 
     pub fn animating(&self, id: u32) -> bool {
         self.animations.iter().any(|a| a.window == id) || self.pending_open.iter().any(|(w, _)| *w == id)
-    }
-
-    pub fn dock_anchored(&self) -> bool {
-        self.animations.iter().any(|a| a.kind == Kind::MagicLamp)
     }
 
     pub fn stretch_allowed(&self, index: usize, now: u64) -> bool {
@@ -434,27 +453,11 @@ impl Nook {
     }
 
     fn dock_target(&self, id: u32) -> Area {
-        let items = self.dock_items();
-        let icon = self.core.index_of(id).map(|i| self.core.windows[i].icon.clone()).unwrap_or_default();
-        let wanted = crate::app_by_icon(&icon);
-        let index = items.iter().position(|item| match item {
-            crate::dock::DockItem::Window(w) => *w == id,
-            crate::dock::DockItem::App(app) => Some(*app) == wanted,
-            crate::dock::DockItem::More => false,
-        });
-        let visible = self.dock_visible_items();
-        match index {
-            Some(index) if index < visible.len() && visible[index] != crate::dock::DockItem::More => self.dock_slot_area(index, true),
-            Some(_) => match visible.iter().position(|i| *i == crate::dock::DockItem::More) {
-                Some(more) => self.dock_slot_area(more, true),
-                None => self.dock_slot_area(0, true),
-            },
-            None => {
-                let dock = self.dock_shown_area();
-                let icon = self.dock_icon();
-                Area::new(self.core.screen.width / 2 - icon / 2, dock.y + self.dock_pad(), icon, icon)
-            }
+        if let Some((_, area)) = self.minimize_targets.iter().find(|(w, _)| *w == id) {
+            return *area;
         }
+        let size = 48;
+        Area::new(self.core.screen.width / 2 - size / 2, self.core.screen.height - size - 18, size, size)
     }
 
     pub fn capture(&mut self, index: usize) -> Option<(Area, Vec<u32>)> {
@@ -468,11 +471,11 @@ impl Nook {
             saved.extend_from_slice(&self.core.screen.frame[start..start + area.w as usize]);
         }
         let previous_clip = self.core.screen.clip;
-        let buttons = self.hot_buttons.len();
+        let buttons = self.hot_buttons.clone();
         self.core.screen.clip = area;
         let focused = self.core.focused() == Some(self.core.windows[index].id);
         self.draw_window(index, focused);
-        self.hot_buttons.truncate(buttons);
+        self.hot_buttons = buttons;
         self.core.screen.clip = previous_clip;
         let mut pixels = Vec::with_capacity((area.w * area.h) as usize);
         for y in area.y..area.bottom() {
@@ -487,16 +490,22 @@ impl Nook {
         Some((area, pixels))
     }
 
-    fn push_animation(&mut self, id: u32, effect: Effect, kind: Kind, from: Area, to: Area, pixels: Vec<u32>, size: (i32, i32), finish: Finish) {
+    pub fn hiding(&self, id: u32) -> bool {
+        self.animations.iter().any(|a| a.window == id && a.finish == Finish::Hide)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_animation(&mut self, id: u32, effect: Effect, kind: Kind, from: Area, to: Area, pixels: Vec<u32>, size: (i32, i32), finish: Finish, resume: f32) {
         let now = sys::uptime_ms();
+        let duration = self.anim.duration(kind);
         let mut animation = Animation {
             window: id,
             effect,
             kind,
             from,
             to,
-            started: now,
-            duration: self.anim.duration(kind),
+            started: now.saturating_sub((resume.clamp(0.0, 1.0) * duration as f32) as u64),
+            duration,
             pixels,
             size,
             finish,
@@ -525,9 +534,19 @@ impl Nook {
         let previous = self.animations.iter().position(|a| a.window == id);
         let inherited = previous.map(|i| self.animations.remove(i));
         self.pending_open.retain(|(w, _)| *w != id);
+        let now = sys::uptime_ms();
+        if let Some(old) = inherited.as_ref() {
+            if old.kind == kind && matches!(kind, Kind::MagicLamp | Kind::Appear) && reversing(old.effect) != reversing(effect) && !old.pixels.is_empty() {
+                let p = old.progress(now);
+                let resume = if kind == Kind::Appear { ease_out_inverse(1.0 - ease_out(p)) } else { 1.0 - p };
+                let old = inherited.unwrap();
+                self.push_animation(id, effect, kind, old.from, old.to, old.pixels, old.size, finish, resume);
+                return true;
+            }
+        }
         let (area, pixels, size) = match inherited {
             Some(old) if old.kind == Kind::Morph && kind == Kind::Morph => {
-                let area = old.morph_area(sys::uptime_ms());
+                let area = old.morph_area(now);
                 if old.fresh_at.is_some() && !old.fresh.is_empty() { (area, old.fresh, old.fresh_size) } else { (area, old.pixels, old.size) }
             }
             _ => match self.capture(index) {
@@ -540,7 +559,7 @@ impl Nook {
             Kind::Morph => target.unwrap_or(area),
             _ => area,
         };
-        self.push_animation(id, effect, kind, area, destination, pixels, size, finish);
+        self.push_animation(id, effect, kind, area, destination, pixels, size, finish, 0.0);
         true
     }
 
@@ -548,7 +567,7 @@ impl Nook {
         if self.anim.kind(Effect::Snap) == Kind::Disabled || self.animating(id) || pixels.len() != (area.w * area.h) as usize {
             return;
         }
-        self.push_animation(id, Effect::Snap, Kind::Morph, area, area, pixels, (area.w, area.h), Finish::None);
+        self.push_animation(id, Effect::Snap, Kind::Morph, area, area, pixels, (area.w, area.h), Finish::None, 0.0);
     }
 
     pub fn tick_animations(&mut self, now: u64) {
@@ -584,8 +603,6 @@ impl Nook {
                         self.core.add_damage(area);
                     }
                     self.sync_focus();
-                    let region = self.dock_region();
-                    self.core.add_damage(region);
                 }
                 Finish::None => {
                     if let Some(index) = self.core.index_of(id) {
@@ -631,7 +648,7 @@ impl Nook {
                     edge_pixel(&mut self.core.screen.frame, width, floor(left), y, clip, animation.pixels[row + last_column / 2], right - left);
                     continue;
                 }
-                sample_row(&animation.pixels, animation.size, source_y, inner_left, inner_right - inner_left, 255, &mut self.core.screen.frame, width, y, clip);
+                sample_row(&animation.pixels, animation.size, animation.size.0, source_y, inner_left, inner_right - inner_left, 255, &mut self.core.screen.frame, width, y, clip);
                 edge_pixel(&mut self.core.screen.frame, width, inner_left - 1, y, clip, row_left, inner_left as f32 - left);
                 edge_pixel(&mut self.core.screen.frame, width, inner_right, y, clip, row_right, right - inner_right as f32);
             }

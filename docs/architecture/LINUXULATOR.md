@@ -13,13 +13,13 @@ Wayland clients such as `foot` run.
 ## Trying it
 
 ```sh
-./tools/linux-sysroot/build.sh
-./build.sh
+./layers/linux/ports/build.sh
+cargo xtask build
 ```
 
 The first script downloads Alpine's `musl` and `musl-dev` packages, installs
-the dynamic linker into `overlay/opt/linux/lib/`, and builds every
-`tools/linux-sysroot/src/*.c` twice: `NAME-musl` (dynamic PIE) and
+the dynamic linker into `layers/linux/overlay/opt/linux/lib/`, and builds every
+`layers/linux/ports/src/*.c` twice: `NAME-musl` (dynamic PIE) and
 `NAME-musl-static` (static PIE). You need `clang`, `lld` and `llvm-strip`.
 After you boot the image:
 
@@ -34,7 +34,7 @@ root@hamix:~# /opt/linux/lib/ld-musl-x86_64.so.1 /opt/linux/bin/hello-musl
 `kernel/src/task/elf.rs` (`Elf::classify`):
 
 1. A `PT_NOTE` with owner `Hamix` and type `0x48584f53` means **native**.
-   `apps/link.ld` emits this note (`.note.hamix`) into every native app, so
+   `userland/link.ld` emits this note (`.note.hamix`) into every native app, so
    after a rebuild, classification never has to guess.
 2. `ET_DYN`, or any binary with `PT_INTERP`, is **Linux**.
 3. An `ET_EXEC` without the note is **native** if it is linked inside the
@@ -55,7 +55,7 @@ root@hamix:~# /opt/linux/lib/ld-musl-x86_64.so.1 /opt/linux/bin/hello-musl
   not inside a loaded segment, the kernel copies them onto the stack for
   `AT_PHDR`.
 * `ET_DYN` executables are loaded at `0x80_0040_0000`.
-* When a binary has `PT_INTERP`, `kernel/src/task/linux_loader.rs` loads the
+* When a binary has `PT_INTERP`, `kernel/src/linux/loader.rs` loads the
   interpreter at `0x90_0000_0000`. `AT_BASE` holds the interpreter base,
   `AT_ENTRY` the program's entry point, and execution starts at the
   interpreter's entry point.
@@ -102,7 +102,7 @@ root@hamix:~# /opt/linux/lib/ld-musl-x86_64.so.1 /opt/linux/bin/hello-musl
   (KIND)`.
 
 The sysroot ships `printenv-musl` / `printenv-musl-static`
-(`tools/linux-sysroot/src/printenv.c`) for testing this.
+(`layers/linux/ports/src/printenv.c`) for testing this.
 
 ## The `/opt/linux` sysroot
 
@@ -155,12 +155,12 @@ volatile proc nodes.
 
 ## BusyBox and syscall coverage (M3)
 
-`tools/linux-sysroot/build.sh` also installs the following into the
+`layers/linux/ports/build.sh` also installs the following into the
 sysroot:
 
 * `/opt/linux/bin/busybox`: BusyBox 1.37.0, built from source (the script
   checks the tarball's SHA-256) as a **static PIE** with
-  `tools/linux-sysroot/musl-cc`, a clang wrapper around Alpine's musl. Its
+  `layers/linux/ports/musl-cc`, a clang wrapper around Alpine's musl. Its
   config is `defconfig` with `tc` turned off. Alpine's `busybox-static` is
   a non-PIE binary linked at `0x400000`, which HamixOS cannot load.
 * `/opt/linux/bin/busybox-dynamic`: Alpine's dynamically linked PIE
@@ -192,7 +192,7 @@ New kernel pieces:
   `OpenFile::Dir` stores a snapshot of the entries, including `.` and
   `..`. `openat`, `newfstatat` and friends accept a directory fd as
   `dirfd`, and `fchdir` works.
-* **Synthetic procfs** (`kernel/src/syscall/linux/procfs.rs`).
+* **Synthetic procfs** (`kernel/src/linux/procfs.rs`).
   * `/proc/<pid>` and `/proc/self` provide `stat`, `statm`, `status`,
     `cmdline`, `comm` and `maps`, the links `exe` and `cwd`, and an `fd/`
     directory whose entries link to `/dev/console`, `pipe:[N]` or file
@@ -204,7 +204,7 @@ New kernel pieces:
   * Linux tasks see this view first. Native tasks only see it where the
     VFS has no real node.
   * `Task` now also stores `args` (for `cmdline`) and its start tick.
-* **Terminal layer** (`kernel/src/syscall/linux/tty.rs`).
+* **Terminal layer** (`kernel/src/linux/tty.rs`).
   * Each task keeps a termios. `TCGETS` and `TCSETS*` read and write it.
   * Canonical mode (`ICANON`) does line editing with echo, erase, kill
     and EOF.
@@ -342,7 +342,7 @@ hxproto mailbox at the same time.
 
 ### Verification
 
-`tools/linux-sysroot/src/unixsock.c` (`unixsock-musl` and
+`layers/linux/ports/src/unixsock.c` (`unixsock-musl` and
 `unixsock-musl-static`) is the test program.
 
 * `unixsock-musl selftest` checks, in one process: stream and datagram
@@ -370,9 +370,9 @@ Fifteen server/client rounds in a row did not increase memory use.
 ## Packages, symlinks and Linux-format /proc
 
 * **Packages.** `pantry` installs Alpine packages into `/opt/linux`; see
-  `docs/PANTRY.md`.
+  `docs/guides/PANTRY.md`.
 * **Symlinks.** Symlinks from packages are stored as link files that the
-  kernel follows for Linux tasks. This is described in `docs/PANTRY.md`.
+  kernel follows for Linux tasks. This is described in `docs/guides/PANTRY.md`.
 * **/proc in Linux format.** Linux tasks see Linux-format `/proc/stat` (with
   `btime` and per-CPU times), `/proc/meminfo`, `/proc/uptime` and
   `/proc/loadavg`, while native programs keep the HamixOS formats.
@@ -381,8 +381,8 @@ Fifteen server/client rounds in a row did not increase memory use.
 
 ## Terminals (hxvt)
 
-`libs/hxvt` is one xterm-compatible terminal emulator shared by the Nook
-terminal (`apps/hxterm`) and the kernel text console
+`crates/hxvt` is one xterm-compatible terminal emulator shared by the Nook
+terminal (`userland/apps/hxterm`) and the kernel text console
 (`kernel/src/drivers/video/text_mode.rs`). It replaces the two small
 parsers they had before, which knew neither scroll regions nor
 insert/delete line. That was the cause of the "artifacts" in htop when
@@ -450,7 +450,7 @@ always get `\r\n`, as before.
 
 ## Signals
 
-`kernel/src/syscall/linux/signal.rs` delivers real signals to Linux tasks.
+`kernel/src/linux/signal.rs` delivers real signals to Linux tasks.
 
 * `rt_sigaction`, `rt_sigprocmask`, `rt_sigpending`, `rt_sigsuspend`,
   `rt_sigtimedwait`, `sigaltstack`, `pause`, `kill` (process groups and
@@ -485,7 +485,7 @@ always get `\r\n`, as before.
 
 ## Processes and threads
 
-`kernel/src/syscall/linux/process.rs`.
+`kernel/src/linux/process.rs`.
 
 * `clone` with `CLONE_THREAD` creates a thread: a task that shares the
   address space, file descriptors, working directory and signal handlers
@@ -517,7 +517,7 @@ always get `\r\n`, as before.
 ## Pseudo-terminals
 
 Opening `/dev/ptmx` creates a terminal pair made of two kernel pipes
-(`kernel/src/task/pty.rs`). The master reads what programs write and
+(`kernel/src/tty/pty.rs`). The master reads what programs write and
 writes what they read; `/dev/pts/N` is the slave. `TIOCGPTN`,
 `TIOCSPTLCK`, `TIOCGPTPEER`, `TIOCSCTTY`, `TIOCSWINSZ` (with `SIGWINCH`),
 `/proc/<pid>/fd` links to `/dev/pts/N` and `/dev/tty` work, so musl's
@@ -565,7 +565,7 @@ exists (empty).
 
 ## Wayland bridge (M5)
 
-`apps/hxwayland` is a small Wayland compositor that is a normal hxproto
+`userland/desktop/hxwayland` is a small Wayland compositor that is a normal hxproto
 client of hxserver. hxserver starts it together with the desktop (and again
 when a graphical Linux app is launched and the bridge is not running). It
 listens on `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`, which the default
@@ -624,7 +624,7 @@ Wayland toolkit).
   socket as `WAYLAND_SOCKET`) and is stopped again 20 seconds after the last
   X window is gone, so it costs no memory while unused. Its log is
   `/tmp/xwayland.log`.
-* `apps/hxwayland/src/xwm.rs` is the X window manager: it speaks the X11
+* `userland/desktop/hxwayland/src/xwm.rs` is the X window manager: it speaks the X11
   protocol directly, redirects the root's children with Composite (rootless
   Xwayland only creates `wl_surface`s for redirected windows), matches
   windows to surfaces through `WL_SURFACE_ID`, maps windows on
@@ -659,8 +659,8 @@ Wayland toolkit).
 * A Linux task's working directory goes through the `/opt/linux` sysroot
   (`cd /usr/lib/libreoffice/program` works).
 
-Try it: `wlhello` (built by `tools/linux-sysroot/build.sh` from
-`tools/linux-sysroot/wayland/wlhello.c`, with its `libwayland-client` and
+Try it: `wlhello` (built by `layers/linux/ports/build.sh` from
+`layers/linux/ports/wayland/wlhello.c`, with its `libwayland-client` and
 `libffi` in `/opt/linux/usr/lib/hamix-demo`) opens an animated window,
 prints pointer buttons and key codes and exits on Escape or when the window
 is closed. `sudo pantry install foot` gives a real Wayland terminal.
@@ -679,7 +679,7 @@ is closed. `sudo pantry install foot` gives a real Wayland terminal.
 ## Internet sockets
 
 Linux programs get real `AF_INET` sockets (`kernel/src/net/inet.rs`,
-syscalls in `kernel/src/syscall/linux/inet.rs`) on top of the kernel smoltcp
+syscalls in `kernel/src/linux/inet.rs`) on top of the kernel smoltcp
 stack, so `curl`, `wget`, `git`, `python3` and anything else using TCP or
 UDP works, HTTPS included (TLS runs in the program).
 
@@ -703,7 +703,7 @@ HTTP/2) and a 2 MiB HTTPS download at the speed of QEMU's user network.
 ## Priority-inheritance futexes
 
 `FUTEX_LOCK_PI` (6), `FUTEX_LOCK_PI2` (13), `FUTEX_TRYLOCK_PI` (8) and
-`FUTEX_UNLOCK_PI` (7) are implemented in `kernel/src/syscall/linux/base.rs`:
+`FUTEX_UNLOCK_PI` (7) are implemented in `kernel/src/linux/base.rs`:
 the owner's TID lives in the low 30 bits of the futex word, `FUTEX_WAITERS`
 (bit 31) marks a contended lock, a thread that already owns the word gets
 `EDEADLK`, unlocking someone else's word gets `EPERM`, and a contended

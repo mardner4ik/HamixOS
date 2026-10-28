@@ -7,16 +7,16 @@ use crate::arch::without_interrupts;
 
 const CAPACITY: usize = 256 * 1024;
 
-pub const EPIPE: i64 = -32;
-pub const EAGAIN: i64 = -11;
-pub const EBADF: i64 = -9;
-pub const EINTR: i64 = -4;
+pub use crate::errno::EPIPE;
+pub use crate::errno::EAGAIN;
+pub use crate::errno::EINTR;
 
 struct Pipe {
     buffer: VecDeque<u8>,
     readers: u32,
     writers: u32,
     foreground: Pid,
+    group: Pid,
     tty: bool,
     cols: u16,
     rows: u16,
@@ -34,7 +34,7 @@ fn with_pipes<R>(f: impl FnOnce(&mut BTreeMap<u32, Pipe>) -> R) -> R {
 pub fn create() -> u32 {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     with_pipes(|pipes| {
-        pipes.insert(id, Pipe { buffer: VecDeque::new(), readers: 1, writers: 1, foreground: 0, tty: false, cols: 80, rows: 25, size_gen: 0, output: false });
+        pipes.insert(id, Pipe { buffer: VecDeque::new(), readers: 1, writers: 1, foreground: 0, group: 0, tty: false, cols: 80, rows: 25, size_gen: 0, output: false });
     });
     id
 }
@@ -104,7 +104,7 @@ pub fn read(id: u32, out: &mut [u8], nonblock: bool) -> i64 {
                 if !with_pipes(|pipes| pipes.contains_key(&id)) {
                     return 0;
                 }
-                if crate::syscall::linux::signal::pending() {
+                if crate::syscall::signal::pending() {
                     return EINTR;
                 }
                 super::block(WAIT_PIPE, Some(super::TICK_HZ / 5), super::input_seq());
@@ -119,9 +119,60 @@ pub fn read_byte(id: u32, nonblock: bool) -> Option<u8> {
     if read(id, &mut byte, nonblock) == 1 { Some(byte[0]) } else { None }
 }
 
+pub fn set_foreground_group(id: u32, group: Pid) {
+    with_pipes(|pipes| {
+        if let Some(pipe) = pipes.get_mut(&id) {
+            pipe.group = group;
+        }
+    });
+}
+
+pub fn foreground_group(id: u32) -> Option<Pid> {
+    let group = with_pipes(|pipes| pipes.get(&id).map(|p| p.group).unwrap_or(0));
+    (group != 0 && group_members(group).next().is_some()).then_some(group)
+}
+
+fn group_members(group: Pid) -> alloc::vec::IntoIter<(Pid, bool, bool)> {
+    super::with_tasks(|tasks| {
+        tasks
+            .values()
+            .filter(|t| t.pgid == group && !t.kernel_thread && t.state != super::State::Zombie)
+            .map(|t| (t.pid, t.abi.posix(), crate::tty::signals_enabled(&t.termios)))
+            .collect::<alloc::vec::Vec<_>>()
+    })
+    .into_iter()
+}
+
+fn interrupt_group(id: u32, writer: Pid, sig: u32) -> bool {
+    let Some(group) = foreground_group(id) else {
+        return false;
+    };
+    let members: alloc::vec::Vec<(Pid, bool, bool)> = group_members(group).collect();
+    if members.iter().any(|(pid, _, _)| *pid == writer) {
+        return false;
+    }
+    for (pid, posix, isig) in members {
+        match (posix, isig) {
+            (true, true) => {
+                crate::syscall::signal::send(pid, sig);
+            }
+            (true, false) => {}
+            _ => {
+                if sig == 2 {
+                    super::kill(pid, 130);
+                }
+            }
+        }
+    }
+    true
+}
+
 fn interrupt_policy(id: u32, writer: Pid) -> Option<(Pid, bool)> {
+    if foreground_group(id).is_some() {
+        return Some((0, true));
+    }
     let foreground = with_pipes(|pipes| pipes.get(&id).filter(|p| p.tty && p.foreground != 0 && p.foreground != writer).map(|p| p.foreground))?;
-    let linux = super::with_task(foreground, |t| (t.abi == super::Abi::Linux, crate::syscall::linux::tty::signals_enabled(&t.termios)));
+    let linux = super::with_task(foreground, |t| (t.abi.posix(), crate::tty::signals_enabled(&t.termios)));
     match linux {
         Some((true, false)) => None,
         Some((true, true)) => Some((foreground, true)),
@@ -165,8 +216,12 @@ pub fn write(id: u32, data: &[u8], writer: Pid) -> i64 {
             Err(e) => return if done > 0 { done as i64 } else { e },
             Ok((taken, interrupt)) => {
                 if let Some((pid, linux, sig)) = interrupt {
-                    if linux && super::exists(pid) {
-                        crate::syscall::linux::signal::send(pid, sig);
+                    if pid == 0 {
+                        if !interrupt_group(id, writer, sig) {
+                            let _ = with_pipes(|pipes| pipes.get_mut(&id).map(|p| p.buffer.push_back(match sig { 2 => 0x03, 3 => 0x1c, _ => 0x1a })));
+                        }
+                    } else if linux && super::exists(pid) {
+                        crate::syscall::signal::send(pid, sig);
                     } else if super::exists(pid) {
                         super::kill(pid, 130);
                     } else {
@@ -176,7 +231,7 @@ pub fn write(id: u32, data: &[u8], writer: Pid) -> i64 {
                 done += taken;
                 super::wake_all(WAIT_PIPE);
                 if taken == 0 {
-                    if crate::syscall::linux::signal::pending() {
+                    if crate::syscall::signal::pending() {
                         return if done > 0 { done as i64 } else { EINTR };
                     }
                     super::block(WAIT_PIPE, Some(super::TICK_HZ / 5), super::input_seq());

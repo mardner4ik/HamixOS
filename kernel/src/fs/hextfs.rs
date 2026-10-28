@@ -76,11 +76,11 @@ pub struct Backend {
     pub blocks: BTreeMap<u32, (Vec<u32>, u64)>,
 }
 
-struct MountSave {
-    ino: u32,
-    dev: u16,
-    dirty: u8,
-    children: BTreeMap<String, usize>,
+pub(crate) struct MountSave {
+    pub(crate) ino: u32,
+    pub(crate) dev: u16,
+    pub(crate) dirty: u8,
+    pub(crate) children: BTreeMap<String, usize>,
 }
 
 #[derive(Clone)]
@@ -96,10 +96,10 @@ pub struct MountRow {
 }
 
 static BACKENDS: Mutex<Vec<Backend>> = Mutex::new(Vec::new());
-static SAVED: Mutex<BTreeMap<usize, MountSave>> = Mutex::new(BTreeMap::new());
-static POINTS: Mutex<BTreeMap<usize, u16>> = Mutex::new(BTreeMap::new());
+pub(crate) static SAVED: Mutex<BTreeMap<usize, MountSave>> = Mutex::new(BTreeMap::new());
+pub(crate) static POINTS: Mutex<BTreeMap<usize, u16>> = Mutex::new(BTreeMap::new());
 static TABLE: Mutex<Vec<MountRow>> = Mutex::new(Vec::new());
-static NEXT_DEV: AtomicU16 = AtomicU16::new(1);
+pub(crate) static NEXT_DEV: AtomicU16 = AtomicU16::new(1);
 static SYNC_REQUESTED: AtomicBool = AtomicBool::new(false);
 static LAST_SYNC: AtomicU64 = AtomicU64::new(0);
 static ROOT_DESCRIPTION: Mutex<String> = Mutex::new(String::new());
@@ -135,12 +135,14 @@ fn refresh_table(backends: &[Backend]) {
 }
 
 pub fn mount_table() -> Vec<MountRow> {
-    TABLE.lock().clone()
+    let mut rows = TABLE.lock().clone();
+    rows.extend(super::media::rows().into_iter().map(|(row, _)| row));
+    rows
 }
 
 pub fn mounts_text() -> String {
     let mut out = String::new();
-    for row in mount_table() {
+    for row in TABLE.lock().iter() {
         out.push_str(&format!(
             "{}\t{}\thext\t{}\t{}\t{}\t{}\n",
             row.source,
@@ -151,7 +153,16 @@ pub fn mounts_text() -> String {
             row.label
         ));
     }
+    for (row, kind) in super::media::rows() {
+        out.push_str(&format!("{}\t{}\t{}\tro\t{}\t{}\t{}\n", row.source, row.path, kind, row.total_kb, row.free_kb, row.label));
+    }
     out
+}
+
+pub fn mount_point_known(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    mount_table().iter().any(|r| r.path == path)
 }
 
 pub fn mount_path_of(disk: usize, offset: u64) -> Option<String> {
@@ -178,7 +189,7 @@ fn child(vfs: &Vfs, dir: usize, name: &str) -> Option<usize> {
     }
 }
 
-fn attach(vfs: &mut Vfs, dir: usize, name: &str, node: Node) -> usize {
+pub(crate) fn attach(vfs: &mut Vfs, dir: usize, name: &str, node: Node) -> usize {
     if let Some(existing) = child(vfs, dir, name) {
         let same_kind = matches!(
             (&vfs.nodes[existing].kind, &node.kind),
@@ -192,6 +203,7 @@ fn attach(vfs: &mut Vfs, dir: usize, name: &str, node: Node) -> usize {
             target.ino = node.ino;
             target.mode = node.mode;
             target.owner = node.owner;
+            target.group = node.group;
             target.dirty = node.dirty;
             target.dev = node.dev;
             return existing;
@@ -208,6 +220,7 @@ struct Loaded {
     name: String,
     ino: u32,
     uid: u32,
+    gid: u32,
     mode: u16,
     dir: bool,
     body: crate::fs::FileBody,
@@ -232,7 +245,7 @@ fn read_tree(fs: &mut Hext<KernelDevice>, ino: u32, top: bool, files: &mut usize
             } else {
                 read_tree(fs, entry.ino, false, files, lazy)
             };
-            out.push(Loaded { name: entry.name, ino: entry.ino, uid: inode.uid, mode: inode.mode & 0o7777, dir: true, body: crate::fs::FileBody::held(Vec::new()), children });
+            out.push(Loaded { name: entry.name, ino: entry.ino, uid: inode.uid, gid: inode.gid, mode: inode.mode & 0o7777, dir: true, body: crate::fs::FileBody::held(Vec::new()), children });
         } else if inode.is_file() {
             let link_candidate = inode.size as usize <= crate::fs::EAGER_FILE_MAX && inode.mode & 0o777 == 0o777;
             let body = if lazy && !link_candidate {
@@ -241,7 +254,7 @@ fn read_tree(fs: &mut Hext<KernelDevice>, ino: u32, top: bool, files: &mut usize
                 crate::fs::FileBody::held(fs.read_file(entry.ino).unwrap_or_default())
             };
             *files += 1;
-            out.push(Loaded { name: entry.name, ino: entry.ino, uid: inode.uid, mode: inode.mode & 0o7777, dir: false, body, children: Vec::new() });
+            out.push(Loaded { name: entry.name, ino: entry.ino, uid: inode.uid, gid: inode.gid, mode: inode.mode & 0o7777, dir: false, body, children: Vec::new() });
         }
     }
     out
@@ -250,7 +263,7 @@ fn read_tree(fs: &mut Hext<KernelDevice>, ino: u32, top: bool, files: &mut usize
 fn insert_tree(vfs: &mut Vfs, dir: usize, entries: Vec<Loaded>, dev: u16) {
     for entry in entries {
         let kind = if entry.dir { NodeKind::Dir(BTreeMap::new()) } else { NodeKind::File(entry.body) };
-        let id = attach(vfs, dir, &entry.name, Node { kind, parent: dir, owner: entry.uid, mode: entry.mode, ino: entry.ino, dirty: 0, dev });
+        let id = attach(vfs, dir, &entry.name, Node { kind, parent: dir, owner: entry.uid, group: entry.gid, mode: entry.mode, ino: entry.ino, dirty: 0, dev });
         vfs.nodes[id].parent = dir;
         if entry.dir {
             insert_tree(vfs, id, entry.children, dev);
@@ -275,6 +288,7 @@ fn overlay_tree(vfs: &mut Vfs, root: &mut Hext<KernelDevice>, fs: &mut Hext<Kern
                         kind: NodeKind::Dir(BTreeMap::new()),
                         parent: dir,
                         owner: inode.uid,
+                        group: inode.gid,
                         mode: inode.mode & 0o7777,
                         ino: 0,
                         dirty: DIRTY_META,
@@ -311,6 +325,7 @@ fn overlay_tree(vfs: &mut Vfs, root: &mut Hext<KernelDevice>, fs: &mut Hext<Kern
                         kind: NodeKind::File(crate::fs::FileBody::held(data)),
                         parent: dir,
                         owner: inode.uid,
+                        group: inode.gid,
                         mode: inode.mode & 0o7777,
                         ino: 0,
                         dirty: DIRTY_DATA | DIRTY_META,
@@ -350,12 +365,214 @@ fn find_root_volume(spec: &str) -> Option<block::Volume> {
     None
 }
 
+static MEDIA_REPORT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn media_report() -> Vec<String> {
+    MEDIA_REPORT.lock().clone()
+}
+
+fn removable(index: usize) -> bool {
+    let usb = block::disk(index).map(|d| d.bus == "usb").unwrap_or(false);
+    let only_usb = crate::memory::cmdline_value("livemedia").as_deref() == Some("usb");
+    usb || (!only_usb && block::is_optical(index))
+}
+
+static MEDIA_FOUND: Mutex<Option<(usize, u64, u64)>> = Mutex::new(None);
+
+fn volume_label(sector: &[u8]) -> String {
+    String::from_utf8_lossy(&sector[40..72]).trim().to_string()
+}
+
+fn image_in_iso_file(index: usize, start: u64, part: &str, image: &super::exfat::FoundFile) -> Option<(usize, u64, u64)> {
+    let runs = super::exfat::file_runs(index, start, image)?;
+    let (disk, base) = if runs.len() == 1 {
+        (index, runs[0].0)
+    } else {
+        (block::register_mapped_disk(index, &format!("{}{}", part, image.path), runs), 0)
+    };
+    let (offset, bytes) = super::iso9660::find_file_at(disk, base, LIVE_IMAGE)?;
+    crate::drivers::klog::log(&format!("hext: {} found inside /dev/{}{} (Ventoy-style ISO file)", LIVE_IMAGE, part, image.path));
+    Some((disk, offset, bytes))
+}
+
+const VENTOY_GUID: [u8; 16] = [0x20, 0x20, 0x77, 0x77, 0x77, 0x2e, 0x76, 0x65, 0x6e, 0x74, 0x6f, 0x79, 0x2e, 0x6e, 0x65, 0x74];
+const VENTOY_PARAM: usize = 512;
+const VENTOY_DISK_SIZE: usize = 33;
+const VENTOY_SIGNATURE: usize = 481;
+const VENTOY_DISK_SIGNATURE: usize = 440;
+
+fn le32(data: &[u8], at: usize) -> u64 {
+    u32::from_le_bytes(data[at..at + 4].try_into().unwrap()) as u64
+}
+
+fn le64(data: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(data[at..at + 8].try_into().unwrap())
+}
+
+static VENTOY_DISK: Mutex<Option<(usize, usize)>> = Mutex::new(None);
+
+fn ventoy_image(index: usize) -> Option<(usize, u64, u64)> {
+    let param = crate::memory::ventoy()?;
+    if param.len() < VENTOY_PARAM + 28 || param[..16] != VENTOY_GUID || param[VENTOY_PARAM..VENTOY_PARAM + 16] != VENTOY_GUID {
+        return None;
+    }
+    let disk = block::disk(index)?;
+    let mut mbr = alloc::vec![0u8; 512];
+    block::read(index, 0, &mut mbr).ok()?;
+    let same_signature = mbr[VENTOY_DISK_SIGNATURE..VENTOY_DISK_SIGNATURE + 4] == param[VENTOY_SIGNATURE..VENTOY_SIGNATURE + 4] && param[VENTOY_SIGNATURE..VENTOY_SIGNATURE + 4] != [0; 4];
+    let same_size = disk.sectors * 512 == le64(&param, VENTOY_DISK_SIZE);
+    if !same_signature && !same_size {
+        return None;
+    }
+    let location = &param[VENTOY_PARAM..];
+    let image_sector = le32(location, 16).max(1);
+    let disk_sector = le32(location, 20).max(1);
+    let count = le32(location, 24) as usize;
+    if 28 + count * 16 > location.len() || count == 0 || image_sector % 512 != 0 || disk_sector % 512 != 0 {
+        return None;
+    }
+    let mut runs = Vec::with_capacity(count);
+    for i in 0..count {
+        let region = &location[28 + i * 16..44 + i * 16];
+        let sectors = le32(region, 0) * (image_sector / 512);
+        let start = le64(region, 8) * (disk_sector / 512);
+        if sectors == 0 || start + sectors > disk.sectors {
+            return None;
+        }
+        runs.push((start, sectors));
+    }
+    let mapped = {
+        let mut known = VENTOY_DISK.lock();
+        match *known {
+            Some((parent, mapped)) if parent == index => mapped,
+            _ => {
+                let mapped = block::register_mapped_disk(index, "Ventoy image", runs);
+                *known = Some((index, mapped));
+                mapped
+            }
+        }
+    };
+    let (offset, bytes) = super::iso9660::find_file_at(mapped, 0, LIVE_IMAGE)?;
+    crate::drivers::klog::log(&format!("hext: {} found through the Ventoy image table on /dev/{} ({} fragments)", LIVE_IMAGE, disk.name, count));
+    Some((mapped, offset, bytes))
+}
+
+fn find_media_image(index: usize) -> Result<(usize, u64, u64), String> {
+    if let Some(found) = ventoy_image(index) {
+        return Ok(found);
+    }
+    let name = block::disk(index).map(|d| d.name).unwrap_or_default();
+    let mut probe = alloc::vec![0u8; 2048];
+    if block::read(index, 64, &mut probe).is_err() {
+        return Err(format!("{}: read error at sector 64", name));
+    }
+    if let Some((offset, bytes)) = super::iso9660::find_file(index, LIVE_IMAGE) {
+        return Ok((index, offset, bytes));
+    }
+    let mut notes = Vec::new();
+    if &probe[1..6] == b"CD001" {
+        notes.push(format!("ISO 9660 without {}", LIVE_IMAGE));
+    }
+    let mut starts: Vec<(String, u64)> = block::partitions(index).into_iter().map(|p| (p.name, p.start)).collect();
+    if starts.is_empty() {
+        starts.push((name.clone(), 0));
+    }
+    for (part, start) in starts {
+        match super::media::locate_fat_file(index, start, LIVE_IMAGE) {
+            Ok((offset, bytes)) => {
+                crate::drivers::klog::log(&format!("hext: {} found on FAT /dev/{}", LIVE_IMAGE, part));
+                return Ok((index, offset, bytes));
+            }
+            Err(e) if e == "not FAT" => {}
+            Err(e) => notes.push(format!("{}: {}", part, e)),
+        }
+        match super::exfat::find_files(index, start, ".iso") {
+            Ok(mut images) => {
+                if images.is_empty() {
+                    notes.push(format!("{} is exFAT without .iso files", part));
+                }
+                images.sort_by_key(|i| !i.path.to_ascii_lowercase().contains("hamix"));
+                let mut skipped = 0;
+                for image in &images {
+                    if !image.path.to_ascii_lowercase().contains("hamix") {
+                        let label = super::exfat::read_file_sector(index, start, image, 32768).map(|s| volume_label(&s)).unwrap_or_default();
+                        if label != "HAMIXOS" && label != "ISOIMAGE" {
+                            skipped += 1;
+                            continue;
+                        }
+                    }
+                    match image_in_iso_file(index, start, &part, image) {
+                        Some(found) => return Ok(found),
+                        None => notes.push(format!("{}{} holds no {}", part, image.path, LIVE_IMAGE)),
+                    }
+                }
+                if skipped > 0 {
+                    notes.push(format!("{} other .iso file(s) on {} are not HamixOS", skipped, part));
+                }
+            }
+            Err(e) if e == "not exFAT" => notes.push(format!("{} is neither FAT nor exFAT", part)),
+            Err(e) => notes.push(format!("{}: {}", part, e)),
+        }
+    }
+    Err(format!("{}: {}", name, notes.join(", ")))
+}
+
+fn scan_media() -> bool {
+    if MEDIA_FOUND.lock().is_some() {
+        return true;
+    }
+    let mut report = Vec::new();
+    for index in 0..block::disks().len() {
+        if !removable(index) {
+            continue;
+        }
+        match find_media_image(index) {
+            Ok(found) => {
+                *MEDIA_FOUND.lock() = Some(found);
+                return true;
+            }
+            Err(e) => report.push(e),
+        }
+    }
+    for line in &report {
+        crate::drivers::klog::log(&format!("hext: {}", line));
+    }
+    *MEDIA_REPORT.lock() = report;
+    false
+}
+
+fn any_media_image() -> bool {
+    scan_media()
+}
+
+const USB_ROOT_WAIT_MS: u64 = 10_000;
+
+fn wait_for_usb_image() {
+    crate::drivers::usb::init();
+    let started = crate::task::uptime_ms();
+    loop {
+        if crate::drivers::usb::scan() && any_media_image() {
+            return;
+        }
+        if crate::task::uptime_ms() - started >= USB_ROOT_WAIT_MS {
+            crate::drivers::klog::log("hext: no USB stick with the live image appeared");
+            return;
+        }
+        crate::task::sleep_ticks((crate::task::TICK_HZ / 4).max(1));
+    }
+}
+
 pub fn mount_root() -> Option<String> {
     let spec = crate::memory::cmdline_value("root").unwrap_or_else(|| String::from("auto"));
+    let no_image = crate::memory::find_module("hext").is_none();
+    let live = spec == "live" || spec == "cdrom" || (spec == "auto" && no_image);
+    if live && no_image && !any_media_image() {
+        wait_for_usb_image();
+    }
     let mut guard = VFS.lock();
     let vfs = guard.as_mut()?;
 
-    if spec != "live" {
+    if spec != "live" && spec != "ram" && spec != "cdrom" {
         if let Some(volume) = find_root_volume(&spec) {
             let device = KernelDevice::Block { disk: volume.disk, offset: volume.offset, sectors: volume.sectors };
             match Hext::mount(device, now()) {
@@ -402,6 +619,7 @@ pub fn mount_root() -> Option<String> {
                     backends.push(backend);
                     refresh_table(&backends);
                     SYNC_REQUESTED.store(true, Ordering::Relaxed);
+                    DISK_ROOT.store(true, Ordering::Relaxed);
                     *ROOT_DESCRIPTION.lock() = description.clone();
                     return Some(description);
                 }
@@ -409,6 +627,12 @@ pub fn mount_root() -> Option<String> {
             }
         } else if spec != "auto" {
             crate::drivers::klog::log(&format!("hext: root={} not found, falling back to the boot image", spec));
+        }
+    }
+
+    if live {
+        if let Some(description) = mount_media_root(vfs) {
+            return Some(description);
         }
     }
 
@@ -446,6 +670,56 @@ pub fn mount_root() -> Option<String> {
     }
 }
 
+const LIVE_IMAGE: &str = "/boot/hext.img";
+
+fn mount_media_root(vfs: &mut Vfs) -> Option<String> {
+    let found = *MEDIA_FOUND.lock();
+    if let Some((index, offset, bytes)) = found {
+        let disk = block::disk(index)?;
+        DISK_ROOT.store(true, Ordering::Relaxed);
+        let sectors = bytes / 512;
+        let device = KernelDevice::Block { disk: index, offset, sectors };
+        let mut fs = match Hext::mount(device, now()) {
+            Ok(fs) => fs,
+            Err(e) => {
+                crate::drivers::klog::log(&format!("hext: {}{} on /dev/{} is unusable ({:?})", "", LIVE_IMAGE, disk.name, e));
+                return None;
+            }
+        };
+        let mut files = 0;
+        let tree = read_tree(&mut fs, ROOT_INO, true, &mut files, true);
+        insert_tree(vfs, 0, tree, 0);
+        vfs.nodes[0].ino = ROOT_INO;
+        vfs.tracking = true;
+        let freed = crate::memory::release_module("hext");
+        let backend = Backend {
+            fs,
+            source: format!("live:/dev/{}", disk.name),
+            path: String::from("/"),
+            persistent: false,
+            errors: 0,
+            dev: 0,
+            point: 0,
+            disk: Some((index, offset, sectors)),
+            blocks: BTreeMap::new(),
+        };
+        let mut backends = BACKENDS.lock();
+        backends.push(backend);
+        refresh_table(&backends);
+        drop(backends);
+        let description = format!(
+            "hext: live system from /dev/{}{} ({} files read on demand, changes stay in RAM{})",
+            disk.name,
+            LIVE_IMAGE,
+            files,
+            if freed > 0 { format!(", {} MiB boot image released", freed >> 20) } else { String::new() }
+        );
+        *ROOT_DESCRIPTION.lock() = description.clone();
+        return Some(description);
+    }
+    None
+}
+
 pub fn root_is_live() -> bool {
     mount_table().first().map(|r| !r.persistent).unwrap_or(true)
 }
@@ -460,6 +734,7 @@ struct Item {
     data: Option<Vec<u8>>,
     mode: u16,
     owner: u32,
+    group: u32,
     meta: bool,
 }
 
@@ -500,6 +775,7 @@ fn collect(vfs: &mut Vfs, dir: usize, dev: u16, top: bool, items: &mut Vec<Item>
                 data,
                 mode: node.mode,
                 owner: node.owner,
+                group: node.group,
                 meta: fresh || node.dirty & DIRTY_META != 0,
             });
             vfs.nodes[id].dirty = 0;
@@ -546,11 +822,11 @@ fn apply(backend: &mut Backend, work: &mut Work) -> (Vec<(usize, u32)>, Vec<usiz
         }
         if item.ino == 0 {
             let kind = if item.is_dir { S_IFDIR } else { S_IFREG };
-            let created = match backend.fs.create(parent_ino, &item.name, kind | item.mode, item.owner, item.owner) {
+            let created = match backend.fs.create(parent_ino, &item.name, kind | item.mode, item.owner, item.group) {
                 Ok(ino) => Some(ino),
                 Err(hext::Error::Exists) => {
                     let _ = backend.fs.remove_tree(parent_ino, &item.name);
-                    backend.fs.create(parent_ino, &item.name, kind | item.mode, item.owner, item.owner).ok()
+                    backend.fs.create(parent_ino, &item.name, kind | item.mode, item.owner, item.group).ok()
                 }
                 Err(_) => None,
             };
@@ -571,7 +847,7 @@ fn apply(backend: &mut Backend, work: &mut Work) -> (Vec<(usize, u32)>, Vec<usiz
                 continue;
             }
         }
-        if item.meta && backend.fs.set_attributes(item.ino, item.mode, item.owner, item.owner).is_err() {
+        if item.meta && backend.fs.set_attributes(item.ino, item.mode, item.owner, item.group).is_err() {
             failed.push(item.node);
         }
         if crate::arch::interrupts_enabled() {
@@ -636,8 +912,8 @@ fn sync_one(index: usize) -> bool {
     let (dev, point) = {
         let backends = lock_backends();
         match backends.get(index) {
-            Some(b) => (b.dev, b.point),
-            None => return true,
+            Some(b) if b.persistent => (b.dev, b.point),
+            _ => return true,
         }
     };
     let Some(mut work) = snapshot(dev, point) else {
@@ -735,8 +1011,14 @@ static LAST_TRIM: AtomicU64 = AtomicU64::new(0);
 static LAST_ORPHAN_SCAN: AtomicU64 = AtomicU64::new(0);
 static ORPHAN_CANDIDATES: Mutex<alloc::collections::BTreeSet<usize>> = Mutex::new(alloc::collections::BTreeSet::new());
 
+static DISK_ROOT: AtomicBool = AtomicBool::new(false);
+
 fn file_cache_limit() -> usize {
     let (free, total) = crate::memory::frame::memory_info();
+    if DISK_ROOT.load(Ordering::Relaxed) {
+        let ceiling = (total / 4).max(FILE_CACHE_FLOOR_MAX);
+        return (free / 2).clamp(FILE_CACHE_FLOOR_MAX, ceiling);
+    }
     let floor = (total / 128).clamp(FILE_CACHE_FLOOR, FILE_CACHE_FLOOR_MAX);
     let now = crate::task::uptime_ms();
     if now.saturating_sub(crate::fs::last_file_load_ms()) >= CACHE_IDLE_MS {
@@ -747,6 +1029,9 @@ fn file_cache_limit() -> usize {
 }
 
 fn trim_file_cache() {
+    if crate::task::uptime_ms().saturating_sub(crate::fs::last_file_load_ms()) >= CACHE_IDLE_MS {
+        block::trim_read_cache(16);
+    }
     let limit = file_cache_limit();
     let mut guard = VFS.lock();
     if let Some(vfs) = guard.as_mut() {
@@ -817,7 +1102,7 @@ pub fn mkfs(device: &str, label: &str) -> Result<String, &'static str> {
     ))
 }
 
-fn clear_subtree(vfs: &mut Vfs, id: usize) {
+pub(crate) fn clear_subtree(vfs: &mut Vfs, id: usize) {
     let children: Vec<usize> = match &mut vfs.nodes[id].kind {
         NodeKind::Dir(map) => core::mem::take(map).into_values().collect(),
         NodeKind::File(body) => {

@@ -162,6 +162,7 @@ extern "C" fn set_mode(_context: u64, width: u32, height: u32) -> i32 {
     if !map_scanout(device, pitch, height) {
         return -12;
     }
+    clear_scanout(&FbDesc { addr: device.fb.addr, pitch, width, height, bpp: 32 });
     if !mode::set_source(&device.mmio, device.chip, &device.output, width, height, pitch) {
         let previous = device.current;
         mode::set_source(&device.mmio, device.chip, &device.output, previous.0, previous.1, mode::pitch_for(previous.0));
@@ -561,10 +562,14 @@ fn init() -> i32 {
     let preferred = mode_options(&device)[0];
     if kpi::param("native", 1) != 0 && preferred != device.current && preferred.0 > 0 {
         let pitch = mode::pitch_for(preferred.0);
-        if map_scanout(&device, pitch, preferred.1) && mode::set_source(&device.mmio, device.chip, &device.output, preferred.0, preferred.1, pitch) {
+        let target = FbDesc { addr: fb.addr, pitch, width: preferred.0, height: preferred.1, bpp: 32 };
+        let mapped = map_scanout(&device, pitch, preferred.1);
+        if mapped {
+            clear_scanout(&target);
+        }
+        if mapped && mode::set_source(&device.mmio, device.chip, &device.output, preferred.0, preferred.1, pitch) {
             device.current = preferred;
-            desc = FbDesc { addr: fb.addr, pitch, width: preferred.0, height: preferred.1, bpp: 32 };
-            clear_scanout(&desc);
+            desc = target;
         } else {
             let source = device.output.source;
             mode::set_source(&device.mmio, device.chip, &device.output, source.0, source.1, fb.pitch);

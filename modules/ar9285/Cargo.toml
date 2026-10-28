@@ -9,4 +9,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 hamix_kpi = { path = "../../sdk/hamix_kpi" }
-wlan = { path = "../../libs/wlan" }
+wlan = { path = "../../crates/wlan" }

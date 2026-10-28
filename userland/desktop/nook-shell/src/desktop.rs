@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
+use hxstd::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
 use hxclient::ui::{self, theme};
 use vellum::gfx::ellipsize;
 use vellum::Area;
@@ -166,6 +166,14 @@ impl Nook {
             }
         }
         if button == MOUSE_RIGHT {
+            let previous = self.desktop_selected;
+            self.desktop_selected = hit;
+            for i in [previous, hit].into_iter().flatten() {
+                if i < self.desktop.len() {
+                    let a = self.desktop_area(i);
+                    self.core.add_damage(a);
+                }
+            }
             let items = match hit {
                 Some(index) => {
                     let mut items = alloc::vec![MenuItem { label: String::from("Open"), icon: "ui/open", action: MenuAction::OpenDesktopItem(index), danger: false }];

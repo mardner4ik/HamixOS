@@ -1,0 +1,118 @@
+--- a/options/posix/generic/posix_string.cpp
++++ b/options/posix/generic/posix_string.cpp
+@@ -7,6 +7,8 @@
+ #include <string.h>
+ #include <strings.h>
+ #include <signal.h>
++#include <time.h>
++#include <wchar.h>
+
+ #include <mlibc/debug.hpp>
+
+@@ -136,9 +138,15 @@
+ 	return nullptr;
+ }
+
+-void *memccpy(void *__restrict, const void *__restrict, int, size_t) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++void *memccpy(void *__restrict dest, const void *__restrict src, int c, size_t n) {
++	auto d = static_cast<unsigned char *>(dest);
++	auto s = static_cast<const unsigned char *>(src);
++	for(size_t i = 0; i < n; i++) {
++		d[i] = s[i];
++		if(s[i] == static_cast<unsigned char>(c))
++			return d + i + 1;
++	}
++	return nullptr;
+ }
+
+ // This implementation was taken from musl
+@@ -172,3 +180,23 @@
+ 	}
+ 	return l + strlcpy(d + l, s, n - l);
+ }
++
++size_t strxfrm_l(char *__restrict dest, const char *__restrict src, size_t n, locale_t) {
++	return strxfrm(dest, src, n);
++}
++
++int wcscoll_l(const wchar_t *a, const wchar_t *b, locale_t) {
++	return wcscmp(a, b);
++}
++
++size_t wcsxfrm_l(wchar_t *__restrict dest, const wchar_t *__restrict src, size_t n, locale_t) {
++	size_t len = wcslen(src);
++	if(len < n)
++		wmemcpy(dest, src, len + 1);
++	return len;
++}
++
++size_t strftime_l(char *__restrict s, size_t max, const char *__restrict format,
++		const struct tm *__restrict tm, locale_t) {
++	return strftime(s, max, format, tm);
++}
+--- a/options/posix/include/bits/posix/posix_string.h
++++ b/options/posix/include/bits/posix/posix_string.h
+@@ -23,6 +23,7 @@
+ void *memccpy(void *__restrict dest, const void *__restrict src, int c, size_t n);
+
+ int strcoll_l(const char *s1, const char *s2, locale_t locale);
++size_t strxfrm_l(char *__restrict dest, const char *__restrict src, size_t n, locale_t locale);
+
+ // GNU extensions.
+ #if defined(_GNU_SOURCE)
+--- a/options/posix/include/bits/posix/posix_time.h
++++ b/options/posix/include/bits/posix/posix_time.h
+@@ -1,6 +1,8 @@
+ #ifndef MLIBC_POSIX_TIME_H
+ #define MLIBC_POSIX_TIME_H
+
++#include <bits/posix/locale_t.h>
++#include <bits/size_t.h>
+ #include <bits/posix/timer_t.h>
+ #include <bits/posix/timeval.h>
+
+@@ -20,6 +22,10 @@
+ int futimes(int, const struct timeval[2]);
+ int lutimes(const char *filename, const struct timeval tv[2]);
+
++struct tm;
++size_t strftime_l(char *__restrict, size_t, const char *__restrict,
++		const struct tm *__restrict, locale_t);
++
+ #endif /* !__MLIBC_ABI_ONLY */
+
+ #ifdef __cplusplus
+--- a/options/ansi/include/wchar.h
++++ b/options/ansi/include/wchar.h
+@@ -7,6 +7,7 @@
+ #include <bits/wchar.h>
+ #include <bits/wint_t.h>
+ #include <bits/mbstate.h>
++#include <bits/posix/locale_t.h>
+
+ #define WEOF 0xffffffffU
+
+@@ -118,6 +119,8 @@
+ wchar_t *wcsdup(const wchar_t *s);
+ int wcsncasecmp(const wchar_t*, const wchar_t*, size_t);
+ int wcscasecmp(const wchar_t *, const wchar_t *);
++int wcscoll_l(const wchar_t *, const wchar_t *, locale_t);
++size_t wcsxfrm_l(wchar_t *__restrict, const wchar_t *__restrict, size_t, locale_t);
+
+ #endif /* !__MLIBC_ABI_ONLY */
+
+--- a/options/posix/include/unistd.h
++++ b/options/posix/include/unistd.h
+@@ -34,7 +34,9 @@
+ #define _POSIX_SPAWN _POSIX_VERSION
+ #define _POSIX_THREADS _POSIX_VERSION
+ #define _POSIX_THREAD_SAFE_FUNCTIONS _POSIX_VERSION
+-#define _POSIX_MONOTONIC_CLOCK 0
++#define _POSIX_MONOTONIC_CLOCK _POSIX_VERSION
++#define _POSIX_TIMERS _POSIX_VERSION
++#define _POSIX_CLOCK_SELECTION _POSIX_VERSION
+
+ #if __MLIBC_CRYPT_OPTION
+ #define _XOPEN_CRYPT 1

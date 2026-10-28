@@ -10,10 +10,14 @@ extern crate alloc;
 mod arch;
 
 mod drivers;
+mod errno;
+mod usercopy;
 mod fs;
 mod hxinit;
 mod login;
 mod net;
+mod linux;
+mod prof;
 mod memory;
 mod module;
 #[cfg(not(target_arch = "x86_64"))]
@@ -26,7 +30,7 @@ mod syscall;
 mod random;
 mod task;
 mod users;
-mod vt;
+mod tty;
 
 #[cfg(target_arch = "x86_64")]
 mod x86_64_main {
@@ -113,6 +117,8 @@ mod x86_64_main {
             arch::x86_64::disable_interrupts();
             zero_bss();
         }
+        memory::BOOT_INFO_SIZE.store(unsafe { core::ptr::read_unaligned(multiboot_info_ptr as *const u32) } as usize, core::sync::atomic::Ordering::Relaxed);
+        memory::BOOT_INFO_ADDR.store(multiboot_info_ptr, core::sync::atomic::Ordering::Relaxed);
         arch::x86_64::smp::early_init();
         task::bkl::acquire();
 
@@ -138,15 +144,30 @@ mod x86_64_main {
         memory::init(mbi_copy.as_ptr() as usize);
         arch::x86_64::paging::init();
         drivers::klog::log("boot: memory");
+        arch::x86_64::protect::enable();
+        arch::x86_64::protect::protect_kernel();
+        drivers::klog::log(&alloc::format!("boot: {}", arch::x86_64::protect::summary()));
         drivers::video::text_mode::cache_framebuffer();
         if let Some(fb) = *memory::FRAMEBUFFER.lock() {
             arch::x86_64::paging::enable_kernel_write_combining(fb.addr, fb.byte_len());
         }
         drivers::video::text_mode::fb_clear_full();
-        arch::x86_64::calibrate_tsc();
+        let tsc_khz = arch::x86_64::calibrate_tsc();
+        drivers::klog::log(&alloc::format!("timer: TSC {} MHz for CLOCK_MONOTONIC", tsc_khz / 1000));
         {
             let (free, total) = memory::frame::memory_info();
             hxinit::record("memory", "Physical memory", hxinit::ok(alloc::format!("{} MiB, {} MiB free, kernel heap grows on demand", total >> 20, free >> 20)));
+        }
+        {
+            let size = memory::BOOT_INFO_SIZE.load(core::sync::atomic::Ordering::Relaxed);
+            let at = memory::BOOT_INFO_ADDR.load(core::sync::atomic::Ordering::Relaxed);
+            let mods: alloc::vec::Vec<alloc::string::String> = memory::modules()
+                .into_iter()
+                .flatten()
+                .map(|m| alloc::format!("{} {} KiB at {:#x}", m.name(), m.len() / 1024, m.start))
+                .collect();
+            let detail = alloc::format!("boot info {} bytes at {:#x}; modules: {}", size, at, if mods.is_empty() { alloc::string::String::from("none") } else { mods.join(", ") });
+            hxinit::record("bootinfo", "Boot loader", if size > MBI_BUF_SIZE || mods.is_empty() { hxinit::warn(detail) } else { hxinit::ok(detail) });
         }
         hxinit::record("cpu", "Processor", hxinit::ok({
             let cpu = arch::x86_64::cpuid::identify();
@@ -229,13 +250,16 @@ mod x86_64_main {
         }
         {
             let mut s = SERIAL.lock();
-            let _ = writeln!(s, "\n[KERNEL PANIC] {}", info);
+            let _ = write!(s, "\n[KERNEL PANIC] {}", info);
+            syscall::write_panic_context(&mut *s);
+            let _ = writeln!(s);
         }
 
         let mut reason_buf = [0u8; 512];
         let reason_len = {
             let mut writer = FixedWriter { buf: &mut reason_buf, len: 0 };
             let _ = write!(writer, "{}", info);
+            syscall::write_panic_context(&mut writer);
             writer.len
         };
         let reason = core::str::from_utf8(&reason_buf[..reason_len]).unwrap_or("unknown panic");

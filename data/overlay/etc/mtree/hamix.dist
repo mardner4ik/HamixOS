@@ -1,0 +1,6 @@
+./usr/bin/poweroff	type=file uname=root gname=power mode=4750
+./usr/bin/reboot	type=file uname=root gname=power mode=4750
+./usr/bin/halt	type=file uname=root gname=power mode=4750
+./usr/libexec/hamix/hxperm-exec	type=file uname=root gname=root mode=4755
+./usr/libexec/hamix/hxsysconf	type=file uname=root gname=sysconf mode=4750
+./etc/hamix/permissions	type=dir uname=root gname=root mode=0755

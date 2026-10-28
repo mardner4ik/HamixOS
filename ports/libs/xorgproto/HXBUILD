@@ -1,0 +1,18 @@
+pkgname=xorgproto
+pkgver=2024.1
+pkgdesc="X11 protocol headers"
+source="https://www.x.org/releases/individual/proto/xorgproto-$pkgver.tar.xz"
+sha256="372225fd40815b8423547f5d890c5debc72e88b91088fbfb13158c20495ccb59"
+builddir="xorgproto-$pkgver"
+depends=""
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dlegacy=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/doc"
+}

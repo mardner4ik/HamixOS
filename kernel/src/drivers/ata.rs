@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use crate::arch::io::{inb, inw, outb};
+use crate::arch::io::{inb, inw, outb, outw};
 
 #[cfg(not(target_arch = "x86_64"))]
 unsafe fn insw(port: u16, buf: *mut u8) {
@@ -61,6 +61,7 @@ pub struct Drive {
     pub slave: bool,
     pub lba48: bool,
     pub sectors: u64,
+    pub atapi: bool,
 }
 
 #[derive(Clone)]
@@ -108,6 +109,26 @@ fn wait_data(base: u16) -> Result<(), ()> {
     Err(())
 }
 
+fn read_identify_words(base: u16) -> [u16; 256] {
+    let mut words = [0u16; 256];
+    for word in words.iter_mut() {
+        *word = inw(base);
+    }
+    words
+}
+
+fn model_of(words: &[u16; 256]) -> String {
+    let mut model = String::new();
+    for word in &words[27..47] {
+        for byte in [(word >> 8) as u8, *word as u8] {
+            if byte.is_ascii_graphic() || byte == b' ' {
+                model.push(byte as char);
+            }
+        }
+    }
+    String::from(model.trim())
+}
+
 fn identify(base: u16, control: u16, slave: bool) -> Option<DriveInfo> {
     if inb(base + 7) == 0xFF {
         return None;
@@ -123,15 +144,16 @@ fn identify(base: u16, control: u16, slave: bool) -> Option<DriveInfo> {
     if inb(base + 7) == 0 {
         return None;
     }
+    let _ = wait_not_busy(base);
+    if (inb(base + 4), inb(base + 5)) == (0x14, 0xEB) {
+        return identify_packet(base, control, slave);
+    }
     wait_not_busy(base).ok()?;
     if inb(base + 4) != 0 || inb(base + 5) != 0 {
         return None;
     }
     wait_data(base).ok()?;
-    let mut words = [0u16; 256];
-    for word in words.iter_mut() {
-        *word = inw(base);
-    }
+    let words = read_identify_words(base);
     let lba48 = words[83] & (1 << 10) != 0;
     let sectors = if lba48 {
         words[100] as u64 | (words[101] as u64) << 16 | (words[102] as u64) << 32 | (words[103] as u64) << 48
@@ -141,18 +163,90 @@ fn identify(base: u16, control: u16, slave: bool) -> Option<DriveInfo> {
     if sectors == 0 {
         return None;
     }
-    let mut model = String::new();
-    for word in &words[27..47] {
-        for byte in [(word >> 8) as u8, *word as u8] {
-            if byte.is_ascii_graphic() || byte == b' ' {
-                model.push(byte as char);
+    Some(DriveInfo { drive: Drive { base, control, slave, lba48, sectors, atapi: false }, model: model_of(&words) })
+}
+
+fn identify_packet(base: u16, control: u16, slave: bool) -> Option<DriveInfo> {
+    outb(base + 6, if slave { 0xB0 } else { 0xA0 });
+    delay(control);
+    outb(base + 7, 0xA1);
+    delay(control);
+    wait_data(base).ok()?;
+    let words = read_identify_words(base);
+    let mut drive = Drive { base, control, slave, lba48: false, sectors: 0, atapi: true };
+    let blocks = (0..3).find_map(|_| read_capacity(&drive)).unwrap_or(0);
+    drive.sectors = blocks * 4;
+    Some(DriveInfo { drive, model: model_of(&words) })
+}
+
+fn packet(drive: &Drive, command: &[u8; 12], out: &mut [u8]) -> Result<usize, ()> {
+    let base = drive.base;
+    wait_not_busy(base)?;
+    outb(base + 6, if drive.slave { 0xB0 } else { 0xA0 });
+    delay(drive.control);
+    outb(base + 1, 0);
+    outb(base + 4, 0x00);
+    outb(base + 5, 0x08);
+    outb(base + 7, 0xA0);
+    delay(drive.control);
+    wait_data(base)?;
+    for i in 0..6 {
+        outw(base, u16::from_le_bytes([command[i * 2], command[i * 2 + 1]]));
+    }
+    let mut done = 0usize;
+    loop {
+        delay(drive.control);
+        let status = wait_not_busy(base)?;
+        if status & (STATUS_ERR | STATUS_DF) != 0 {
+            return Err(());
+        }
+        if status & STATUS_DRQ == 0 {
+            return Ok(done);
+        }
+        let bytes = inb(base + 4) as usize | (inb(base + 5) as usize) << 8;
+        for _ in 0..bytes / 2 {
+            let word = inw(base).to_le_bytes();
+            if done + 2 <= out.len() {
+                out[done] = word[0];
+                out[done + 1] = word[1];
             }
+            done += 2;
         }
     }
-    Some(DriveInfo {
-        drive: Drive { base, control, slave, lba48, sectors },
-        model: String::from(model.trim()),
-    })
+}
+
+fn read_capacity(drive: &Drive) -> Option<u64> {
+    let mut command = [0u8; 12];
+    command[0] = 0x25;
+    let mut reply = [0u8; 8];
+    let got = packet(drive, &command, &mut reply).ok()?;
+    if got < 8 {
+        return None;
+    }
+    let last = u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as u64;
+    let size = u32::from_be_bytes([reply[4], reply[5], reply[6], reply[7]]);
+    if size != 2048 && size != 0 {
+        return None;
+    }
+    Some(last + 1)
+}
+
+pub fn read_blocks(drive: &Drive, block: u64, count: usize, buf: &mut [u8]) -> Result<(), ()> {
+    let _guard = IO_LOCK.lock();
+    let mut done = 0usize;
+    while done < count {
+        let n = (count - done).min(16);
+        let mut command = [0u8; 12];
+        command[0] = 0x28;
+        command[2..6].copy_from_slice(&((block + done as u64) as u32).to_be_bytes());
+        command[7..9].copy_from_slice(&(n as u16).to_be_bytes());
+        let got = packet(drive, &command, &mut buf[done * 2048..(done + n) * 2048])?;
+        if got < n * 2048 {
+            return Err(());
+        }
+        done += n;
+    }
+    Ok(())
 }
 
 pub fn init() {
@@ -165,9 +259,10 @@ pub fn init() {
         for slave in [false, true] {
             if let Some(info) = identify(base, control, slave) {
                 crate::drivers::klog::log(&format!(
-                    "ata: {} {} -- {} MiB{}",
+                    "ata: {} {} -- {}{} MiB{}",
                     if base == 0x1F0 { "primary" } else { "secondary" },
                     if slave { "slave" } else { "master" },
+                    if info.drive.atapi { "optical, " } else { "" },
                     info.drive.sectors / 2048,
                     if info.model.is_empty() { String::new() } else { format!(" ({})", info.model) }
                 ));

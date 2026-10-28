@@ -6,7 +6,7 @@ inodes, direct/indirect block maps, linear directories with file types), so
 `e2fsck`, `debugfs` and `dumpe2fs` can inspect a hext image. On top of that
 it adds protection against sudden power loss.
 
-The implementation is a standalone `no_std` crate, `libs/hext`, used both by
+The implementation is a standalone `no_std` crate, `crates/hext`, used both by
 the kernel and by the host tool `tools/mkhext`.
 
 ## Crash safety
@@ -28,7 +28,7 @@ the kernel and by the host tool `tools/mkhext`.
    ignored, so the filesystem shows either the old or the new state of an
    operation, never a mix.
 
-`libs/hext/tests/fs.rs` checks this by simulating a power cut after every
+`crates/hext/tests/fs.rs` checks this by simulating a power cut after every
 single block write of a transaction, remounting, verifying that the result is
 atomic and running `e2fsck -fn` on it.
 
@@ -68,5 +68,7 @@ mkhext [--size 256M] [--label NAME] <source-dir> <image>
 mkfs.hext [-L label] /dev/sdXN      # inside HamixOS
 ```
 
-`build.sh` creates `isoroot/boot/hext.img.gz` from `rootfs/`; home
-directories get the owners listed in `rootfs/etc/passwd`.
+`cargo xtask build` creates `out/isoroot/boot/hext.img` from `out/rootfs/`; home
+directories get the owners listed in `rootfs/etc/passwd`. Symbolic links are stored in
+the VFS link format (`\x7fHXLINK\n` + target). A live boot from CD/DVD reads this image
+from the disc on demand (see `FILESYSTEM.md`).

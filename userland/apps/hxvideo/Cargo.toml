@@ -1,6 +1,6 @@
 [package]
 name = "hxvideo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -8,9 +8,11 @@ name = "hxvideo"
 path = "src/main.rs"
 
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
-vellum = { path = "../../libs/vellum" }
-hxclient = { path = "../../libs/hxclient" }
-hx264 = { path = "../../libs/hx264" }
-hxmp4 = { path = "../../libs/hxmp4" }
-hxaac = { path = "../../libs/hxaac" }
+hxstd = { path = "../../libs/hxstd" }
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["nook"] }
+hx264 = { path = "../../../crates/hx264" }
+hxmp4 = { path = "../../../crates/hxmp4" }
+hxaac = { path = "../../../crates/hxaac" }
+
+[package.metadata.hamix]
+desktop = "nook"

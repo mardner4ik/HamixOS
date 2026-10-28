@@ -1,0 +1,68 @@
+--- a/options/posix/generic/spawn-stubs.cpp	2026-09-29 18:28:55.823414129 +0300
++++ b/options/posix/generic/spawn-stubs.cpp	2026-09-29 18:28:55.840748010 +0300
+@@ -24,6 +24,7 @@
+ #define FDOP_OPEN 3
+ #define FDOP_CHDIR 4
+ #define FDOP_FCHDIR 5
++#define FDOP_CLOSEFROM 6
+ 
+ struct fdop {
+ 	struct fdop *next, *prev;
+@@ -97,9 +98,8 @@
+ 	}
+ 
+ 	if(attr->__flags & POSIX_SPAWN_SETPGROUP) {
+-		mlibc::infoLogger() << "mlibc: posix_spawn: ignoring SETPGROUP" << frg::endlog;
+-		//if((ret = setpgid(0, attr->__pgrp)))
+-		//	goto fail;
++		if((ret = setpgid(0, attr->__pgrp)) < 0)
++			goto fail;
+ 	}
+ 
+ 	if(attr->__flags & POSIX_SPAWN_RESETIDS) {
+@@ -127,6 +127,11 @@
+ 			case FDOP_CLOSE:
+ 				close(op->fd);
+ 				break;
++			case FDOP_CLOSEFROM:
++				for(int i = op->fd; i < 1024; i++)
++					if(i != p)
++						close(i);
++				break;
+ 			case FDOP_DUP2:
+ 				fd = op->srcfd;
+ 				if(fd == p) {
+@@ -342,6 +347,22 @@
+ 	if((op->next = (struct fdop *)file_actions->__actions))
+ 		op->next->prev = op;
+ 	op->prev = 0;
++	file_actions->__actions = op;
++	return 0;
++}
++
++int posix_spawn_file_actions_addclosefrom_np(posix_spawn_file_actions_t *file_actions,
++		int from) {
++	if(from < 0)
++		return EBADF;
++	struct fdop *op = (struct fdop *)malloc(sizeof *op);
++	if(!op)
++		return ENOMEM;
++	op->cmd = FDOP_CLOSEFROM;
++	op->fd = from;
++	if((op->next = (struct fdop *)file_actions->__actions))
++		op->next->prev = op;
++	op->prev = 0;
+ 	file_actions->__actions = op;
+ 	return 0;
+ }
+--- a/options/posix/include/spawn.h	2026-09-29 18:28:55.824817865 +0300
++++ b/options/posix/include/spawn.h	2026-09-29 18:28:55.850133565 +0300
+@@ -63,6 +63,8 @@
+ 		int fildes, int newfildes);
+ int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *file_actions,
+ 		int fildes);
++int posix_spawn_file_actions_addclosefrom_np(posix_spawn_file_actions_t *file_actions,
++		int from);
+ int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *__restrict file_actions,
+ 		int fildes, const char *__restrict path, int oflag, mode_t mode);
+ int posix_spawnp(pid_t *__restrict pid, const char *__restrict file,

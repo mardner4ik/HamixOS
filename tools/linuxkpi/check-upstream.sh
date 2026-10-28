@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DRIVER_DIR="${1:?usage: check-upstream.sh drivers/<name>}"
+DRIVER_DIR="${1:?usage: check-upstream.sh modules/<name>}"
 source "$DRIVER_DIR/UPSTREAM"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

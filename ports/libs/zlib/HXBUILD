@@ -1,0 +1,16 @@
+pkgname=zlib
+pkgver=1.3.1
+pkgdesc="Compression library"
+source="https://zlib.net/fossils/zlib-$pkgver.tar.gz"
+sha256="9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+builddir="zlib-$pkgver"
+depends=""
+
+build() {
+    CHOST="$HX_HOST" ./configure --prefix=/usr
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

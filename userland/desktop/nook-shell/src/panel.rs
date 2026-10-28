@@ -1,13 +1,13 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::net;
-use hamix_std::sys::{self, MOUSE_LEFT};
+use hxstd::net;
+use hxstd::sys::{self, MOUSE_LEFT};
 use hxclient::ui::{self, theme, FieldAction, Style, TextField};
 use vellum::gfx::ellipsize;
 use vellum::{Area, Painter};
 
-use crate::{civil, days_from_civil, weekday, Body, MenuAction, MenuItem, Nook, Popup, PowerAction, TOP_H};
+use crate::{civil, days_from_civil, weekday, MenuAction, MenuItem, Nook, Popup, PowerAction, TOP_H};
 
 const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 const NET_W: i32 = 340;
@@ -72,15 +72,24 @@ impl Nook {
         }
         let bar = self.top_bar();
         self.core.add_damage(bar);
+        if self.popup.is_none() {
+            self.shell_leave();
+        }
     }
 
     fn power_area(&self) -> Area {
-        Area::new(self.core.screen.width - 216, TOP_H + 6, 208, 3 * 36 + 16)
+        Area::new(self.core.screen.width - 236, TOP_H + 6, 228, 4 * 36 + 16 + 9)
+    }
+
+    fn user_button(&self) -> Area {
+        let x = self.user_x() - 28;
+        Area::new(x, 4, self.power_button().x - x - 4, TOP_H - 8)
     }
 
     fn power_row(&self, index: usize) -> Area {
         let a = self.power_area();
-        Area::new(a.x + 8, a.y + 8 + index as i32 * 36, a.w - 16, 34)
+        let gap = if index > 0 { 9 } else { 0 };
+        Area::new(a.x + 8, a.y + 8 + index as i32 * 36 + gap, a.w - 16, 34)
     }
 
     fn menu_area(&self, x: i32, y: i32, items: &[MenuItem]) -> Area {
@@ -158,7 +167,7 @@ impl Nook {
         Area::new(a.x + 8, y, a.w - 16, 40)
     }
 
-    fn network_password_field(&self) -> Option<(Area, Area)> {
+    pub fn network_password_field(&self) -> Option<(Area, Area)> {
         if !self.selected_needs_password() {
             return None;
         }
@@ -199,7 +208,7 @@ impl Nook {
         }
         if self.apps_button().contains(x, TOP_H / 2) {
             self.set_popup(Popup::Launcher);
-        } else if self.power_button().contains(x, TOP_H / 2) {
+        } else if self.power_button().contains(x, TOP_H / 2) || self.user_button().contains(x, TOP_H / 2) {
             self.set_popup(Popup::Power);
         } else if self.network_button().contains(x, TOP_H / 2) {
             self.set_popup(Popup::Network);
@@ -217,7 +226,7 @@ impl Nook {
         if !area.contains(x, y) {
             let toggled = match self.popup {
                 Popup::Launcher => self.apps_button().contains(x, y),
-                Popup::Power => self.power_button().contains(x, y),
+                Popup::Power => self.power_button().contains(x, y) || self.user_button().contains(x, y),
                 Popup::Network => self.network_button().contains(x, y),
                 Popup::Calendar => self.clock_button().contains(x, y),
                 Popup::Sound => self.volume_button().contains(x, y),
@@ -231,8 +240,13 @@ impl Nook {
             Popup::Launcher => self.launcher_press(x, y, button),
             Popup::DockOverflow => self.overflow_press(x, y, button),
             Popup::Power => {
+                if self.power_row(0).contains(x, y) {
+                    self.set_popup(Popup::None);
+                    self.launch_role("settings", &["users"]);
+                    return true;
+                }
                 for (i, action) in [PowerAction::Logout, PowerAction::Reboot, PowerAction::Shutdown].iter().enumerate() {
-                    if self.power_row(i).contains(x, y) {
+                    if self.power_row(i + 1).contains(x, y) {
                         let action = *action;
                         self.set_popup(Popup::None);
                         self.start_power(action);
@@ -353,7 +367,7 @@ impl Nook {
         match &self.popup {
             Popup::Launcher => self.launcher_hover(x, y),
             Popup::DockOverflow => (0..self.dock_overflow().len().min(self.overflow_visible_rows())).find(|i| self.overflow_row(*i).contains(x, y)),
-            Popup::Power => (0..3).find(|i| self.power_row(*i).contains(x, y)),
+            Popup::Power => (0..4).find(|i| self.power_row(*i).contains(x, y)),
             Popup::Menu { items, .. } => (0..items.len()).find(|i| Self::menu_row(area, *i).contains(x, y)),
             Popup::Calendar => {
                 if Area::new(area.x + 12, area.y + 12, 32, 30).contains(x, y) {
@@ -542,7 +556,7 @@ impl Nook {
             p.rounded(area, 8, theme::warn(), 230);
             p.text(&ui.small, area.x + 7, area.y + (area.h - ui.small.height()) / 2, tag, 0x1b1405);
         }
-        self.hot_buttons.extend_from_slice(&[apps_btn, power_btn, net_btn, clock_btn, vol_btn]);
+        self.hot_buttons = alloc::vec![apps_btn, power_btn, net_btn, clock_btn, vol_btn];
     }
 
     pub fn draw_popup(&mut self) {
@@ -558,18 +572,22 @@ impl Nook {
             Popup::Launcher => self.draw_launcher(area, hover),
             Popup::DockOverflow => self.draw_overflow(area, hover),
             Popup::Power => {
-                let rows: Vec<Area> = (0..3).map(|i| self.power_row(i)).collect();
+                let rows: Vec<Area> = (0..4).map(|i| self.power_row(i)).collect();
+                let direct = sys::geteuid() == 0 || sys::access("/usr/bin/poweroff", sys::X_OK);
+                let user_label = format!("{} · Account", self.user);
+                let labels = [(user_label.as_str(), "ui/user"), ("Log out", "ui/logout"), (if direct { "Restart" } else { "Restart…" }, "ui/reboot"), (if direct { "Shut down" } else { "Shut down…" }, "ui/power")];
                 let mut p = self.core.painter_clipped();
                 popup_frame(&mut p, area, 12);
-                for (i, (label, icon)) in [("Log out", "ui/logout"), ("Restart…", "ui/reboot"), ("Shut down…", "ui/power")].iter().enumerate() {
+                p.fill(Area::new(area.x + 14, rows[1].y - 6, area.w - 28, 1), theme::palette().border);
+                for (i, (label, icon)) in labels.iter().enumerate() {
                     let row = rows[i];
                     if hover == Some(i) {
                         p.rounded(row, 7, theme::hover(), 255);
                     }
                     if let Some(img) = ui.icon(icon) {
-                        p.image_tinted(img, row.x + 12, row.y + (row.h - img.h) / 2, if i == 2 { theme::danger() } else { theme::dim() }, 255);
+                        p.image_tinted(img, row.x + 12, row.y + (row.h - img.h) / 2, if i == 3 { theme::danger() } else { theme::dim() }, 255);
                     }
-                    p.text(&ui.font, row.x + 40, row.y + (row.h - ui.font.height()) / 2, label, theme::text());
+                    p.text(&ui.font, row.x + 40, row.y + (row.h - ui.font.height()) / 2, &ellipsize(&ui.font, label, row.w - 52), theme::text());
                 }
             }
             Popup::Menu { items, .. } => {
@@ -742,115 +760,6 @@ impl Nook {
             ui::button(&mut p, ui, settings, "Network settings…", Style::Flat, hover == Some(40), true);
         }
         self.net.password = field;
-    }
-
-    pub fn draw_toasts(&mut self) {
-        if self.toasts.is_empty() || !self.toast_region().overlaps(&self.core.screen.clip) {
-            return;
-        }
-        let ui = self.ui();
-        let areas: Vec<Area> = (0..self.toasts.len()).map(|i| self.toast_area(i)).collect();
-        let toasts: Vec<(String, String, String)> = self.toasts.iter().map(|t| (t.title.clone(), t.body.clone(), t.icon.clone())).collect();
-        let mut p = self.core.painter_clipped();
-        for (i, (title, body, icon)) in toasts.iter().enumerate() {
-            let a = areas[i];
-            p.shadow(a, 12, 18, 200, 5);
-            p.rounded(a, 12, theme::palette().osd, 248);
-            p.rounded_border(a, 12, theme::palette().edge, theme::palette().edge_alpha + 4);
-            let mut text_x = a.x + 16;
-            if let Some(img) = ui.icon(icon) {
-                if img.w <= 16 {
-                    p.rounded(Area::new(a.x + 14, a.y + 16, 40, 40), 10, theme::surface_2(), 255);
-                    p.image_tinted(img, a.x + 26, a.y + 28, theme::accent_hover(), 255);
-                } else {
-                    p.image_scaled(img, Area::new(a.x + 14, a.y + 16, 40, 40), 255);
-                }
-                text_x = a.x + 66;
-            }
-            let max = a.right() - text_x - 14;
-            p.text(&ui.medium, text_x, a.y + 16, &ellipsize(&ui.medium, title, max), theme::text());
-            p.text(&ui.font, text_x, a.y + 38, &ellipsize(&ui.font, body, max), theme::dim());
-        }
-    }
-
-    pub fn draw_switcher(&mut self) {
-        let Some(selected) = self.switcher else {
-            return;
-        };
-        let area = self.switcher_area();
-        if !area.expand(24).overlaps(&self.core.screen.clip) {
-            return;
-        }
-        let order = self.switcher_order();
-        let entries: Vec<(String, String)> = order
-            .iter()
-            .filter_map(|id| self.core.index_of(*id))
-            .map(|i| (self.core.windows[i].title.clone(), format!("apps/{}", if self.core.windows[i].icon.is_empty() { "hello" } else { self.core.windows[i].icon.as_str() })))
-            .collect();
-        for (_, icon) in &entries {
-            self.ui.load_icon(icon);
-        }
-        let ui = self.ui();
-        let mut p = self.core.painter_clipped();
-        popup_frame(&mut p, area, 16);
-        for (i, (title, icon)) in entries.iter().enumerate() {
-            let cell = Area::new(area.x + 12 + i as i32 * 96, area.y + 14, 90, 88);
-            if i == selected {
-                p.rounded(cell, 12, theme::accent(), 90);
-                p.rounded_border(cell, 12, theme::accent_hover(), 200);
-            }
-            if let Some(img) = ui.icon(icon) {
-                p.image(img, cell.x + (cell.w - img.w) / 2, cell.y + 10, 255);
-            }
-            if i == selected {
-                ui::centered_text(&mut p, &ui.font, Area::new(area.x, area.bottom() - 34, area.w, 24), title, theme::text());
-            }
-        }
-    }
-
-    pub fn draw_about_window(p: &mut Painter, ui: &hxclient::ui::Ui, content: Area) {
-        p.fill(content, theme::bg());
-        let wordmark = if theme::is_light() { "about-logo-light" } else { "about-logo-dark" };
-        if let Some(logo) = ui.icon(wordmark) {
-            p.image(logo, content.x + (content.w - logo.w) / 2, content.y + 16, 255);
-        }
-        ui::centered_text(p, &ui.medium, Area::new(content.x, content.y + 120, content.w, 22), "HamixOS 0.6.1", theme::text());
-        ui::centered_text(p, &ui.font, Area::new(content.x, content.y + 142, content.w, 20), "Nook desktop · hsh shell · hext filesystem · smoltcp", theme::dim());
-        let info = sys::sysinfo();
-        let cpus = sys::cpu_stats().len();
-        let lines = [
-            ("Memory", format!("{} of {}", ui::human_size(info.mem_used()), ui::human_size(info.mem_total))),
-            ("Processors", if cpus == 1 { String::from("1 core") } else { format!("{} cores", cpus) }),
-            ("Uptime", format!("{} min", info.uptime_ms / 60000)),
-            ("Processes", format!("{}", info.processes)),
-        ];
-        let mut y = content.y + 178;
-        for (k, v) in lines {
-            p.text(&ui.font, content.x + 110, y, k, theme::faint());
-            p.text(&ui.font, content.x + 210, y, &v, theme::text());
-            y += 24;
-        }
-        ui::centered_text(p, &ui.small, Area::new(content.x, content.bottom() - 34, content.w, 20), "Written from scratch in Rust", theme::faint());
-    }
-
-    pub fn draw_auth_window(p: &mut Painter, ui: &hxclient::ui::Ui, content: Area, body: &mut Body, pointer: (i32, i32)) {
-        let Body::Auth { action, field, error } = body else {
-            return;
-        };
-        p.fill(content, theme::bg());
-        let verb = if *action == PowerAction::Reboot { "restart" } else { "shut down" };
-        p.text(&ui.medium, content.x + 20, content.y + 18, &format!("Authentication is required to {} the computer", verb), theme::text());
-        p.text(&ui.font, content.x + 20, content.y + 42, &format!("Enter the password of {}.", ui::current_user()), theme::dim());
-        let input = Area::new(content.x + 20, content.y + 70, content.w - 40, 38);
-        ui::text_field(p, ui, input, field, true, "Password");
-        if !error.is_empty() {
-            p.text(&ui.font, content.x + 20, content.y + 116, error, theme::danger());
-        }
-        let ok = Area::new(content.right() - 112, content.bottom() - 52, 96, 36);
-        let cancel = Area::new(content.right() - 216, content.bottom() - 52, 96, 36);
-        ui::button(p, ui, cancel, "Cancel", Style::Secondary, cancel.contains(pointer.0, pointer.1), true);
-        let label = if *action == PowerAction::Reboot { "Restart" } else { "Shut down" };
-        ui::button(p, ui, ok, label, Style::Danger, ok.contains(pointer.0, pointer.1), true);
     }
 }
 

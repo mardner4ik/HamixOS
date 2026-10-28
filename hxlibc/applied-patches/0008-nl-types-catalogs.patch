@@ -1,0 +1,60 @@
+--- a/options/posix/include/nl_types.h
++++ b/options/posix/include/nl_types.h
+@@ -1,6 +1,27 @@
+ #ifndef NL_TYPES_H
+ #define NL_TYPES_H
+ 
++#include <bits/nl_item.h>
+ 
++#define NL_SETD 1
++#define NL_CAT_LOCALE 1
+ 
+-#endif // NL_TYPES_H 
+\ No newline at end of file
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef void *nl_catd;
++
++#ifndef __MLIBC_ABI_ONLY
++
++nl_catd catopen(const char *name, int flag);
++char *catgets(nl_catd catalog, int set, int number, const char *message);
++int catclose(nl_catd catalog);
++
++#endif /* !__MLIBC_ABI_ONLY */
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif // NL_TYPES_H
+--- a/options/posix/generic/posix_string.cpp
++++ b/options/posix/generic/posix_string.cpp
+@@ -9,6 +9,8 @@
+ #include <signal.h>
+ #include <time.h>
+ #include <wchar.h>
++#include <errno.h>
++#include <nl_types.h>
+ 
+ #include <mlibc/debug.hpp>
+ 
+@@ -200,3 +202,16 @@
+ 		const struct tm *__restrict tm, locale_t) {
+ 	return strftime(s, max, format, tm);
+ }
++
++nl_catd catopen(const char *, int) {
++	errno = ENOENT;
++	return reinterpret_cast<nl_catd>(-1);
++}
++
++char *catgets(nl_catd, int, int, const char *message) {
++	return const_cast<char *>(message);
++}
++
++int catclose(nl_catd) {
++	return 0;
++}

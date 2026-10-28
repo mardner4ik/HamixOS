@@ -1,6 +1,6 @@
 [package]
 name = "hxnotes"
-version = "0.4.0"
+version = "0.3.0"
 edition = "2021"
 
 [[bin]]
@@ -8,6 +8,17 @@ name = "hxnotes"
 path = "src/main.rs"
 
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
-vellum = { path = "../../libs/vellum" }
-hxclient = { path = "../../libs/hxclient" }
+hxport = { path = "../../libs/hxport" }
+
+[target.'cfg(target_os = "hamix")'.dependencies]
+hxstd = { path = "../../libs/hxstd" }
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["nook"] }
+
+[target.'cfg(not(target_os = "hamix"))'.dependencies]
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["gtk"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("hamix"))'] }
+
+[package.metadata.hamix]
+desktop = "nook"

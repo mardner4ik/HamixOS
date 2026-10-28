@@ -1,13 +1,13 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use smoltcp::iface::SocketHandle;
-use smoltcp::socket::{tcp, udp};
+use smoltcp::socket::{icmp, tcp, udp};
 use smoltcp::time::Duration;
-use smoltcp::wire::{IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress, IpEndpoint, IpListenEndpoint, Ipv4Address};
 
 use super::stack::{self, Stack};
 use crate::arch::without_interrupts;
@@ -15,23 +15,23 @@ use crate::task;
 
 pub const ID_BASE: u32 = 0x4000_0000;
 
-pub const EBADF: i64 = -9;
-pub const EAGAIN: i64 = -11;
-pub const EINVAL: i64 = -22;
-pub const EPIPE: i64 = -32;
-pub const EDESTADDRREQ: i64 = -89;
-pub const EMSGSIZE: i64 = -90;
-pub const EOPNOTSUPP: i64 = -95;
-pub const EADDRINUSE: i64 = -98;
-pub const ENETDOWN: i64 = -100;
-pub const ENETUNREACH: i64 = -101;
-pub const ECONNRESET: i64 = -104;
-pub const EISCONN: i64 = -106;
-pub const ENOTCONN: i64 = -107;
-pub const ETIMEDOUT: i64 = -110;
-pub const ECONNREFUSED: i64 = -111;
-pub const EALREADY: i64 = -114;
-pub const EINPROGRESS: i64 = -115;
+pub use crate::errno::EBADF;
+pub use crate::errno::EAGAIN;
+pub use crate::errno::EINVAL;
+pub use crate::errno::EPIPE;
+pub use crate::errno::EDESTADDRREQ;
+pub use crate::errno::EMSGSIZE;
+pub use crate::errno::EOPNOTSUPP;
+pub use crate::errno::EADDRINUSE;
+pub use crate::errno::ENETDOWN;
+pub use crate::errno::ENETUNREACH;
+pub use crate::errno::ECONNRESET;
+pub use crate::errno::EISCONN;
+pub use crate::errno::ENOTCONN;
+pub use crate::errno::ETIMEDOUT;
+pub use crate::errno::ECONNREFUSED;
+pub use crate::errno::EALREADY;
+pub use crate::errno::EINPROGRESS;
 
 const TCP_RX_BUFFER: usize = 256 * 1024;
 const TCP_TX_BUFFER: usize = 128 * 1024;
@@ -41,6 +41,8 @@ const CONNECT_TIMEOUT_MS: u64 = 30_000;
 const IDLE_TIMEOUT_S: u64 = 120;
 const LINGER_MS: u64 = 20_000;
 const MAX_BACKLOG: usize = 16;
+const LOOP_BUFFER: usize = 256 * 1024;
+const LOOP_PORT_BASE: u16 = 40000;
 
 pub type Endpoint = ([u8; 4], u16);
 
@@ -48,6 +50,7 @@ pub type Endpoint = ([u8; 4], u16);
 pub enum Proto {
     Tcp,
     Udp,
+    Icmp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -76,6 +79,10 @@ struct Socket {
     keepalive: bool,
     recv_timeout_ms: u64,
     send_timeout_ms: u64,
+    loop_peer: Option<u32>,
+    loop_rx: VecDeque<u8>,
+    loop_eof: bool,
+    loop_pending: Vec<(u32, Endpoint)>,
 }
 
 pub struct Ready {
@@ -95,6 +102,10 @@ pub struct Datagram {
 static SOCKETS: Mutex<BTreeMap<u32, Socket>> = Mutex::new(BTreeMap::new());
 static NEXT_ID: AtomicU32 = AtomicU32::new(ID_BASE + 1);
 static OPEN: AtomicUsize = AtomicUsize::new(0);
+static LOOP_PORT: AtomicU32 = AtomicU32::new(0);
+static ICMP_IDENT: AtomicU32 = AtomicU32::new(0x4858);
+const ICMP_PACKETS: usize = 16;
+const ICMP_BYTES: usize = 16 * 1024;
 
 pub fn is_inet(id: u32) -> bool {
     id >= ID_BASE
@@ -141,34 +152,81 @@ fn new_tcp(sock: &Socket) -> tcp::Socket<'static> {
     tcp
 }
 
-fn is_local(ip: [u8; 4], stack: &Stack) -> bool {
-    ip[0] == 127 || stack.address.map(|a| a.address().octets() == ip).unwrap_or(false)
+fn is_local_address(ip: [u8; 4]) -> bool {
+    ip[0] == 127 || stack::ipv4().map(|a| a.0 == ip).unwrap_or(false)
+}
+
+fn loop_port() -> u16 {
+    LOOP_PORT_BASE + (LOOP_PORT.fetch_add(1, Ordering::Relaxed) % 20000) as u16
+}
+
+fn fresh_socket(proto: Proto, phase: Phase) -> Socket {
+    Socket {
+        refs: 1,
+        proto,
+        phase,
+        handle: None,
+        generation: 0,
+        backlog: Vec::new(),
+        bound: None,
+        peer: None,
+        error: 0,
+        connect_started: 0,
+        shut_read: false,
+        shut_write: false,
+        nodelay: false,
+        keepalive: false,
+        recv_timeout_ms: 0,
+        send_timeout_ms: 0,
+        loop_peer: None,
+        loop_rx: VecDeque::new(),
+        loop_eof: false,
+        loop_pending: Vec::new(),
+    }
+}
+
+fn connect_loopback(id: u32, remote: Endpoint) -> Result<(), i64> {
+    let server = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let result = with_table(|table| {
+        let me = table.get(&id).ok_or(EBADF)?;
+        match me.phase {
+            Phase::Connected => return Err(EISCONN),
+            Phase::Listening => return Err(EINVAL),
+            _ => {}
+        }
+        let local = (remote.0, me.bound.map(|b| b.1).filter(|p| *p != 0).unwrap_or_else(loop_port));
+        let listener = table
+            .iter()
+            .find(|(_, s)| s.proto == Proto::Tcp && s.phase == Phase::Listening && s.bound.map(|b| b.1 == remote.1 && (b.0 == [0; 4] || b.0 == remote.0 || (b.0[0] == 127 && remote.0[0] == 127))).unwrap_or(false))
+            .map(|(k, _)| *k)
+            .ok_or(ECONNREFUSED)?;
+        let mut peer = fresh_socket(Proto::Tcp, Phase::Connected);
+        peer.bound = Some(remote);
+        peer.peer = Some(local);
+        peer.loop_peer = Some(id);
+        table.insert(server, peer);
+        if let Some(l) = table.get_mut(&listener) {
+            l.loop_pending.push((server, local));
+        }
+        let me = table.get_mut(&id).ok_or(EBADF)?;
+        me.phase = Phase::Connected;
+        me.bound = Some(local);
+        me.peer = Some(remote);
+        me.loop_peer = Some(server);
+        me.loop_eof = false;
+        me.error = 0;
+        Ok(())
+    });
+    if result.is_ok() {
+        OPEN.fetch_add(1, Ordering::Relaxed);
+    }
+    result
 }
 
 pub fn create(proto: Proto) -> u32 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     with_table(|table| {
-        table.insert(
-            id,
-            Socket {
-                refs: 1,
-                proto,
-                phase: Phase::Fresh,
-                handle: None,
-                generation: 0,
-                backlog: Vec::new(),
-                bound: None,
-                peer: None,
-                error: 0,
-                connect_started: 0,
-                shut_read: false,
-                shut_write: false,
-                nodelay: false,
-                keepalive: false,
-                recv_timeout_ms: 0,
-                send_timeout_ms: 0,
-            },
-        )
+        table.insert(id, fresh_socket(proto, Phase::Fresh))
     });
     OPEN.fetch_add(1, Ordering::Relaxed);
     id
@@ -191,12 +249,25 @@ pub fn release(id: u32) {
             }
             None => false,
         };
-        if last { table.remove(&id) } else { None }
+        let removed = if last { table.remove(&id) } else { None };
+        if let Some(sock) = removed.as_ref() {
+            if let Some(peer) = sock.loop_peer.and_then(|p| table.get_mut(&p)) {
+                peer.loop_eof = true;
+                peer.loop_peer = None;
+            }
+            for (pending, _) in sock.loop_pending.iter() {
+                table.remove(pending);
+            }
+        }
+        removed
     });
     let Some(sock) = gone else {
         return;
     };
     OPEN.fetch_sub(1, Ordering::Relaxed);
+    if sock.handle.is_none() && sock.backlog.is_empty() {
+        return;
+    }
     stack::with_stack(|stack| {
         if sock.generation != stack.generation {
             return;
@@ -209,7 +280,7 @@ pub fn release(id: u32) {
             return;
         };
         match sock.proto {
-            Proto::Udp => {
+            Proto::Udp | Proto::Icmp => {
                 stack.sockets.remove(handle);
             }
             Proto::Tcp => {
@@ -262,6 +333,26 @@ fn ensure_udp(stack: &mut Stack, sock: &mut Socket) -> Result<SocketHandle, i64>
     Ok(handle)
 }
 
+fn ensure_icmp(stack: &mut Stack, sock: &mut Socket) -> Result<SocketHandle, i64> {
+    if let Some(h) = live(stack, sock) {
+        return Ok(h);
+    }
+    let ident = match sock.bound {
+        Some((_, p)) if p != 0 => p,
+        _ => ICMP_IDENT.fetch_add(1, Ordering::Relaxed) as u16,
+    };
+    let mut socket = icmp::Socket::new(
+        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; ICMP_PACKETS], vec![0; ICMP_BYTES]),
+        icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY; ICMP_PACKETS], vec![0; ICMP_BYTES]),
+    );
+    socket.bind(icmp::Endpoint::Ident(ident)).map_err(|_| EINVAL)?;
+    let handle = stack.sockets.add(socket);
+    sock.handle = Some(handle);
+    sock.generation = stack.generation;
+    sock.bound = Some((sock.bound.map(|b| b.0).unwrap_or([0; 4]), ident));
+    Ok(handle)
+}
+
 pub fn bind(id: u32, ep: Endpoint) -> Result<(), i64> {
     with_table(|table| {
         let proto = table.get(&id).ok_or(EBADF)?.proto;
@@ -275,6 +366,9 @@ pub fn bind(id: u32, ep: Endpoint) -> Result<(), i64> {
         sock.bound = Some(ep);
         if sock.proto == Proto::Udp {
             stack::with_stack(|stack| ensure_udp(stack, sock).map(|_| ())).unwrap_or(Err(ENETDOWN))?;
+        }
+        if sock.proto == Proto::Icmp {
+            stack::with_stack(|stack| ensure_icmp(stack, sock).map(|_| ())).unwrap_or(Err(ENETDOWN))?;
         }
         Ok(())
     })
@@ -290,7 +384,7 @@ pub fn listen(id: u32, backlog: usize) -> Result<(), i64> {
             Phase::Fresh => {}
             _ => return Err(EINVAL),
         }
-        stack::with_stack(|stack| {
+        let listened = stack::with_stack(|stack| {
             let port = match sock.bound {
                 Some((_, p)) if p != 0 => p,
                 _ => stack::next_port(stack),
@@ -305,13 +399,30 @@ pub fn listen(id: u32, backlog: usize) -> Result<(), i64> {
             sock.generation = stack.generation;
             sock.phase = Phase::Listening;
             Ok(())
-        })
-        .unwrap_or(Err(ENETDOWN))
+        });
+        match listened {
+            Some(result) => result,
+            None => {
+                let port = sock.bound.map(|b| b.1).filter(|p| *p != 0).unwrap_or_else(loop_port);
+                sock.bound = Some((sock.bound.map(|b| b.0).unwrap_or([0; 4]), port));
+                sock.phase = Phase::Listening;
+                Ok(())
+            }
+        }
     })
 }
 
 pub fn connect(id: u32, remote: Option<Endpoint>) -> Result<(), i64> {
+    if let Some(target) = remote {
+        if proto(id) == Some(Proto::Tcp) && is_local_address(target.0) {
+            return connect_loopback(id, target);
+        }
+    }
     with_socket(id, |sock| match sock.proto {
+        Proto::Icmp => {
+            sock.peer = remote;
+            Ok(())
+        }
         Proto::Udp => {
             sock.peer = remote;
             if remote.is_some() {
@@ -330,9 +441,6 @@ pub fn connect(id: u32, remote: Option<Endpoint>) -> Result<(), i64> {
             stack::with_stack(|stack| {
                 if stack.address.is_none() {
                     return Err(ENETUNREACH);
-                }
-                if is_local(remote.0, stack) {
-                    return Err(ECONNREFUSED);
                 }
                 let local = match sock.bound {
                     Some((_, p)) if p != 0 => p,
@@ -396,6 +504,15 @@ pub fn connect_result(id: u32) -> Option<i64> {
 }
 
 pub fn accept(id: u32) -> Result<(u32, Endpoint), i64> {
+    let looped = with_socket(id, |sock| {
+        if sock.phase != Phase::Listening {
+            return Err(EINVAL);
+        }
+        Ok(if sock.loop_pending.is_empty() { None } else { Some(sock.loop_pending.remove(0)) })
+    })?;
+    if let Some(connection) = looped {
+        return Ok(connection);
+    }
     let taken = with_socket(id, |sock| {
         if sock.phase != Phase::Listening {
             return Err(EINVAL);
@@ -456,6 +573,10 @@ pub fn accept(id: u32) -> Result<(u32, Endpoint), i64> {
                 keepalive,
                 recv_timeout_ms: 0,
                 send_timeout_ms: 0,
+                loop_peer: None,
+                loop_rx: VecDeque::new(),
+                loop_eof: false,
+                loop_pending: Vec::new(),
             },
         )
     });
@@ -463,7 +584,56 @@ pub fn accept(id: u32) -> Result<(u32, Endpoint), i64> {
     Ok((new_id, peer))
 }
 
+fn loop_send(id: u32, data: &[u8]) -> Option<Result<usize, i64>> {
+    with_table(|table| {
+        let me = table.get(&id)?;
+        if me.phase != Phase::Connected || (me.loop_peer.is_none() && !me.loop_eof) {
+            return None;
+        }
+        if me.shut_write {
+            return Some(Err(EPIPE));
+        }
+        let Some(peer_id) = me.loop_peer else {
+            return Some(Err(EPIPE));
+        };
+        let Some(peer) = table.get_mut(&peer_id) else {
+            return Some(Err(EPIPE));
+        };
+        if peer.shut_read {
+            return Some(Ok(data.len()));
+        }
+        let room = LOOP_BUFFER.saturating_sub(peer.loop_rx.len());
+        if room == 0 {
+            return Some(Err(EAGAIN));
+        }
+        let n = room.min(data.len());
+        peer.loop_rx.extend(&data[..n]);
+        Some(Ok(n))
+    })
+}
+
+fn loop_recv(id: u32, max: usize, peek: bool) -> Option<Result<Datagram, i64>> {
+    with_table(|table| {
+        let me = table.get_mut(&id)?;
+        if me.phase != Phase::Connected || (me.loop_peer.is_none() && !me.loop_eof) {
+            return None;
+        }
+        if me.shut_read {
+            return Some(Ok(Datagram { data: Vec::new(), full_len: 0, from: None }));
+        }
+        if me.loop_rx.is_empty() {
+            return Some(if me.loop_eof { Ok(Datagram { data: Vec::new(), full_len: 0, from: None }) } else { Err(EAGAIN) });
+        }
+        let n = max.max(1).min(me.loop_rx.len());
+        let data: Vec<u8> = if peek { me.loop_rx.iter().take(n).copied().collect() } else { me.loop_rx.drain(..n).collect() };
+        Some(Ok(Datagram { full_len: data.len(), data, from: me.peer }))
+    })
+}
+
 pub fn send(id: u32, data: &[u8], dest: Option<Endpoint>) -> Result<usize, i64> {
+    if let Some(result) = loop_send(id, data) {
+        return result;
+    }
     with_socket(id, |sock| {
         stack::with_stack(|stack| {
             refresh(stack, sock);
@@ -505,6 +675,26 @@ pub fn send(id: u32, data: &[u8], dest: Option<Endpoint>) -> Result<usize, i64> 
                         Err(_) => Err(ENETUNREACH),
                     }
                 }
+                Proto::Icmp => {
+                    let target = dest.or(sock.peer).ok_or(EDESTADDRREQ)?;
+                    if data.len() < 8 || data[0] != 8 {
+                        return Err(EINVAL);
+                    }
+                    let handle = ensure_icmp(stack, sock)?;
+                    let ident = sock.bound.map(|b| b.1).unwrap_or(0);
+                    let seq_no = u16::from_be_bytes([data[6], data[7]]);
+                    let repr = Icmpv4Repr::EchoRequest { ident, seq_no, data: &data[8..] };
+                    let caps = smoltcp::phy::ChecksumCapabilities::default();
+                    let socket = stack.sockets.get_mut::<icmp::Socket>(handle);
+                    match socket.send(repr.buffer_len(), IpAddress::Ipv4(Ipv4Address::from(target.0))) {
+                        Ok(buf) => {
+                            repr.emit(&mut Icmpv4Packet::new_unchecked(buf), &caps);
+                            Ok(data.len())
+                        }
+                        Err(icmp::SendError::BufferFull) => Err(EAGAIN),
+                        Err(_) => Err(ENETUNREACH),
+                    }
+                }
             }
         })
         .unwrap_or(Err(ENETDOWN))
@@ -512,6 +702,9 @@ pub fn send(id: u32, data: &[u8], dest: Option<Endpoint>) -> Result<usize, i64> 
 }
 
 pub fn recv(id: u32, max: usize, peek: bool) -> Result<Datagram, i64> {
+    if let Some(result) = loop_recv(id, max, peek) {
+        return result;
+    }
     with_socket(id, |sock| {
         stack::with_stack(|stack| {
             refresh(stack, sock);
@@ -573,6 +766,24 @@ pub fn recv(id: u32, max: usize, peek: bool) -> Result<Datagram, i64> {
                         return Ok(Datagram { data, full_len, from: Some(from) });
                     }
                 }
+                Proto::Icmp => {
+                    let Some(handle) = live(stack, sock) else {
+                        return Err(EAGAIN);
+                    };
+                    let socket = stack.sockets.get_mut::<icmp::Socket>(handle);
+                    if !socket.can_recv() {
+                        return Err(EAGAIN);
+                    }
+                    if peek {
+                        return Err(EOPNOTSUPP);
+                    }
+                    let (payload, from) = socket.recv().map(|(p, addr)| (p.to_vec(), addr)).map_err(|_| EAGAIN)?;
+                    let IpAddress::Ipv4(v4) = from;
+                    let full_len = payload.len();
+                    let mut data = payload;
+                    data.truncate(max);
+                    Ok(Datagram { data, full_len, from: Some((v4.octets(), 0)) })
+                }
             }
         })
         .unwrap_or(Err(ENETDOWN))
@@ -582,6 +793,24 @@ pub fn recv(id: u32, max: usize, peek: bool) -> Result<Datagram, i64> {
 pub fn readiness(id: u32) -> Ready {
     let gone = Ready { readable: true, writable: true, hangup: true, error: true, pending: 0 };
     with_table(|table| {
+        let looped = match table.get(&id) {
+            None => return gone,
+            Some(sock) if sock.phase == Phase::Connected && (sock.loop_peer.is_some() || sock.loop_eof) => {
+                let room = sock.loop_peer.and_then(|p| table.get(&p)).map(|p| p.loop_rx.len() < LOOP_BUFFER).unwrap_or(true);
+                Some(Ready {
+                    readable: !sock.loop_rx.is_empty() || sock.loop_eof || sock.shut_read,
+                    writable: room,
+                    hangup: sock.loop_eof && sock.loop_peer.is_none(),
+                    error: false,
+                    pending: sock.loop_rx.len(),
+                })
+            }
+            Some(sock) if sock.phase == Phase::Listening && !sock.loop_pending.is_empty() => Some(Ready { readable: true, writable: false, hangup: false, error: false, pending: 0 }),
+            Some(_) => None,
+        };
+        if let Some(ready) = looped {
+            return ready;
+        }
         let Some(sock) = table.get_mut(&id) else {
             return gone;
         };
@@ -611,6 +840,13 @@ pub fn readiness(id: u32) -> Ready {
                         pending: tcp.recv_queue(),
                     }
                 }
+                (Proto::Icmp, _) => match live(stack, sock) {
+                    Some(handle) => {
+                        let socket = stack.sockets.get::<icmp::Socket>(handle);
+                        Ready { readable: socket.can_recv(), writable: socket.can_send(), hangup: false, error: false, pending: 0 }
+                    }
+                    None => Ready { readable: false, writable: true, hangup: false, error: false, pending: 0 },
+                },
                 (Proto::Udp, _) => match live(stack, sock) {
                     Some(handle) => {
                         let udp = stack.sockets.get::<udp::Socket>(handle);
@@ -637,6 +873,9 @@ pub fn shutdown(id: u32, how: u64) -> Result<(), i64> {
         }
         if (how == 1 || how == 2) && !sock.shut_write {
             sock.shut_write = true;
+            if sock.loop_peer.is_some() {
+                return Ok(());
+            }
             if sock.proto == Proto::Tcp {
                 stack::with_stack(|stack| {
                     if let Some(h) = live(stack, sock) {
@@ -654,6 +893,7 @@ pub fn names(id: u32) -> Result<(Endpoint, Option<Endpoint>), i64> {
         let own_ip = stack::ipv4().map(|a| a.0).unwrap_or([0; 4]);
         let local = stack::with_stack(|stack| match live(stack, sock) {
             Some(h) if sock.proto == Proto::Tcp => stack.sockets.get::<tcp::Socket>(h).local_endpoint().map(endpoint_of),
+            Some(_) if sock.proto == Proto::Icmp => sock.bound,
             Some(h) => {
                 let port = stack.sockets.get::<udp::Socket>(h).endpoint().port;
                 Some((if sock.peer.is_some() { own_ip } else { sock.bound.map(|b| b.0).unwrap_or([0; 4]) }, port))
@@ -665,7 +905,7 @@ pub fn names(id: u32) -> Result<(Endpoint, Option<Endpoint>), i64> {
         .unwrap_or(([0; 4], 0));
         let peer = match sock.proto {
             Proto::Tcp if sock.phase == Phase::Connected => sock.peer,
-            Proto::Udp => sock.peer,
+            Proto::Udp | Proto::Icmp => sock.peer,
             _ => None,
         };
         Ok((local, peer))

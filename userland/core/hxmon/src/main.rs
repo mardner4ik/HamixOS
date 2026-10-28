@@ -1,29 +1,39 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "hamix", no_std)]
+#![cfg_attr(target_os = "hamix", no_main)]
 
 extern crate alloc;
 
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{entry, eprintln, fs, sys, users};
-use hxclient::ui::{self, theme, Hits, Style, Ui};
-use hxclient::{Event, Window, MOUSE_LEAVE, MOUSE_MOVE, MOUSE_PRESS, MOUSE_WHEEL};
-use vellum::{Area, Painter};
+use hxtoolkit::{button, canvas, column, list, row, scroll, space, text, title, Align, App, CanvasEvent, Color, Context, Element, Key, KeyPress, Length, Pixmap, Settings, TextSize, Tone};
 
-const INITIAL_W: i32 = 820;
-const INITIAL_H: i32 = 580;
-const ROW: i32 = 30;
+mod platform {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    pub fn read(path: &str) -> Option<String> {
+        hxport::read_to_string(path)
+    }
+
+    pub fn entries(dir: &str) -> Vec<String> {
+        hxport::entries(dir).unwrap_or_default().into_iter().map(|e| e.name).collect()
+    }
+
+    pub fn kill(pid: i64) -> Result<(), String> {
+        hxport::kill(pid)
+    }
+
+    pub fn first_arg() -> Option<String> {
+        hxport::args().get(1).cloned()
+    }
+}
+
 const HISTORY: usize = 120;
 const CORE_COLORS: [u32; 8] = [0x5b8cff, 0x2dd4bf, 0xf59e0b, 0xf472b6, 0xa78bfa, 0x34d399, 0xfb7185, 0x60a5fa];
-
-#[derive(Clone, Copy, PartialEq)]
-enum Hit {
-    Tab(usize),
-    Row(usize),
-    End,
-}
+const MEMORY_COLOR: u32 = 0x2dd4bf;
+const MEMORY_GRAPH: usize = usize::MAX;
 
 struct Proc {
     pid: i64,
@@ -36,23 +46,37 @@ struct Proc {
     core: i32,
 }
 
-struct App {
-    window: Window,
-    ui: Ui,
+#[derive(Default)]
+struct Memory {
+    total: u64,
+    used: u64,
+    cache: u64,
+}
+
+#[derive(Default)]
+struct Monitor {
     tab: usize,
     procs: Vec<Proc>,
     selected: Option<i64>,
-    scroll: i32,
-    hits: Hits<Hit>,
-    hover: Option<Hit>,
     cpu_history: VecDeque<u32>,
     core_history: Vec<VecDeque<u32>>,
     mem_history: VecDeque<u32>,
     last_cpu: Vec<(i64, u64)>,
     last_cores: Vec<(u64, u64)>,
-    last_sample: u64,
-    info: sys::SysInfo,
+    memory: Memory,
+    users: BTreeMap<u32, String>,
+    graphs: BTreeMap<usize, (u32, u32)>,
+    cpu_model: String,
     message: String,
+}
+
+#[derive(Clone)]
+enum Msg {
+    Tab(usize),
+    Select(usize),
+    End,
+    Sample,
+    GraphSize(usize, u32, u32),
 }
 
 fn push(history: &mut VecDeque<u32>, value: u32) {
@@ -62,379 +86,328 @@ fn push(history: &mut VecDeque<u32>, value: u32) {
     }
 }
 
-fn graph(p: &mut Painter, area: Area, history: &VecDeque<u32>, color: u32) {
-    p.rounded(area, 6, theme::bg(), 255);
+use hxport::human_size;
+
+fn field<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    text.lines().find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix(':'))).map(|v| v.trim())
+}
+
+fn kib(text: &str, key: &str) -> u64 {
+    field(text, key).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) * 1024
+}
+
+fn percent(value: u32) -> String {
+    format!("{}.{}%", value / 10, value % 10)
+}
+
+fn graph(history: &VecDeque<u32>, size: (u32, u32), color: u32) -> Pixmap {
+    let (w, h) = (size.0.max(2), size.1.max(2));
+    let mut px = Pixmap::new(w, h);
+    let grid = Color::argb(36, 128, 128, 128);
     for g in 1..4 {
-        p.fill(Area::new(area.x + 1, area.y + area.h * g / 4, area.w - 2, 1), theme::surface_2());
+        px.fill_rect(0, (h * g / 4) as i32, w as i32, 1, grid);
     }
     let n = history.len();
     if n < 2 {
-        return;
+        return px;
     }
-    let step = area.w as f32 / (HISTORY - 1) as f32;
-    let base_x = area.right() as f32 - (n - 1) as f32 * step;
-    let point = |k: usize| (base_x + k as f32 * step, area.bottom() as f32 - 2.0 - history[k].min(1000) as f32 / 1000.0 * (area.h - 4) as f32);
-    let saved = p.clip;
-    p.set_clip(area.intersect(&saved));
+    let step = w as f32 / (HISTORY - 1) as f32;
+    let base = w as f32 - (n - 1) as f32 * step;
+    let point = |k: usize| ((base + k as f32 * step) as i32, (h as f32 - 2.0 - history[k].min(1000) as f32 / 1000.0 * (h as f32 - 4.0)) as i32);
+    let fill = Color((0x28 << 24) | color);
+    let stroke = Color(0xff00_0000 | color);
     for k in 1..n {
         let (x0, y0) = point(k - 1);
         let (x1, y1) = point(k);
-        let top = y0.min(y1) as i32;
-        let fill = Area::new(x0 as i32, top, (x1 as i32 - x0 as i32).max(1), area.bottom() - top);
-        p.blend_fill(fill.intersect(&area), color, 40);
-        p.line(x0, y0, x1, y1, if area.h > 80 { 2.0 } else { 1.5 }, color, 255);
+        for x in x0..x1.max(x0 + 1) {
+            let t = if x1 == x0 { 0.0 } else { (x - x0) as f32 / (x1 - x0) as f32 };
+            let y = y0 as f32 + (y1 - y0) as f32 * t;
+            px.fill_rect(x, y as i32, 1, h as i32 - y as i32, fill);
+        }
+        px.line(x0, y0, x1, y1, stroke);
+        px.line(x0, y0 + 1, x1, y1 + 1, stroke);
     }
-    p.clip = saved;
+    px
 }
 
-impl App {
-    fn size(&self) -> (i32, i32) {
-        (self.window.width() as i32, self.window.height() as i32)
+impl Monitor {
+    fn new() -> Monitor {
+        let mut m = Monitor { tab: if platform::first_arg().as_deref() == Some("resources") { 1 } else { 0 }, ..Monitor::default() };
+        m.users = hxport::user_names().into_iter().collect();
+        m.cpu_model = platform::read("/proc/cpuinfo").and_then(|t| t.lines().find(|l| l.starts_with("model name")).map(|l| String::from(l.split(':').nth(1).unwrap_or("").trim()))).unwrap_or_default();
+        m.sample();
+        m
+    }
+
+    fn process(&self, pid: i64) -> Option<(Proc, u64)> {
+        let stat = platform::read(&format!("/proc/{}/stat", pid))?;
+        let status = platform::read(&format!("/proc/{}/status", pid)).unwrap_or_default();
+        let open = stat.find('(')?;
+        let close = stat.rfind(')')?;
+        let comm = &stat[open + 1..close];
+        let f: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+        let num = |i: usize| f.get(i).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let kernel = (num(6) as u64) & 0x0020_0000 != 0;
+        let uid: u32 = field(&status, "Uid").and_then(|v| v.split_whitespace().nth(1)).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let name = field(&status, "Name").map(String::from).unwrap_or_else(|| String::from(comm));
+        let cpu_ms = (num(11) + num(12)) as u64 * 10;
+        let proc_ = Proc {
+            pid,
+            name: if kernel { format!("[{}]", name) } else { name },
+            user: self.users.get(&uid).cloned().unwrap_or_else(|| format!("{}", uid)),
+            state: f.first().and_then(|s| s.chars().next()).unwrap_or('?'),
+            memory: kib(&status, "VmRSS"),
+            cpu_ms,
+            usage: 0,
+            core: f.get(36).and_then(|v| v.parse().ok()).unwrap_or(-1),
+        };
+        Some((proc_, cpu_ms))
     }
 
     fn sample(&mut self) {
-        let now = sys::uptime_ms();
-        let elapsed = now.saturating_sub(self.last_sample).max(1);
-        let list = sys::proc_list();
         let mut procs = Vec::new();
-        for p in list {
-            let previous = self.last_cpu.iter().find(|(pid, _)| *pid == p.pid).map(|(_, c)| *c).unwrap_or(p.cpu_ms);
-            let delta = p.cpu_ms.saturating_sub(previous);
-            procs.push(Proc {
-                pid: p.pid,
-                name: p.name,
-                user: users::name_of(p.uid),
-                state: p.state,
-                memory: p.heap_kb * 1024,
-                cpu_ms: p.cpu_ms,
-                usage: (delta * 1000 / elapsed).min(1000) as u32,
-                core: p.cpu,
-            });
+        for entry in platform::entries("/proc") {
+            let Ok(pid) = entry.parse::<i64>() else {
+                continue;
+            };
+            if let Some((mut p, cpu_ms)) = self.process(pid) {
+                let previous = self.last_cpu.iter().find(|(id, _)| *id == pid).map(|(_, c)| *c).unwrap_or(cpu_ms);
+                p.usage = (cpu_ms.saturating_sub(previous)).min(1000) as u32;
+                procs.push(p);
+            }
         }
         self.last_cpu = procs.iter().map(|p| (p.pid, p.cpu_ms)).collect();
-        self.last_sample = now;
         procs.sort_by(|a, b| b.usage.cmp(&a.usage).then(b.memory.cmp(&a.memory)));
         self.procs = procs;
-        self.info = sys::sysinfo();
 
-        let cores = sys::cpu_stats();
+        let meminfo = platform::read("/proc/meminfo").unwrap_or_default();
+        let total = kib(&meminfo, "MemTotal");
+        let available = if field(&meminfo, "MemAvailable").is_some() { kib(&meminfo, "MemAvailable") } else { kib(&meminfo, "MemFree") + kib(&meminfo, "Cached") };
+        self.memory = Memory { total, used: total.saturating_sub(available), cache: kib(&meminfo, "Cached") };
+        push(&mut self.mem_history, if total > 0 { (self.memory.used * 1000 / total) as u32 } else { 0 });
+
+        let stat = platform::read("/proc/stat").unwrap_or_default();
+        let cores: Vec<(u64, u64)> = stat
+            .lines()
+            .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).map(|b| b.is_ascii_digit()).unwrap_or(false))
+            .map(|l| {
+                let v: Vec<u64> = l.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+                let total: u64 = v.iter().sum();
+                let idle = v.get(3).copied().unwrap_or(0) + v.get(4).copied().unwrap_or(0);
+                (total - idle.min(total), total)
+            })
+            .collect();
         if self.core_history.len() != cores.len() {
             self.core_history = (0..cores.len()).map(|_| VecDeque::new()).collect();
-            self.last_cores = cores.iter().map(|c| (c.busy_ms, c.total_ms)).collect();
+            self.last_cores = cores.clone();
         }
-        let mut busy_sum = 0u64;
-        let mut total_sum = 0u64;
-        for (i, core) in cores.iter().enumerate() {
+        let (mut busy_sum, mut total_sum) = (0u64, 0u64);
+        for (i, (busy, total)) in cores.iter().enumerate() {
             let (last_busy, last_total) = self.last_cores[i];
-            let busy = core.busy_ms.saturating_sub(last_busy);
-            let total = core.total_ms.saturating_sub(last_total);
-            busy_sum += busy;
-            total_sum += total;
-            let value = if total > 0 { (busy * 1000 / total).min(1000) as u32 } else { 0 };
-            push(&mut self.core_history[i], value);
-            self.last_cores[i] = (core.busy_ms, core.total_ms);
+            let (b, t) = (busy.saturating_sub(last_busy), total.saturating_sub(last_total));
+            busy_sum += b;
+            total_sum += t;
+            push(&mut self.core_history[i], if t > 0 { (b * 1000 / t).min(1000) as u32 } else { 0 });
         }
-        let cpu = if total_sum > 0 { (busy_sum * 1000 / total_sum).min(1000) as u32 } else { 0 };
-        push(&mut self.cpu_history, cpu);
-        let mem = if self.info.mem_total > 0 { (self.info.mem_used() * 1000 / self.info.mem_total) as u32 } else { 0 };
-        push(&mut self.mem_history, mem);
+        self.last_cores = cores;
+        push(&mut self.cpu_history, if total_sum > 0 { (busy_sum * 1000 / total_sum).min(1000) as u32 } else { 0 });
     }
 
-    fn draw(&mut self) {
-        let (w, h) = self.size();
-        let buffer = unsafe { &mut *(self.window.buffer() as *mut [u32]) };
-        let mut p = Painter::new(buffer, w, h);
-        self.hits.clear();
-        let ui = unsafe { &*(&self.ui as *const Ui) };
-        let hits = unsafe { &mut *(&mut self.hits as *mut Hits<Hit>) };
-        let hover = self.hover;
-        p.fill(Area::new(0, 0, w, h), theme::bg());
-        let tabs = ["Processes", "Resources", "Disks"];
-        let mut x = 16;
-        for (i, label) in tabs.iter().enumerate() {
-            let tw = ui.medium.measure(label) + 28;
-            let area = Area::new(x, 12, tw, 32);
-            let active = self.tab == i;
-            if active {
-                p.rounded(area, 8, theme::surface_2(), 255);
-            } else if hover == Some(Hit::Tab(i)) {
-                p.rounded(area, 8, theme::hover(), 255);
+    fn graph_view(&self, id: usize, history: &VecDeque<u32>, color: u32) -> Element<Msg> {
+        let size = self.graphs.get(&id).copied().unwrap_or((200, 60));
+        canvas(graph(history, size, color))
+            .fill()
+            .on_event(move |ev| match ev {
+                CanvasEvent::Resize { width, height } => Some(Msg::GraphSize(id, width, height)),
+                _ => None,
+            })
+            .into()
+    }
+
+    fn processes(&self) -> Element<Msg> {
+        let widths = [60u32, 0, 90, 80, 50, 64, 84];
+        let cell = |s: String, i: usize, tone: Tone| -> Element<Msg> {
+            let t = text(s).tone(tone);
+            if widths[i] == 0 { t.fill().into() } else { t.width(widths[i]).into() }
+        };
+        let header = row(["PID", "NAME", "USER", "STATE", "CORE", "CPU", "MEMORY"].iter().enumerate().map(|(i, h)| {
+            let t = text(*h).small().tone(Tone::Faint);
+            if widths[i] == 0 { t.fill().into() } else { t.width(widths[i]).into() }
+        }).collect()).padding([0, 14]);
+        let rows = self
+            .procs
+            .iter()
+            .map(|p| {
+                let kernel = p.name.starts_with('[');
+                let tone = if kernel { Tone::Faint } else { Tone::Normal };
+                let state = match p.state {
+                    'R' if p.core >= 0 => "running",
+                    'R' => "ready",
+                    'S' => "sleeping",
+                    'Z' => "zombie",
+                    _ => "sleeping",
+                };
+                row![
+                    cell(format!("{}", p.pid), 0, Tone::Dim),
+                    cell(p.name.clone(), 1, tone),
+                    cell(p.user.clone(), 2, Tone::Dim),
+                    cell(String::from(state), 3, Tone::Dim),
+                    cell(if p.core >= 0 { format!("{}", p.core) } else { String::from("–") }, 4, Tone::Dim),
+                    cell(percent(p.usage), 5, tone),
+                    cell(human_size(p.memory), 6, tone),
+                ]
+                .into()
+            })
+            .collect();
+        let selected = self.selected.and_then(|pid| self.procs.iter().position(|p| p.pid == pid));
+        let can_end = selected.map(|i| !self.procs[i].name.starts_with('[')).unwrap_or(false);
+        let footer_text = if self.message.is_empty() { format!("{} processes", self.procs.len()) } else { self.message.clone() };
+        column![
+            header,
+            list(rows).selected(selected).on_select(Msg::Select).row_height(30),
+            row![text(footer_text).dim(), space(), button("End process").danger().on_press_maybe(can_end.then_some(Msg::End))],
+        ]
+        .card()
+        .fill()
+        .into()
+    }
+
+    fn resources(&self) -> Element<Msg> {
+        let cores = self.core_history.len().max(1);
+        let current = self.cpu_history.back().copied().unwrap_or(0);
+        let subtitle = format!("{} · {} {}", self.cpu_model, cores, if cores == 1 { "core" } else { "cores" });
+        let cols = if cores <= 2 { cores } else if cores <= 6 { 2 } else if cores <= 12 { 3 } else { 4 };
+        let mut grid = column![].spacing(10).fill();
+        for chunk in (0..self.core_history.len()).collect::<Vec<_>>().chunks(cols) {
+            let mut line = row![].spacing(10).height(Length::Fill).align(Align::Stretch);
+            for &core in chunk {
+                let color = CORE_COLORS[core % CORE_COLORS.len()];
+                let usage = self.core_history[core].back().copied().unwrap_or(0);
+                line = line.push(
+                    column![row![text(format!("CPU {}", core)).strong(), space(), text(format!("{}%", usage / 10)).strong().tone(Tone::Accent)], self.graph_view(core, &self.core_history[core], color)]
+                        .spacing(6)
+                        .padding(10)
+                        .card()
+                        .fill(),
+                );
             }
-            ui::centered_text(&mut p, &ui.medium, area, label, if active { theme::text() } else { theme::dim() });
-            hits.add(area, Hit::Tab(i));
-            x += tw + 6;
+            grid = grid.push(line);
         }
-        let used = self.info.mem_used();
+        let mem_current = self.mem_history.back().copied().unwrap_or(0);
+        let detail = format!("{} used of {} · file cache {}", human_size(self.memory.used), human_size(self.memory.total), human_size(self.memory.cache));
+        column![
+            column![row![text("Processor").strong(), text(subtitle).small().tone(Tone::Faint), space(), text(percent(current)).size(TextSize::Title).tone(Tone::Accent)], grid].card().fill(),
+            column![row![text("Memory").strong(), text(detail).small().tone(Tone::Faint), space(), text(percent(mem_current)).size(TextSize::Title).tone(Tone::Success)], self.graph_view(MEMORY_GRAPH, &self.mem_history, MEMORY_COLOR)]
+                .card()
+                .height(160),
+        ]
+        .spacing(12)
+        .fill()
+        .into()
+    }
+
+    fn disks(&self) -> Element<Msg> {
+        let mut volumes = column![title("Mounted volumes").size(TextSize::Strong)].spacing(10);
+        for line in platform::read("/proc/mounts").unwrap_or_default().lines() {
+            let tabbed: Vec<&str> = line.split('\t').collect();
+            let (source, target, sizes) = if tabbed.len() >= 6 {
+                (tabbed[0], tabbed[1], Some((tabbed[4].parse::<u64>().unwrap_or(0) * 1024, tabbed[5].parse::<u64>().unwrap_or(0) * 1024)))
+            } else {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() < 3 || !f[0].starts_with('/') {
+                    continue;
+                }
+                (f[0], f[1], None)
+            };
+            let mut entry = column![row![text(format!("{}  on  {}", source, target)), space()]].spacing(6);
+            if let Some((total, free)) = sizes {
+                let used = total.saturating_sub(free);
+                entry = column![
+                    row![text(format!("{}  on  {}", source, target)), space(), text(format!("{} used of {}", human_size(used), human_size(total))).dim()],
+                    hxtoolkit::progress(if total > 0 { used as f32 / total as f32 } else { 0.0 }),
+                ]
+                .spacing(6);
+            }
+            volumes = volumes.push(entry);
+        }
+        let mut disks = column![title("Disks").size(TextSize::Strong)].spacing(6);
+        let mut names = platform::entries("/sys/block");
+        names.sort();
+        for disk in names {
+            let size = platform::read(&format!("/sys/block/{}/size", disk)).and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0) * 512;
+            let model = platform::read(&format!("/sys/block/{}/device/model", disk)).map(|s| String::from(s.trim())).unwrap_or_default();
+            disks = disks.push(text(format!("{}   {}   {}", disk, human_size(size), model)).dim());
+        }
+        scroll(column![volumes, disks].spacing(24).card()).into()
+    }
+}
+
+impl App for Monitor {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        String::from("Monitor")
+    }
+
+    fn view(&self) -> Element<Msg> {
+        let mut tabs = row![].spacing(6).shrink();
+        for (i, label) in ["Processes", "Resources", "Disks"].iter().enumerate() {
+            let b = button(*label).on_press(Msg::Tab(i));
+            tabs = tabs.push(if self.tab == i { b } else { b.flat() });
+        }
         let summary = format!(
             "CPU {}% · {} cores   ·   Memory {} / {}",
             self.cpu_history.back().copied().unwrap_or(0) / 10,
             self.core_history.len().max(1),
-            ui::human_size(used),
-            ui::human_size(self.info.mem_total)
+            human_size(self.memory.used),
+            human_size(self.memory.total)
         );
-        let sw = ui.font.measure(&summary);
-        if x + sw + 30 < w {
-            p.text(&ui.font, w - sw - 18, 20, &summary, theme::dim());
-        }
-        let body = Area::new(16, 56, w - 32, h - 72);
-        match self.tab {
-            0 => self.draw_processes(&mut p, body),
-            1 => self.draw_resources(&mut p, body),
-            _ => draw_disks(&mut p, &self.ui, body),
-        }
-        drop(p);
-        self.window.present();
-    }
-
-    fn draw_processes(&mut self, p: &mut Painter, body: Area) {
-        let ui = unsafe { &*(&self.ui as *const Ui) };
-        let hover = self.hover;
-        let hits = unsafe { &mut *(&mut self.hits as *mut Hits<Hit>) };
-        ui::card(p, body);
-        let header_y = body.y + 12;
-        let wide = body.w >= 700;
-        let name_w = (body.w - 480).clamp(120, 360);
-        let col_user = body.x + 76 + name_w;
-        let col_state = col_user + 90;
-        let col_core = col_state + 80;
-        let col_cpu = if wide { col_core + 60 } else { col_core };
-        let col_mem = col_cpu + 70;
-        let mut cols = alloc::vec![(body.x + 16, "PID"), (body.x + 76, "NAME"), (col_user, "USER"), (col_state, "STATE")];
-        if wide {
-            cols.push((col_core, "CORE"));
-        }
-        cols.push((col_cpu, "CPU"));
-        cols.push((col_mem, "MEMORY"));
-        for (cx, label) in cols {
-            p.text(&ui.small, cx, header_y, label, theme::faint());
-        }
-        let list = Area::new(body.x, body.y + 34, body.w, body.h - 90);
-        let saved = p.clip;
-        p.set_clip(list);
-        for (i, proc_) in self.procs.iter().enumerate() {
-            let row = Area::new(list.x + 6, list.y + i as i32 * ROW - self.scroll, list.w - 12, ROW - 2);
-            if row.bottom() < list.y || row.y > list.bottom() {
-                continue;
-            }
-            ui::list_row(p, row, self.selected == Some(proc_.pid), hover == Some(Hit::Row(i)));
-            let kernel = proc_.name.starts_with('[');
-            let color = if kernel { theme::faint() } else { theme::text() };
-            ui::text_in(p, &ui.font, body.x + 16, row, &format!("{}", proc_.pid), theme::dim());
-            ui::text_in(p, &ui.font, body.x + 76, Area::new(row.x, row.y, 76 + name_w - 10, row.h), &proc_.name, color);
-            ui::text_in(p, &ui.font, col_user, row, &proc_.user, theme::dim());
-            let state = match proc_.state {
-                'R' if proc_.core >= 0 => "running",
-                'R' => "ready",
-                'S' => "sleeping",
-                _ => "zombie",
-            };
-            ui::text_in(p, &ui.font, col_state, row, state, theme::dim());
-            if wide {
-                ui::text_in(p, &ui.font, col_core, row, &if proc_.core >= 0 { format!("{}", proc_.core) } else { String::from("–") }, theme::dim());
-            }
-            ui::text_in(p, &ui.font, col_cpu, row, &format!("{}.{}%", proc_.usage / 10, proc_.usage % 10), color);
-            ui::text_in(p, &ui.font, col_mem, row, &ui::human_size(proc_.memory), color);
-            hits.add(row.intersect(&list), Hit::Row(i));
-        }
-        p.clip = saved;
-        let end = Area::new(body.right() - 136, body.bottom() - 46, 120, 34);
-        let can_end = self.selected.map(|pid| self.procs.iter().any(|p| p.pid == pid && !p.name.starts_with('['))).unwrap_or(false);
-        ui::button(p, ui, end, "End process", Style::Danger, hover == Some(Hit::End), can_end);
-        if can_end {
-            hits.add(end, Hit::End);
-        }
-        let text = if self.message.is_empty() { format!("{} processes", self.procs.len()) } else { self.message.clone() };
-        ui::text_in(p, &ui.font, body.x + 16, Area::new(body.x, end.y, end.x - body.x - 8, end.h), &text, theme::dim());
-    }
-
-    fn draw_resources(&self, p: &mut Painter, body: Area) {
-        let ui = &self.ui;
-        let cores = self.core_history.len().max(1);
-        let memory_h = (body.h / 4).clamp(110, 170);
-        let cpu_card = Area::new(body.x, body.y, body.w, body.h - memory_h - 12);
-        ui::card(p, cpu_card);
-        let current = self.cpu_history.back().copied().unwrap_or(0);
-        p.text(&ui.medium, cpu_card.x + 18, cpu_card.y + 14, "Processor", theme::text());
-        let brand = fs::read_to_string("/proc/cpuinfo").and_then(|t| t.lines().find(|l| l.starts_with("model name")).map(|l| String::from(l.split(':').nth(1).unwrap_or("").trim()))).unwrap_or_default();
-        let subtitle = format!("{} · {} {}", brand, cores, if cores == 1 { "core" } else { "cores" });
-        let value = format!("{}.{}%", current / 10, current % 10);
-        let vw = ui.title.measure(&value);
-        p.text(&ui.title, cpu_card.right() - vw - 18, cpu_card.y + 10, &value, theme::accent());
-        ui::text_in(p, &ui.small, cpu_card.x + 110, Area::new(cpu_card.x, cpu_card.y + 14, cpu_card.w - vw - 140, 18), &subtitle, theme::faint());
-
-        let grid = Area::new(cpu_card.x + 14, cpu_card.y + 44, cpu_card.w - 28, cpu_card.h - 56);
-        let gap = 10;
-        let min_cell_w = 170;
-        let max_cols = ((grid.w + gap) / (min_cell_w + gap)).max(1) as usize;
-        let mut cols = 1usize;
-        let mut best = f32::MAX;
-        for candidate in 1..=cores.min(max_cols) {
-            let rows = cores.div_ceil(candidate);
-            let cell_h = ((grid.h - gap * (rows as i32 - 1)) / rows as i32).max(1);
-            let cell_w = (grid.w - gap * (candidate as i32 - 1)) / candidate as i32;
-            let ratio = cell_w as f32 / cell_h as f32;
-            let score = if ratio > 2.6 { ratio / 2.6 } else { 2.6 / ratio };
-            let wasted = (rows * candidate - cores) as f32 * 0.35;
-            if score + wasted < best {
-                best = score + wasted;
-                cols = candidate;
-            }
-        }
-        let rows = cores.div_ceil(cols);
-        let cell_w = (grid.w - gap * (cols as i32 - 1)) / cols as i32;
-        let cell_h = (grid.h - gap * (rows as i32 - 1)) / rows as i32;
-        for core in 0..cores {
-            let col = (core % cols) as i32;
-            let row = (core / cols) as i32;
-            let cell = Area::new(grid.x + col * (cell_w + gap), grid.y + row * (cell_h + gap), cell_w, cell_h);
-            p.rounded(cell, 8, theme::surface_2(), 255);
-            let color = CORE_COLORS[core % CORE_COLORS.len()];
-            let history = self.core_history.get(core);
-            let usage = history.and_then(|h| h.back().copied()).unwrap_or(0);
-            p.circle(cell.x as f32 + 14.0, cell.y as f32 + 15.0, 4.0, color, 255);
-            p.text(&ui.medium, cell.x + 24, cell.y + 6, &format!("CPU {}", core), theme::text());
-            let label = format!("{}%", usage / 10);
-            let lw = ui.medium.measure(&label);
-            p.text(&ui.medium, cell.right() - lw - 10, cell.y + 6, &label, color);
-            let area = Area::new(cell.x + 8, cell.y + 28, cell.w - 16, cell.h - 36);
-            if area.h > 8 {
-                match history {
-                    Some(h) => graph(p, area, h, color),
-                    None => graph(p, area, &VecDeque::new(), color),
-                }
-            }
-        }
-
-        let mem_card = Area::new(body.x, cpu_card.bottom() + 12, body.w, memory_h);
-        ui::card(p, mem_card);
-        let used = self.info.mem_used();
-        p.text(&ui.medium, mem_card.x + 18, mem_card.y + 14, "Memory", theme::text());
-        let detail = format!("{} used of {} · file cache {} · kernel heap {}", ui::human_size(used), ui::human_size(self.info.mem_total), ui::human_size(self.info.file_cache), ui::human_size(self.info.heap_total - self.info.heap_free));
-        ui::text_in(p, &ui.small, mem_card.x + 100, Area::new(mem_card.x, mem_card.y + 14, mem_card.w - 200, 18), &detail, theme::faint());
-        let current = self.mem_history.back().copied().unwrap_or(0);
-        let value = format!("{}.{}%", current / 10, current % 10);
-        let vw = ui.title.measure(&value);
-        p.text(&ui.title, mem_card.right() - vw - 18, mem_card.y + 10, &value, 0x2dd4bf);
-        graph(p, Area::new(mem_card.x + 18, mem_card.y + 46, mem_card.w - 36, mem_card.h - 60), &self.mem_history, 0x2dd4bf);
-    }
-}
-
-fn draw_disks(p: &mut Painter, ui: &Ui, body: Area) {
-    ui::card(p, body);
-    let mut y = body.y + 16;
-    p.text(&ui.medium, body.x + 18, y, "Mounted volumes", theme::text());
-    y += 30;
-    for line in fs::read_to_string("/proc/mounts").unwrap_or_default().lines() {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 6 {
-            continue;
-        }
-        let total: u64 = f[4].parse().unwrap_or(0) * 1024;
-        let free: u64 = f[5].parse().unwrap_or(0) * 1024;
-        let used = total.saturating_sub(free);
-        ui::symbol(p, ui, "ui/disk", body.x + 18, y + 2, theme::dim());
-        p.text(&ui.font, body.x + 44, y, &format!("{}  on  {}", f[0], f[1]), theme::text());
-        let detail = format!("{} used of {}", ui::human_size(used), ui::human_size(total));
-        let dw = ui.font.measure(&detail);
-        p.text(&ui.font, body.right() - dw - 18, y, &detail, theme::dim());
-        ui::progress(p, Area::new(body.x + 44, y + 24, body.w - 62, 8), if total > 0 { (used * 1000 / total) as u32 } else { 0 }, theme::accent());
-        y += 54;
-    }
-    y += 10;
-    p.text(&ui.medium, body.x + 18, y, "Disks", theme::text());
-    y += 30;
-    for line in sys::disk_listing().lines() {
-        let f: Vec<&str> = line.split('\t').collect();
-        let text = match f.first().copied() {
-            Some("disk") if f.len() > 4 => format!("{}   {}   {}", f[1], ui::human_size(f[2].parse::<u64>().unwrap_or(0) * 512), f[4]),
-            Some("part") if f.len() > 6 => format!("    {}   {}   {}", f[1], ui::human_size(f[4].parse::<u64>().unwrap_or(0) * 512), f[6]),
-            _ => continue,
+        let body = match self.tab {
+            0 => self.processes(),
+            1 => self.resources(),
+            _ => self.disks(),
         };
-        p.text(&ui.font, body.x + 18, y, &text, theme::dim());
-        y += 22;
-        if y > body.bottom() - 20 {
-            break;
+        column![row![tabs, space(), text(summary).dim()], body].padding(16).spacing(12).fill().into()
+    }
+
+    fn update(&mut self, message: Msg, _cx: &mut Context<Msg>) {
+        match message {
+            Msg::Tab(i) => self.tab = i,
+            Msg::Select(i) => self.selected = self.procs.get(i).map(|p| p.pid),
+            Msg::End => {
+                if let Some(pid) = self.selected {
+                    self.message = match platform::kill(pid) {
+                        Ok(()) => format!("Ended process {}", pid),
+                        Err(e) => format!("Cannot end {}: {}", pid, e),
+                    };
+                    self.sample();
+                }
+            }
+            Msg::Sample => self.sample(),
+            Msg::GraphSize(id, w, h) => {
+                self.graphs.insert(id, (w, h));
+            }
         }
+    }
+
+    fn key(&self, press: &KeyPress) -> Option<Msg> {
+        match press.key {
+            Key::Char(c @ '1'..='3') if press.mods.alt => Some(Msg::Tab(c as usize - '1' as usize)),
+            _ => None,
+        }
+    }
+
+    fn tick(&self) -> Option<(u32, Msg)> {
+        Some((1000, Msg::Sample))
     }
 }
 
-fn main() -> i32 {
-    let mut ui = Ui::load();
-    ui.preload(&["ui/disk"]);
-    let window = match Window::open("Monitor", INITIAL_W as u32, INITIAL_H as u32) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("hxmon: {}", e);
-            return 1;
-        }
-    };
-    let mut app = App {
-        window,
-        ui,
-        tab: if hamix_std::env::args().get(1).map(|a| a == "resources").unwrap_or(false) { 1 } else { 0 },
-        procs: Vec::new(),
-        selected: None,
-        scroll: 0,
-        hits: Hits::new(),
-        hover: None,
-        cpu_history: VecDeque::new(),
-        core_history: Vec::new(),
-        mem_history: VecDeque::new(),
-        last_cpu: Vec::new(),
-        last_cores: Vec::new(),
-        last_sample: sys::uptime_ms(),
-        info: sys::sysinfo(),
-        message: String::new(),
-    };
-    app.window.set_icon("monitor");
-    app.window.set_min_size(520, 380);
-    app.sample();
-    app.draw();
-    let mut next = sys::uptime_ms() + 1000;
-    loop {
-        let wait = next.saturating_sub(sys::uptime_ms()) as i64;
-        match app.window.wait_event(wait.max(1)) {
-            Some(Event::Close { .. }) => return 0,
-            Some(Event::Resize { .. }) | Some(Event::Theme { .. }) => app.draw(),
-            Some(Event::Mouse { x, y, kind, wheel, .. }) => match kind {
-                MOUSE_MOVE | MOUSE_LEAVE => {
-                    let hover = if kind == MOUSE_LEAVE { None } else { app.hits.at(x, y) };
-                    if hover != app.hover {
-                        app.hover = hover;
-                        app.draw();
-                    }
-                }
-                MOUSE_WHEEL => {
-                    let (_, h) = app.size();
-                    let max = (app.procs.len() as i32 * ROW - (h - 162)).max(0);
-                    app.scroll = (app.scroll + wheel * ROW * 2).clamp(0, max);
-                    app.draw();
-                }
-                MOUSE_PRESS => {
-                    match app.hits.at(x, y) {
-                        Some(Hit::Tab(i)) => app.tab = i,
-                        Some(Hit::Row(i)) => app.selected = app.procs.get(i).map(|p| p.pid),
-                        Some(Hit::End) => {
-                            if let Some(pid) = app.selected {
-                                let r = sys::kill(pid);
-                                app.message = if r < 0 { format!("Cannot end {}: {}", pid, sys::error_name(r)) } else { format!("Ended process {}", pid) };
-                            }
-                        }
-                        None => {}
-                    }
-                    app.draw();
-                }
-                _ => {}
-            },
-            Some(Event::Key { code: 27, .. }) => return 0,
-            _ => {}
-        }
-        if sys::uptime_ms() >= next {
-            next = sys::uptime_ms() + 1000;
-            app.sample();
-            app.draw();
-        }
-    }
+fn run() -> i32 {
+    hxtoolkit::run(Settings::new("monitor").size(820, 580).min_size(520, 380), Monitor::new())
 }
 
-entry!(main);
+#[cfg(target_os = "hamix")]
+hxstd::entry!(run);
+
+#[cfg(not(target_os = "hamix"))]
+hxtoolkit::main!(run);

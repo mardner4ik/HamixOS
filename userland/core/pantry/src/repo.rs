@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::{fs, println, sys};
+use hxstd::{fs, println, sys};
 
 use crate::archive;
 use crate::crypto::{self, RsaKey};
@@ -15,6 +15,24 @@ pub struct Catalog {
     pub pkgs: Vec<Pkg>,
     pub by_name: BTreeMap<String, Vec<usize>>,
     pub by_provide: BTreeMap<String, Vec<usize>>,
+    pub prefer: BTreeMap<String, String>,
+}
+
+pub const PREFER_PATH: &str = "/etc/pantry/prefer";
+
+pub fn load_prefer() -> BTreeMap<String, String> {
+    let mut prefer = BTreeMap::new();
+    for line in fs::read_to_string(PREFER_PATH).unwrap_or_default().lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        if let (Some(dep), Some(pkg)) = (parts.next(), parts.next()) {
+            prefer.insert(dep.to_string(), pkg.to_string());
+        }
+    }
+    prefer
 }
 
 pub fn load_repos() -> Result<Vec<Repo>, String> {
@@ -137,5 +155,5 @@ pub fn load_catalog(repos: Vec<Repo>) -> Result<Catalog, String> {
             by_provide.entry(index::provided_name(token).0.to_string()).or_default().push(i);
         }
     }
-    Ok(Catalog { repos, pkgs, by_name, by_provide })
+    Ok(Catalog { repos, pkgs, by_name, by_provide, prefer: load_prefer() })
 }

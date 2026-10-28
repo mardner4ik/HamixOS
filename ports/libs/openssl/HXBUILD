@@ -1,0 +1,16 @@
+pkgname=openssl
+pkgver=3.3.2
+pkgdesc="TLS and cryptography toolkit"
+source="https://github.com/openssl/openssl/releases/download/openssl-$pkgver/openssl-$pkgver.tar.gz"
+sha256="2e8a40b01979afe8be0bbfb3de5dc1c6709fedb46d6c89c10da114ab5fc3d281"
+builddir="openssl-$pkgver"
+depends="zlib"
+
+build() {
+    ./Configure "linux-$HX_ARCH" --prefix=/usr --libdir=lib --openssldir=/etc/ssl no-shared no-async no-tests no-docs no-afalgeng no-engine
+    make -j"$JOBS" build_sw
+}
+
+package() {
+    make DESTDIR="$pkgdir" install_sw
+}

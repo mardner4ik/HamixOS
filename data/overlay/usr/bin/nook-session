@@ -1,0 +1,12 @@
+#!/bin/sh
+[ -r /etc/hamix/session.env ] && set -a && . /etc/hamix/session.env && set +a
+export XDG_CURRENT_DESKTOP=Nook XDG_SESSION_DESKTOP=nook
+if [ "$1" = "wayland" ]; then
+    export NOOK_PLATFORM=wayland WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland
+fi
+exec >>"${XDG_RUNTIME_DIR:-/tmp}/nook-session.log" 2>&1
+echo "nook-session: uid $(id -u) runtime $XDG_RUNTIME_DIR display $(ls -l /dev/dri/card0)"
+if [ -x /usr/libexec/hamix/hxperm-exec ]; then
+    exec /usr/libexec/hamix/hxperm-exec org.hamix.Nook /usr/bin/hxserver
+fi
+exec /usr/bin/hxserver

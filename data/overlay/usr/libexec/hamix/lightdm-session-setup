@@ -1,0 +1,9 @@
+#!/bin/sh
+[ -n "$USER" ] || exit 0
+uid=$(id -u "$USER") || exit 0
+gid=$(id -g "$USER")
+mkdir -p /run/user
+chmod 755 /run/user
+mkdir -p "/run/user/$uid"
+chown "$uid:$gid" "/run/user/$uid"
+chmod 700 "/run/user/$uid"

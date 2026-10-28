@@ -270,6 +270,7 @@ pub fn load_packed(name: &str, blob: &[u8], conf: Option<&str>, sig: Option<&str
     };
     MODULES.lock().push(module);
 
+    crate::hxinit::progress(&alloc::format!("starting {}", name));
     kpi::begin(name);
     let status = match init {
         Some(addr) => {
@@ -527,6 +528,12 @@ pub fn autoload() -> usize {
         let Some(class) = wants(stem, &devices) else {
             continue;
         };
+        let free: Vec<crate::drivers::pci::PciDevice> = devices.iter().filter(|d| crate::drivers::pci::builtin_owner(d.address).is_none()).cloned().collect();
+        if wants(stem, &free).is_none() {
+            let owners: Vec<&str> = devices.iter().filter_map(|d| crate::drivers::pci::builtin_owner(d.address)).collect();
+            crate::drivers::klog::log(&alloc::format!("module {}: skipped, its hardware is already driven by {}", stem, owners.join(", ")));
+            continue;
+        }
         let path = alloc::format!("/lib/modules/{}", entry);
         match load_from(&path) {
             Ok(()) => loaded += 1,

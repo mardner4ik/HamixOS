@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::vec::Vec;
 use hxclient::ui::theme;
-use vellum::gfx::{blend, ellipsize, fast_sqrt};
+use vellum::gfx::{blend, ellipsize, fast_sqrt, ShadowMask};
 use vellum::{Area, Painter};
 
 use crate::compositor::damage::subtract_all;
@@ -20,19 +20,21 @@ impl Nook {
             let outer = self.core.windows[index].outer();
             {
                 let mut p = self.core.painter_clipped();
-                p.shadow(outer, 0, SHADOW_SIZE, 150, SHADOW_OFFSET);
+                p.shadow(outer, 8, SHADOW_SIZE, 150, SHADOW_OFFSET);
             }
             let (width, height) = (self.core.screen.width, self.core.screen.height);
-            if let Body::Client { pixels, width: bw, height: bh, .. } = &self.core.windows[index].body {
-                let (w, h) = (*bw, *bh);
-                let source = unsafe { core::slice::from_raw_parts(*pixels, (w * h) as usize) };
+            if let Body::Client { pixels, width: bw, height: bh, stride, opaque, .. } = &self.core.windows[index].body {
+                let (w, h, stride, opaque) = (*bw, *bh, *stride, *opaque);
+                let Some(source) = client_pixels(*pixels, w, h, stride) else {
+                    return;
+                };
                 let area = clip.intersect(&outer).intersect(&Area::new(outer.x, outer.y, w, h));
                 for ty in area.y..area.bottom() {
-                    let srow = ((ty - outer.y) * w) as usize;
+                    let srow = ((ty - outer.y) * stride) as usize;
                     let drow = (ty * width) as usize;
                     for tx in area.x..area.right() {
                         let p = source[srow + (tx - outer.x) as usize];
-                        let a = p >> 24;
+                        let a = if opaque { 255 } else { p >> 24 };
                         let d = &mut self.core.screen.frame[drow + tx as usize];
                         if a == 255 {
                             *d = p & 0x00FF_FFFF;
@@ -57,10 +59,17 @@ impl Nook {
         let icon = if has_icon { self.sized_icons.get(&(icon_name.clone(), 18)).map(|i| i as *const vellum::Image) } else { None };
         let ui = self.ui();
         let mut hot = Vec::new();
+        let strength = if focused { 235 } else { 140 };
+        let mask = if tiled {
+            None
+        } else {
+            let cached = self.core.windows[index].shadow.take().filter(|m| m.matches(outer.w, outer.h, radius, SHADOW_SIZE, strength, SHADOW_OFFSET));
+            Some(cached.unwrap_or_else(|| ShadowMask::new(outer.w, outer.h, radius, SHADOW_SIZE, strength, SHADOW_OFFSET)))
+        };
         {
             let mut p = self.core.painter_clipped();
-            if !tiled {
-                p.shadow(outer, radius, SHADOW_SIZE, if focused { 235 } else { 140 }, SHADOW_OFFSET);
+            if let Some(mask) = mask.as_ref() {
+                p.shadow_mask(mask, outer);
             }
             let pal = theme::palette();
             let bar = if focused { pal.title_bar } else { pal.title_bar_inactive };
@@ -99,7 +108,10 @@ impl Nook {
                 }
             }
         }
-        self.hot_buttons.extend(hot);
+        self.core.windows[index].shadow = mask;
+        let id = self.core.windows[index].id;
+        self.hot_buttons.retain(|(w, _)| *w != id);
+        self.hot_buttons.extend(hot.into_iter().map(|a| (id, a)));
 
         let corner = radius;
         let mut saved: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
@@ -124,22 +136,36 @@ impl Nook {
         }
 
         let (width, height) = (self.core.screen.width, self.core.screen.height);
-        let stretch_ok = self.stretch_allowed(index, hamix_std::sys::uptime_ms());
+        let stretch_ok = self.stretch_allowed(index, hxstd::sys::uptime_ms());
         match &mut self.core.windows[index].body {
-            Body::Client { pixels, width: bw, height: bh, .. } => {
-                let (w, h) = (*bw, *bh);
-                let source = unsafe { core::slice::from_raw_parts(*pixels, (w * h) as usize) };
-                if (w, h) != (content.w, content.h) && w > 0 && h > 0 && stretch_ok {
-                    crate::anim::scaled_block(source, (w, h), content, 255, &mut self.core.screen.frame, width, clip.intersect(&content));
-                } else {
-                    let mut p = Painter::new(&mut self.core.screen.frame, width, height);
-                    p.set_clip(clip.intersect(&content));
-                    p.blit(source, w, h, content.x, content.y);
-                    if w < content.w {
-                        p.fill(Area::new(content.x + w, content.y, content.w - w, content.h), theme::bg());
+            Body::Client { pixels, width: bw, height: bh, stride, .. } => {
+                let (w, h, stride) = (*bw, *bh, *stride);
+                let area = clip.intersect(&content);
+                match client_pixels(*pixels, w, h, stride) {
+                    Some(source) if (w, h) != (content.w, content.h) && stretch_ok => {
+                        crate::anim::scaled_rows(source, (w, h), stride, content, 255, &mut self.core.screen.frame, width, area);
                     }
-                    if h < content.h {
-                        p.fill(Area::new(content.x, content.y + h, w.min(content.w), content.h - h), theme::bg());
+                    Some(source) => {
+                        let shown = area.intersect(&Area::new(content.x, content.y, w, h));
+                        let frame = &mut self.core.screen.frame;
+                        for ty in shown.y..shown.bottom() {
+                            let s = ((ty - content.y) * stride + shown.x - content.x) as usize;
+                            let d = (ty * width + shown.x) as usize;
+                            frame[d..d + shown.w as usize].copy_from_slice(&source[s..s + shown.w as usize]);
+                        }
+                        let mut p = Painter::new(&mut self.core.screen.frame, width, height);
+                        p.set_clip(area);
+                        if w < content.w {
+                            p.fill(Area::new(content.x + w, content.y, content.w - w, content.h), theme::bg());
+                        }
+                        if h < content.h {
+                            p.fill(Area::new(content.x, content.y + h, w.min(content.w), content.h - h), theme::bg());
+                        }
+                    }
+                    None => {
+                        let mut p = Painter::new(&mut self.core.screen.frame, width, height);
+                        p.set_clip(area);
+                        p.fill(content, theme::bg());
                     }
                 }
             }
@@ -148,12 +174,22 @@ impl Nook {
                 p.set_clip(clip);
                 Nook::draw_about_window(&mut p, ui, content);
             }
+            body @ Body::Wallpaper { .. } => {
+                let mut p = Painter::new(&mut self.core.screen.frame, width, height);
+                p.set_clip(clip);
+                Nook::draw_wallpaper_window(&mut p, ui, content, body, pointer);
+                let (set, cancel) = Nook::wallpaper_buttons(content);
+                let id = self.core.windows[index].id;
+                self.hot_buttons.push((id, set));
+                self.hot_buttons.push((id, cancel));
+            }
             body @ Body::Auth { .. } => {
                 let mut p = Painter::new(&mut self.core.screen.frame, width, height);
                 p.set_clip(clip);
                 Nook::draw_auth_window(&mut p, ui, content, body, pointer);
-                self.hot_buttons.push(Area::new(content.right() - 112, content.bottom() - 52, 96, 36));
-                self.hot_buttons.push(Area::new(content.right() - 216, content.bottom() - 52, 96, 36));
+                let id = self.core.windows[index].id;
+                self.hot_buttons.push((id, Area::new(content.right() - 112, content.bottom() - 52, 96, 36)));
+                self.hot_buttons.push((id, Area::new(content.right() - 216, content.bottom() - 52, 96, 36)));
             }
         }
 
@@ -227,7 +263,7 @@ impl Nook {
                 break;
             }
             let w = &self.core.windows[i];
-            if w.minimized || self.animating(w.id) {
+            if !self.core.shown(w) || self.animating(w.id) {
                 continue;
             }
             let bounds = w.with_shadow();
@@ -247,10 +283,11 @@ impl Nook {
     }
 
     pub fn compose(&mut self) {
-        let now = hamix_std::sys::uptime_ms();
+        let now = hxstd::sys::uptime_ms();
         let damage = self.core.damage.take();
         let focused = self.core.focused();
-        self.hot_buttons.clear();
+        let alive: Vec<u32> = self.core.windows.iter().filter(|w| self.core.shown(w)).map(|w| w.id).collect();
+        self.hot_buttons.retain(|(w, _)| alive.contains(w));
         for area in damage {
             let full = area.intersect(&self.core.bounds());
             if full.is_empty() {
@@ -264,7 +301,7 @@ impl Nook {
                 p.set_clip(*rect);
                 p.copy_area(&self.background, *rect);
                 drop(p);
-                self.draw_desktop_icons();
+                self.draw_layers(true);
             }
             for (index, parts) in plan.iter() {
                 let is_focused = focused == Some(self.core.windows[*index].id);
@@ -275,13 +312,12 @@ impl Nook {
             }
             self.core.screen.clip = full;
             self.draw_animations(now);
+            self.draw_layers(false);
             self.draw_snap_preview();
-            self.draw_dock();
-            self.draw_top_bar();
-            self.draw_popup();
+            self.draw_window_menu();
             self.draw_toasts();
-            self.draw_volume_osd();
             self.draw_switcher();
+            self.draw_overlay_layers();
             self.draw_cursor();
             let clip = self.core.screen.clip;
             self.core.screen.present(clip);
@@ -294,3 +330,11 @@ impl Nook {
 }
 
 const MAX_REGION_RECTS: usize = 48;
+
+fn client_pixels<'a>(pixels: *const u32, w: i32, h: i32, stride: i32) -> Option<&'a [u32]> {
+    if pixels.is_null() || w <= 0 || h <= 0 || stride < w {
+        return None;
+    }
+    let len = (stride as usize) * (h as usize - 1) + w as usize;
+    Some(unsafe { core::slice::from_raw_parts(pixels, len) })
+}

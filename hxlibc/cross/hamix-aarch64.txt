@@ -1,0 +1,16 @@
+[binaries]
+c = ['clang', '--target=aarch64-unknown-hamix']
+cpp = ['clang++', '--target=aarch64-unknown-hamix']
+c_ld = 'lld'
+cpp_ld = 'lld'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+
+[host_machine]
+system = 'hamix'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+
+[built-in options]
+cpp_args = ['-D_GNU_SOURCE', '-fno-sized-deallocation']

@@ -1,0 +1,16 @@
+pkgname=expat
+pkgver=2.6.3
+pkgdesc="XML parser library"
+source="https://github.com/libexpat/libexpat/releases/download/R_2_6_3/expat-$pkgver.tar.xz"
+sha256="274db254a6979bde5aad404763a704956940e465843f2a9bd9ed7af22e2c0efc"
+builddir="expat-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static --without-docbook --without-examples --without-tests
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

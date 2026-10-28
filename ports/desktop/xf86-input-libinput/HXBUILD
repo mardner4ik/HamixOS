@@ -1,0 +1,18 @@
+pkgname=xf86-input-libinput
+pkgver=1.4.0
+pkgdesc="Xorg input driver based on libinput"
+source="https://www.x.org/releases/individual/driver/xf86-input-libinput-$pkgver.tar.xz"
+sha256="3a3d14cd895dc75b59ae2783b888031956a0bac7a1eff16d240dbb9d5df3e398"
+builddir="xf86-input-libinput-$pkgver"
+depends="xorg-server libinput"
+
+build() {
+    CFLAGS="$CFLAGS -D__linux__=1 -Dlinux=1" ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-static \
+        --with-xorg-module-dir=/usr/lib/xorg/modules --with-xorg-conf-dir=/usr/share/X11/xorg.conf.d
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man"
+}

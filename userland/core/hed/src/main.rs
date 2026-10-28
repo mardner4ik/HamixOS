@@ -6,9 +6,9 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use hamix_std::console;
-use hamix_std::sys::{self, Key};
-use hamix_std::{entry, env, fs};
+use hxstd::console;
+use hxstd::sys::{self, Key};
+use hxstd::{entry, env, fs};
 
 const GUTTER: usize = 5;
 const MIN_COLS: usize = 20;
@@ -264,7 +264,7 @@ fn main() -> i32 {
         }
     }
     let Some(path) = path else {
-        hamix_std::println!("usage: hed [--view] <file>");
+        hxstd::println!("usage: hed [--view] <file>");
         return 1;
     };
 

@@ -1,0 +1,17 @@
+pkgname=iso-codes
+pkgver=4.17.0
+pkgdesc="ISO country, language and script lists (data only)"
+source="iso-codes-v$pkgver.tar.gz::https://salsa.debian.org/iso-codes-team/iso-codes/-/archive/v$pkgver/iso-codes-v$pkgver.tar.gz"
+sha256="dd5ca13db77ec6dd1cc25f5c0184290a870ec1fed245d8e39a04ff34f59076c3"
+builddir="iso-codes-v$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-nls
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/locale"
+}

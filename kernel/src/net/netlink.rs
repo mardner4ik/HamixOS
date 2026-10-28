@@ -7,6 +7,7 @@ use crate::net::unix::{self, Cred, SOCK_DGRAM};
 
 pub const AF_NETLINK: u64 = 16;
 const NETLINK_ROUTE: u64 = 0;
+const NETLINK_KOBJECT_UEVENT: u64 = 15;
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
 const NLM_F_MULTI: u16 = 2;
@@ -18,9 +19,11 @@ const RTM_GETROUTE: u16 = 26;
 
 static SOCKETS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
 static PASSCRED: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static UEVENT_LISTENERS: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+static UEVENT_SEQNUM: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 pub fn create(protocol: u64, cred: Cred) -> Result<u32, i64> {
-    if protocol != NETLINK_ROUTE {
+    if protocol != NETLINK_ROUTE && protocol != NETLINK_KOBJECT_UEVENT {
         return Err(-93);
     }
     let stale: Vec<u32> = without_interrupts(|| {
@@ -30,14 +33,48 @@ pub fn create(protocol: u64, cred: Cred) -> Result<u32, i64> {
             table.remove(user);
         }
         PASSCRED.lock().retain(|i| !dead.iter().any(|(u, _)| u == i));
+        UEVENT_LISTENERS.lock().retain(|(u, _)| !dead.iter().any(|(d, _)| d == u));
         dead.into_iter().map(|(_, k)| k).collect()
     });
     for kernel in stale {
         unix::release(kernel);
     }
     let (user, kernel) = unix::pair(SOCK_DGRAM, cred);
-    without_interrupts(|| SOCKETS.lock().insert(user, kernel));
+    without_interrupts(|| {
+        SOCKETS.lock().insert(user, kernel);
+        if protocol == NETLINK_KOBJECT_UEVENT {
+            UEVENT_LISTENERS.lock().push((user, kernel));
+        }
+    });
     Ok(user)
+}
+
+pub fn uevent(action: &str, devpath: &str, properties: &[(&str, &str)]) -> usize {
+    let seqnum = UEVENT_SEQNUM.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let mut message = Vec::new();
+    let mut field = |text: &str| {
+        message.extend_from_slice(text.as_bytes());
+        message.push(0);
+    };
+    field(&alloc::format!("{}@{}", action, devpath));
+    field(&alloc::format!("ACTION={}", action));
+    field(&alloc::format!("DEVPATH={}", devpath));
+    for (key, value) in properties {
+        field(&alloc::format!("{}={}", key, value));
+    }
+    field(&alloc::format!("SEQNUM={}", seqnum));
+    let listeners: Vec<(u32, u32)> = without_interrupts(|| UEVENT_LISTENERS.lock().clone());
+    let mut delivered = 0;
+    for (user, kernel) in listeners {
+        if unix::kind(user).is_none() {
+            continue;
+        }
+        let mut files = Vec::new();
+        if unix::send(kernel, &message, &mut files, None).is_ok() {
+            delivered += 1;
+        }
+    }
+    delivered
 }
 
 pub fn set_passcred(id: u32, on: bool) {

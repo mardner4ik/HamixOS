@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Nook (Wayland)
+Comment=The HamixOS desktop with the shell as a Wayland client
+Exec=/usr/bin/nook-session wayland
+TryExec=/usr/bin/hxserver
+Type=Application
+DesktopNames=Nook

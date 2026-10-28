@@ -1,0 +1,4 @@
+/usr/bin holds the native userland programs built from userland/ against libs/hxstd:
+hsh (the shell), hxserver (Nook), hxterm, hxfiles, hxview, hxinstall, hxcalc,
+hxsettings, hxnotes, hxvideo, hxsound, hxmon, hxcmd, hed. The shell used after login is chosen
+in /etc/hamix/login.conf.

@@ -1,0 +1,17 @@
+pkgname=xtrans
+pkgver=1.5.2
+pkgdesc="X transport library (headers)"
+source="https://www.x.org/releases/individual/lib/xtrans-$pkgver.tar.xz"
+sha256="5c5cbfe34764a9131d048f03c31c19e57fb4c682d67713eab6a65541b4dff86c"
+builddir="xtrans-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-docs
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

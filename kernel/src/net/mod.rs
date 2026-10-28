@@ -2,6 +2,9 @@ pub mod dma;
 pub mod inet;
 pub mod known;
 pub mod module;
+pub mod netlink;
+pub mod socket;
+pub mod socket_inet;
 pub mod stack;
 pub mod unix;
 pub mod wifi;
@@ -286,10 +289,6 @@ fn write_resolv_conf() {
         return;
     };
     let _ = vfs.write(0, "/etc/resolv.conf", text.as_bytes(), false, 0);
-    let root = vfs.root_id();
-    if vfs.resolve(root, "/opt/linux/etc/resolv.conf").is_some() {
-        let _ = vfs.write(0, "/opt/linux/etc/resolv.conf", text.as_bytes(), false, 0);
-    }
 }
 
 extern "C" fn daemon(_: u64) -> ! {

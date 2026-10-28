@@ -32,7 +32,8 @@ pub enum Snap {
 pub enum Body {
     About,
     Auth { action: crate::PowerAction, field: hxclient::ui::TextField, error: String },
-    Client { pid: i64, shm: u32, pixels: *const u32, width: i32, height: i32 },
+    Wallpaper { client: i64, request: u32, path: String, app: String, preview: Image },
+    Client { pid: i64, shm: u32, pixels: *const u32, width: i32, height: i32, stride: i32, opaque: bool },
 }
 
 pub struct Cursor {
@@ -63,6 +64,8 @@ pub struct Window {
     pub track: bool,
     pub placed: (i32, i32),
     pub frameless: bool,
+    pub workspace: u32,
+    pub shadow: Option<vellum::gfx::ShadowMask>,
 }
 
 impl Window {

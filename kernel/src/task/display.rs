@@ -11,6 +11,8 @@ struct DisplayState {
     shadow: Vec<usize>,
 }
 
+static ADOPTED_VT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+
 static STATE: Mutex<DisplayState> = Mutex::new(DisplayState { owner: None, shadow: Vec::new() });
 
 fn framebuffer() -> Option<FramebufferInfo> {
@@ -51,7 +53,7 @@ fn remap(pid: Pid, targets: &[u64], wc: bool) {
             }
         }
     });
-    paging::flush_tlb();
+    crate::memory::tlb::sync();
 }
 
 pub fn map(pid: Pid, vt: usize) -> Result<FramebufferInfo, i64> {
@@ -59,6 +61,7 @@ pub fn map(pid: Pid, vt: usize) -> Result<FramebufferInfo, i64> {
     let mut state = without_interrupts(|| STATE.lock().owner);
     if let Some((owner, _)) = state {
         if owner != pid && super::exists(owner) {
+            crate::drivers::klog::log(&alloc::format!("display: pid {} cannot take the screen, pid {} owns it", pid, owner));
             return Err(-16);
         }
         if owner != pid {
@@ -67,6 +70,15 @@ pub fn map(pid: Pid, vt: usize) -> Result<FramebufferInfo, i64> {
         }
     }
     let _ = state;
+    let foreground = crate::tty::vt::foreground();
+    let vt = if vt != foreground && pid == super::current_pid() {
+        super::adopt_vt(pid, foreground);
+        crate::tty::vt::mark_graphics(foreground);
+        ADOPTED_VT.store(foreground, core::sync::atomic::Ordering::Relaxed);
+        foreground
+    } else {
+        vt
+    };
     let count = pages(&fb);
     let ok = super::with_task(pid, |task| {
         let Some(aspace) = task.aspace.as_mut() else {
@@ -128,10 +140,14 @@ pub fn release(pid: Pid) {
                 aspace.unmap_range(paging::USER_FB_BASE, pages(&fb) * PAGE_SIZE);
             }
         });
-        paging::flush_tlb();
+        crate::memory::tlb::sync();
     }
     for f in shadow {
         frame::free_frame(f);
+    }
+    let adopted = ADOPTED_VT.swap(usize::MAX, core::sync::atomic::Ordering::Relaxed);
+    if adopted != usize::MAX {
+        crate::tty::vt::mark_text(adopted);
     }
     show_console_buffer();
     crate::drivers::video::text_mode::set_graphics_owned(false);

@@ -1,0 +1,15 @@
+[package]
+name = "hx-login1"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hx-login1"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../../../userland/libs/hxstd" }
+hxdbus = { path = "../hxdbus" }
+
+[package.metadata.hamix]
+install = "libexec"

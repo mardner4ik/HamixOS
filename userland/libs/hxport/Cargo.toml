@@ -1,0 +1,15 @@
+[package]
+name = "hxport"
+version = "0.1.0"
+edition = "2021"
+description = "Tiny portable system helpers (files, directories, processes, environment) for HamixOS applications that also run on Linux and BSD"
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "hamix")'.dependencies]
+hxstd = { path = "../hxstd" }
+hxlibc-sys = { path = "../../../hxlibc/rust/hxlibc-sys" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("hamix"))'] }

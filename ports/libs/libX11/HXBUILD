@@ -1,0 +1,18 @@
+pkgname=libX11
+pkgver=1.8.10
+pkgdesc="Core X11 client library"
+source="https://www.x.org/releases/individual/lib/libX11-$pkgver.tar.xz"
+sha256="2b3b3dad9347db41dca56beb7db5878f283bde1142f04d9f8e478af435dfdc53"
+builddir="libX11-$pkgver"
+depends="libxcb xtrans xorgproto"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-specs --without-xmlto --without-fop --enable-malloc0returnsnull \
+        --with-keysymdefdir="$HX_ROOT/usr/include/X11"
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

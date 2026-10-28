@@ -52,9 +52,12 @@ table is kept), `core.img` into the gap after the MBR, copies
 
 | value | meaning |
 |---|---|
-| `live` | use the image loaded by GRUB (`hext.img.gz`) in RAM |
+| `live` | read `/boot/hext.img` from the CD/DVD on demand; without an optical disc, use the image GRUB loaded into RAM |
+| `cdrom` | only the CD/DVD image |
+| `ram` | the image GRUB loaded, copied into RAM |
 | `auto` | first hext volume on any disk, otherwise the image |
 | `UUID=…`, `LABEL=…`, `/dev/sda1` | that volume |
 
-The ISO menu has a "Live" entry (`root=live`) and one that boots an
+The ISO menu has a "Live" entry (`root=live`; GRUB skips loading the image when it
+boots from a CD), "copy the whole system into RAM" (`root=ram`) and one that boots an
 installed system from the disk (`root=auto`).

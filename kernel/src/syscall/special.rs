@@ -2,7 +2,9 @@ use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-use crate::syscall::{copy_out, install_fd, target, user_slice, Target, EAGAIN, EBADF, EINVAL};
+use crate::syscall::{install_fd, target, Target};
+use crate::usercopy::{copy_out, user_slice};
+use crate::errno::{EAGAIN, EBADF, EINVAL};
 use crate::arch::without_interrupts;
 use crate::task::{self, OpenFile};
 
@@ -17,6 +19,12 @@ pub enum Kind {
     Event { counter: u64, semaphore: bool },
     Signal { mask: u64 },
     Inotify { next_wd: u32 },
+    Drm,
+    Evdev,
+    Oss,
+    Block,
+    Vt(u8),
+    Pidfd(u32),
 }
 
 struct Object {
@@ -40,7 +48,7 @@ pub fn retain(id: u32) {
 }
 
 pub fn release(id: u32) {
-    with(|t| {
+    let dead = with(|t| {
         let dead = match t.get_mut(&id) {
             Some(o) => {
                 o.refs = o.refs.saturating_sub(1);
@@ -48,10 +56,186 @@ pub fn release(id: u32) {
             }
             None => false,
         };
-        if dead {
-            t.remove(&id);
-        }
+        if dead { t.remove(&id).map(|o| o.kind) } else { None }
     });
+    match dead {
+        Some(Kind::Drm) => crate::drivers::video::drm::closed(id),
+        Some(Kind::Evdev) => crate::drivers::input::evdev::closed(id),
+        Some(Kind::Oss) => crate::drivers::audio::oss::closed(id),
+        Some(Kind::Block) => crate::drivers::block_node::closed(id),
+        _ => {}
+    }
+}
+
+pub fn is_drm(id: u32) -> bool {
+    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Drm)))
+}
+
+pub fn is_evdev(id: u32) -> bool {
+    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Evdev)))
+}
+
+pub fn is_oss(id: u32) -> bool {
+    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Oss)))
+}
+
+pub fn is_block(id: u32) -> bool {
+    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Block)))
+}
+
+pub fn vt_of(id: u32) -> Option<usize> {
+    with(|t| match t.get(&id).map(|o| o.kind) {
+        Some(Kind::Vt(n)) => Some(n as usize),
+        _ => None,
+    })
+}
+
+pub fn pidfd_target(id: u32) -> Option<u32> {
+    with(|t| match t.get(&id).map(|o| o.kind) {
+        Some(Kind::Pidfd(pid)) => Some(pid),
+        _ => None,
+    })
+}
+
+pub fn sys_pidfd_open(pid: u64, flags: u64) -> i64 {
+    if flags & !NONBLOCK != 0 {
+        return EINVAL;
+    }
+    let pid = pid as u32;
+    if !task::with_task(pid, |t| t.leader == pid && !t.kernel_thread).unwrap_or(false) {
+        return crate::errno::ESRCH;
+    }
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    with(|t| t.insert(id, Object { kind: Kind::Pidfd(pid), refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, true);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
+}
+
+pub fn pidfd_of_fd(fd: u64) -> Option<u32> {
+    let Target::Special(id) = target(fd) else {
+        return None;
+    };
+    pidfd_target(id)
+}
+
+pub fn sys_pidfd_send_signal(fd: u64, sig: u64, _info: u64, flags: u64) -> i64 {
+    if flags != 0 {
+        return EINVAL;
+    }
+    let Target::Special(id) = target(fd) else {
+        return EBADF;
+    };
+    let Some(pid) = pidfd_target(id) else {
+        return EBADF;
+    };
+    crate::syscall::signal::sys_kill(pid as i64, sig)
+}
+
+pub fn create_vt(vt: usize, flags: u64) -> i64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    with(|t| t.insert(id, Object { kind: Kind::Vt(vt as u8), refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, flags & CLOEXEC != 0);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
+}
+
+pub fn stat_mode(id: u32) -> u32 {
+    if vt_of(id).is_some() {
+        return 0o020620;
+    }
+    if is_block(id) {
+        0o060660
+    } else if is_drm(id) || is_oss(id) {
+        0o020666
+    } else if is_evdev(id) {
+        0o020660
+    } else {
+        0o600
+    }
+}
+
+pub fn rdev(id: u32) -> u64 {
+    if let Some(vt) = vt_of(id) {
+        return crate::fs::encode_dev(4, vt as u32 + 1);
+    }
+    if is_block(id) {
+        return crate::drivers::block_node::rdev(id);
+    }
+    if is_drm(id) {
+        return crate::fs::encode_dev(226, 0);
+    }
+    if is_oss(id) {
+        let minor = match crate::drivers::audio::oss::node(id) {
+            Some(crate::drivers::audio::oss::Node::Mixer) => crate::drivers::audio::oss::MIXER_MINOR,
+            _ => crate::drivers::audio::oss::DSP_MINOR,
+        };
+        return crate::fs::encode_dev(crate::drivers::audio::oss::DSP_MAJOR, minor);
+    }
+    match crate::drivers::input::evdev::device_of(id) {
+        Some(device) => crate::fs::encode_dev(crate::drivers::input::evdev::MAJOR, crate::drivers::input::evdev::FIRST_MINOR + device as u32),
+        None => 0,
+    }
+}
+
+pub fn create_oss(node: crate::drivers::audio::oss::Node, flags: u64) -> i64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let r = crate::drivers::audio::oss::opened(id, node);
+    if r < 0 {
+        return r;
+    }
+    with(|t| t.insert(id, Object { kind: Kind::Oss, refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, flags & CLOEXEC != 0);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
+}
+
+pub fn create_block(name: &str, flags: u64) -> i64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let r = crate::drivers::block_node::opened(id, name);
+    if r < 0 {
+        return r;
+    }
+    with(|t| t.insert(id, Object { kind: Kind::Block, refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, flags & CLOEXEC != 0);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
+}
+
+pub fn create_evdev(device: usize, flags: u64) -> i64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    crate::drivers::input::evdev::opened(id, device);
+    with(|t| t.insert(id, Object { kind: Kind::Evdev, refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, flags & CLOEXEC != 0);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
+}
+
+pub fn create_drm(flags: u64) -> i64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    crate::drivers::video::drm::opened(id);
+    with(|t| t.insert(id, Object { kind: Kind::Drm, refs: 1 }));
+    let fd = install_fd(OpenFile::Special(id));
+    if fd >= 0 {
+        crate::syscall::set_cloexec(fd as u64, flags & CLOEXEC != 0);
+        crate::syscall::set_fd_nonblock(fd as u64, flags & NONBLOCK != 0);
+    }
+    fd
 }
 
 pub fn describe(id: u32) -> &'static str {
@@ -60,6 +244,19 @@ pub fn describe(id: u32) -> &'static str {
         Some(Kind::Event { .. }) => "anon_inode:[eventfd]",
         Some(Kind::Signal { .. }) => "anon_inode:[signalfd]",
         Some(Kind::Inotify { .. }) => "anon_inode:inotify",
+        Some(Kind::Drm) => "/dev/dri/card0",
+        Some(Kind::Oss) => match crate::drivers::audio::oss::node(id) {
+            Some(crate::drivers::audio::oss::Node::Mixer) => "/dev/mixer",
+            _ => "/dev/dsp",
+        },
+        Some(Kind::Block) => "/dev/block",
+        Some(Kind::Vt(_)) => "/dev/tty",
+        Some(Kind::Pidfd(_)) => "anon_inode:[pidfd]",
+        Some(Kind::Evdev) => match crate::drivers::input::evdev::device_of(id) {
+            Some(0) => "/dev/input/event0",
+            Some(1) => "/dev/input/event1",
+            _ => "/dev/input/event2",
+        },
         None => "anon_inode:[unknown]",
     }
 }
@@ -100,6 +297,12 @@ fn signal_bits() -> u64 {
 }
 
 pub fn readable(id: u32) -> bool {
+    if is_drm(id) {
+        return crate::drivers::video::drm::readable(id);
+    }
+    if is_evdev(id) {
+        return crate::drivers::input::evdev::readable(id);
+    }
     let pending = signal_bits();
     with(|t| {
         let Some(o) = t.get_mut(&id) else {
@@ -110,13 +313,15 @@ pub fn readable(id: u32) -> bool {
             Kind::Timer { expirations, .. } => expirations > 0,
             Kind::Event { counter, .. } => counter > 0,
             Kind::Signal { mask } => pending & mask != 0,
-            Kind::Inotify { .. } => false,
+            Kind::Inotify { .. } | Kind::Drm | Kind::Evdev | Kind::Oss | Kind::Vt(_) => false,
+            Kind::Pidfd(pid) => !task::exists(pid),
+            Kind::Block => true,
         }
     })
 }
 
 pub fn writable(id: u32) -> bool {
-    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Event { counter, .. }) if counter < u64::MAX - 1))
+    with(|t| matches!(t.get(&id).map(|o| o.kind), Some(Kind::Event { counter, .. }) if counter < u64::MAX - 1) || matches!(t.get(&id).map(|o| o.kind), Some(Kind::Oss) | Some(Kind::Block) | Some(Kind::Vt(_))))
 }
 
 fn wait(fd: u64, id: u32) -> Result<(), i64> {
@@ -127,12 +332,12 @@ fn wait(fd: u64, id: u32) -> Result<(), i64> {
         if crate::syscall::fd_nonblock(fd) {
             return Err(EAGAIN);
         }
-        if super::signal::pending() {
-            return Err(super::signal::EINTR);
+        if crate::syscall::signal::pending() {
+            return Err(crate::syscall::signal::EINTR);
         }
         let now = task::ticks();
         let slice = next_deadline().map(|d| d.saturating_sub(now)).unwrap_or(task::TICK_HZ / 10).clamp(1, task::TICK_HZ / 10);
-        super::tty::sleep_for_events(slice);
+        crate::tty::sleep_for_events(slice);
     }
 }
 
@@ -191,8 +396,11 @@ pub fn read(fd: u64, id: u32, buf: u64, count: u64) -> i64 {
                 let Some(sig) = sig else {
                     break;
                 };
+                let (pid, uid) = crate::syscall::signal::take_sender(sig);
                 let mut raw = [0u8; 128];
                 raw[0..4].copy_from_slice(&sig.to_le_bytes());
+                raw[12..16].copy_from_slice(&pid.to_le_bytes());
+                raw[16..20].copy_from_slice(&uid.to_le_bytes());
                 if copy_out(buf + done, 128, &raw) < 0 {
                     return -14;
                 }
@@ -200,15 +408,44 @@ pub fn read(fd: u64, id: u32, buf: u64, count: u64) -> i64 {
             }
             if done == 0 { EAGAIN } else { done as i64 }
         }
+        Some(Kind::Drm) => crate::drivers::video::drm::read(fd, id, buf, count),
+        Some(Kind::Evdev) => crate::drivers::input::evdev::read(fd, id, buf, count),
+        Some(Kind::Oss) => EINVAL,
+        Some(Kind::Block) => {
+            let mut tmp = match crate::memory::try_zeroed(count.min(16 << 20) as usize) {
+                Ok(tmp) => tmp,
+                Err(e) => return e,
+            };
+            let n = crate::drivers::block_node::read(id, &mut tmp);
+            if n <= 0 {
+                return n;
+            }
+            copy_out(buf, n as u64, &tmp[..n as usize]).min(n)
+        }
         Some(Kind::Inotify { .. }) => match wait(fd, id) {
             Ok(()) => EAGAIN,
             Err(e) => e,
         },
+        Some(Kind::Vt(_)) => EAGAIN,
+        Some(Kind::Pidfd(_)) => EINVAL,
         None => EBADF,
     }
 }
 
 pub fn write(fd: u64, id: u32, data: &[u8]) -> i64 {
+    if let Some(vt) = vt_of(id) {
+        crate::drivers::video::text_mode::TEXT_CONSOLE.lock().write_bytes_to(vt, data);
+        return data.len() as i64;
+    }
+    if is_evdev(id) {
+        return crate::drivers::input::evdev::write(id, data);
+    }
+    if is_oss(id) {
+        return crate::drivers::audio::oss::write(fd, id, data);
+    }
+    if is_block(id) {
+        return crate::drivers::block_node::write(id, data);
+    }
     if data.len() < 8 {
         return EINVAL;
     }
@@ -238,7 +475,7 @@ pub fn write(fd: u64, id: u32, data: &[u8]) -> i64 {
                 if crate::syscall::fd_nonblock(fd) {
                     return EAGAIN;
                 }
-                super::tty::sleep_for_events(task::TICK_HZ / 20);
+                crate::tty::sleep_for_events(task::TICK_HZ / 20);
             }
             None => return EINVAL,
         }
@@ -350,7 +587,7 @@ pub fn sys_timerfd_settime(fd: u64, flags: u64, new: u64, old: u64) -> i64 {
     let next = if value_ms == 0 && raw[16..32].iter().all(|b| *b == 0) {
         0
     } else if flags & TFD_TIMER_ABSTIME != 0 {
-        let now_ms = if realtime { crate::drivers::rtc::boot_epoch() * 1000 + task::uptime_ms() } else { task::uptime_ms() };
+        let now_ms = if realtime { crate::drivers::rtc::boot_epoch() * 1000 + task::clock_ms() } else { task::clock_ms() };
         now + task::ms_to_ticks(value_ms.saturating_sub(now_ms).max(1))
     } else {
         now + task::ms_to_ticks(value_ms.max(1))

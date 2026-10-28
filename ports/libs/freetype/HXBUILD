@@ -1,0 +1,17 @@
+pkgname=freetype
+pkgver=2.13.3
+pkgdesc="Font rendering library"
+source="https://download.savannah.gnu.org/releases/freetype/freetype-$pkgver.tar.xz"
+sha256="0550350666d427c74daeb85d5ac7bb353acba5f76956395995311a9c6f063289"
+builddir="freetype-$pkgver"
+depends="zlib libpng"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static \
+        --with-zlib=yes --with-png=yes --with-harfbuzz=no --with-bzip2=no --with-brotli=no
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

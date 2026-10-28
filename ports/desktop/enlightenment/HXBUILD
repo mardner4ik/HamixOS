@@ -1,0 +1,45 @@
+pkgname=enlightenment
+pkgver=0.26.0
+pkgdesc="Enlightenment (E26) desktop shell and Wayland compositor"
+source="https://download.enlightenment.org/rel/apps/enlightenment/enlightenment-$pkgver.tar.xz"
+sha256="11b6ef0671be5fead688bf554c30a2a1c683493ad10c5fe3115ffb4655424e84"
+builddir="enlightenment-$pkgver"
+depends="efl util-linux wayland wayland-protocols libxkbcommon xkeyboard-config"
+
+build() {
+    host="$(realpath "$srcdir/../../efl-host-1.27.0")"
+    export PATH="$host/bin:$PATH"
+    export LD_LIBRARY_PATH="$host/lib"
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dc_args="-D__linux__ -D__linux -D_GNU_SOURCE -I$HX_ROOT/usr/include" -Dc_std=gnu17 \
+        -Dedje-cc="$host/bin/edje_cc" -Deldbus-codegen="$host/bin/eldbus-codegen" -Deet="$host/bin/eet" \
+        -Dpam=false -Dlibexif=false -Delput=true -Ddevice-udev=true -Dmount-udisks=false -Dmount-eeze=false \
+        -Dwl=true -Dxwayland=false -Dwl-drm=true -Dwl-wl=true -Dwl-x11=false -Dwl-buffer=false -Dwl-weekeyboard=false \
+        -Dsystemd=false -Dnls=false -Dpackagekit=false -Dgeolocation=false \
+        -Dappmenu=false -Dinstall-enlightenment-menu=true
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild --quiet
+    rm -rf "$pkgdir/usr/share/doc" "$pkgdir/usr/share/xsessions"
+    cat > "$pkgdir/usr/bin/enlightenment-session" <<'SESSION'
+#!/bin/sh
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/runtime-$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=Enlightenment
+export XDG_SESSION_DESKTOP=enlightenment
+export DESKTOP_SESSION=enlightenment
+export E_WL_FORCE=drm
+unset WAYLAND_DISPLAY DISPLAY
+if [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    exec enlightenment_start "$@"
+fi
+exec dbus-run-session -- enlightenment_start "$@"
+SESSION
+    chmod 755 "$pkgdir/usr/bin/enlightenment-session"
+    sed -i 's|^Exec=.*|Exec=/usr/bin/enlightenment-session|' "$pkgdir/usr/share/wayland-sessions/enlightenment.desktop"
+}

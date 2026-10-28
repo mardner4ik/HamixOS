@@ -4,13 +4,14 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::{Cell, UnsafeCell};
-use hamix_std::{fs, sys};
+use hxstd::{fs, sys};
 use hxclient::ui::Ui;
 use vellum::Image;
 
 pub const NATIVE_DIRS: [&str; 2] = ["/usr/share/applications", "/usr/local/share/applications"];
-pub const LINUX_ROOT: &str = "/opt/linux";
-pub const LINUX_DIR: &str = "/opt/linux/usr/share/applications";
+pub const LINUX_ROOT: &str = "/linux";
+const PROGRAM_DIRS: [&str; 7] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/games", "/usr/local/games"];
+const ICON_BASE: &str = "/usr/share/icons";
 pub const GENERIC_LINUX_ICON: &str = "linux-app";
 const ICON_SIZES: [&str; 12] = ["48x48", "64x64", "96x96", "128x128", "256x256", "512x512", "32x32", "72x72", "24x24", "22x22", "16x16", "scalable"];
 const PREFERRED_THEMES: [&str; 5] = ["hicolor", "Adwaita", "breeze", "Papirus", "HighContrast"];
@@ -110,6 +111,7 @@ pub struct App {
     pub dock: bool,
     pub desktop: bool,
     pub stem: String,
+    pub id: String,
     pub wm_class: String,
     pub exec_name: String,
     pub icon_name: String,
@@ -247,32 +249,21 @@ fn is_file(path: &str) -> bool {
     matches!(sys::stat(path), Ok(s) if !s.is_dir())
 }
 
-fn find_program(name: &str, linux: bool) -> Option<String> {
-    if name.contains('/') {
-        if linux && !name.starts_with("/opt/linux/") {
-            let mapped = format!("{}{}", LINUX_ROOT, name);
-            if is_file(&mapped) {
-                return Some(mapped);
-            }
-        }
-        return if is_file(name) { Some(name.to_string()) } else { None };
+fn find_program(name: &str, root: &str) -> Option<String> {
+    if name.starts_with('/') {
+        let path = format!("{}{}", root, name);
+        return if is_file(&path) { Some(path) } else { None };
     }
-    let dirs: &[&str] = if linux {
-        &["/opt/linux/usr/bin", "/opt/linux/bin", "/opt/linux/usr/sbin", "/opt/linux/sbin", "/opt/linux/usr/local/bin", "/opt/linux/usr/games"]
-    } else {
-        &["/usr/bin", "/bin", "/sbin", "/usr/sbin", "/usr/local/bin"]
-    };
-    dirs.iter().map(|d| format!("{}/{}", d, name)).find(|p| is_file(p))
+    PROGRAM_DIRS.iter().map(|d| format!("{}{}/{}", root, d, name)).find(|p| is_file(p))
 }
 
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-fn icon_themes() -> Vec<String> {
-    let base = format!("{}/usr/share/icons", LINUX_ROOT);
+fn icon_themes(root: &str) -> Vec<String> {
     let mut themes: Vec<String> = PREFERRED_THEMES.iter().map(|t| t.to_string()).collect();
-    for entry in sys::read_dir(&base).unwrap_or_default() {
+    for entry in sys::read_dir(&format!("{}{}", root, ICON_BASE)).unwrap_or_default() {
         if entry.is_dir && !themes.contains(&entry.name) {
             themes.push(entry.name);
         }
@@ -280,38 +271,45 @@ fn icon_themes() -> Vec<String> {
     themes
 }
 
-fn find_icon(icon: &str, themes: &[String]) -> Option<String> {
+fn find_icon(icon: &str, themes: &[String], root: &str) -> Option<String> {
     if icon.is_empty() {
         return None;
     }
     if icon.starts_with('/') {
-        let mapped = if icon.starts_with("/opt/linux/") { icon.to_string() } else { format!("{}{}", LINUX_ROOT, icon) };
-        return [mapped, icon.to_string()].into_iter().find(|p| p.ends_with(".png") && is_file(p));
+        return Some(format!("{}{}", root, icon)).filter(|p| imago::extension_format(p).is_some() && is_file(p));
     }
-    let name = icon.strip_suffix(".png").unwrap_or(icon);
+    let name = [".png", ".svg", ".svgz", ".xpm"].iter().find_map(|ext| icon.strip_suffix(ext)).unwrap_or(icon);
     if let Some(own) = ICON_THEME_SIZES.iter().map(|size| format!("{}/{}/apps/{}.png", ICON_THEME, size, name)).find(|p| is_file(p)) {
         return Some(own);
     }
-    let base = format!("{}/usr/share/icons", LINUX_ROOT);
     for theme in themes {
-        let theme_dir = format!("{}/{}", base, theme);
+        let theme_dir = format!("{}{}/{}", root, ICON_BASE, theme);
         if sys::stat(&theme_dir).is_err() {
             continue;
         }
         for size in ICON_SIZES {
             for group in ["apps", "applications"] {
-                let path = format!("{}/{}/{}/{}.png", theme_dir, size, group, name);
-                if is_file(&path) {
-                    return Some(path);
+                for ext in ["png", "svg"] {
+                    let path = format!("{}/{}/{}/{}.{}", theme_dir, size, group, name, ext);
+                    if is_file(&path) {
+                        return Some(path);
+                    }
                 }
             }
         }
     }
-    [format!("{}/usr/share/pixmaps/{}.png", LINUX_ROOT, name), format!("{}/{}.png", base, name)].into_iter().find(|p| is_file(p))
+    ["png", "svg", "jpg", "ico"]
+        .iter()
+        .flat_map(|ext| [format!("{}/usr/share/pixmaps/{}.{}", root, name, ext), format!("{}{}/{}.{}", root, ICON_BASE, name, ext)])
+        .find(|p| is_file(p))
 }
 
 fn load_png(path: &str) -> Option<Image> {
-    fs::read_following(path).and_then(|bytes| Image::from_png(&bytes))
+    let bytes = fs::read_following(path)?;
+    if path.ends_with(".svg") {
+        return Image::decode_sized(&bytes, 128, 128);
+    }
+    Image::decode(&bytes)
 }
 
 pub fn fit(image: &Image, size: i32) -> Image {
@@ -345,6 +343,15 @@ fn install_generic(ui: &mut Ui, key: &str) {
 }
 
 fn install_icons(ui: &mut Ui, key: &str, source: Option<&str>) -> bool {
+    if let Some(path) = source.filter(|p| p.ends_with(".svg")) {
+        if let Some(bytes) = fs::read_following(path) {
+            if let (Some(big), Some(small)) = (Image::decode_sized(&bytes, 48, 48), Image::decode_sized(&bytes, 24, 24)) {
+                ui.insert_icon(&format!("apps/{}", key), big);
+                ui.insert_icon(&format!("apps/{}-24", key), small);
+                return true;
+            }
+        }
+    }
     match source.and_then(load_png) {
         Some(img) => {
             ui.insert_icon(&format!("apps/{}", key), fit(&img, 48));
@@ -373,7 +380,7 @@ fn read_dir_entries(dir: &str) -> Vec<(String, String)> {
 }
 
 fn user_dir() -> Option<String> {
-    hamix_std::env::var("HOME").map(|home| format!("{}/.local/share/applications", home))
+    hxstd::env::var("HOME").map(|home| format!("{}/.local/share/applications", home))
 }
 
 fn roles_of(e: &BTreeMap<String, String>) -> Vec<String> {
@@ -387,7 +394,7 @@ fn roles_of(e: &BTreeMap<String, String>) -> Vec<String> {
     roles
 }
 
-fn entry_to_app(stem: &str, text: &str, linux: bool) -> Option<App> {
+fn entry_to_app(stem: &str, text: &str, root: &str) -> Option<App> {
     let e = parse_entry(text);
     if e.get("Type").map(|t| t != "Application").unwrap_or(true) {
         return None;
@@ -405,11 +412,12 @@ fn entry_to_app(stem: &str, text: &str, linux: bool) -> Option<App> {
         return None;
     }
     if let Some(try_exec) = e.get("TryExec") {
-        find_program(try_exec, linux)?;
+        find_program(try_exec, root)?;
     }
     let exec = split_exec(e.get("Exec")?);
     let (first, rest) = exec.split_first()?;
-    let program = find_program(first, linux)?;
+    let program = find_program(first, root)?;
+    let linux = fs::personality(&program) == fs::Personality::Linux;
     let name = e.get("Name")?.clone();
     let description = e.get("Comment").or_else(|| e.get("GenericName")).cloned().unwrap_or_default();
     let categories = e.get("Categories").cloned().unwrap_or_default();
@@ -443,31 +451,27 @@ fn entry_to_app(stem: &str, text: &str, linux: bool) -> Option<App> {
         dock: truthy("X-Nook-Dock"),
         desktop: truthy("X-Nook-Desktop"),
         stem: stem.to_lowercase(),
+        id: String::from(stem),
         wm_class: e.get("StartupWMClass").map(|c| c.to_lowercase()).unwrap_or_default(),
         icon_name,
         icon_value,
     })
 }
 
+fn app_dirs() -> Vec<(String, &'static str)> {
+    let mut dirs: Vec<(String, &'static str)> = NATIVE_DIRS.iter().map(|d| (d.to_string(), "")).collect();
+    dirs.extend(user_dir().map(|d| (d, "")));
+    dirs.extend(NATIVE_DIRS.iter().map(|d| (format!("{}{}", LINUX_ROOT, d), LINUX_ROOT)));
+    dirs
+}
+
 fn collect() -> Vec<App> {
     let mut found: Vec<App> = Vec::new();
-    for dir in NATIVE_DIRS {
-        for (stem, text) in read_dir_entries(dir) {
-            if let Some(app) = entry_to_app(&stem, &text, false) {
-                found.push(app);
-            }
-        }
-    }
-    if let Some(dir) = user_dir() {
+    for (dir, root) in app_dirs() {
         for (stem, text) in read_dir_entries(&dir) {
-            if let Some(app) = entry_to_app(&stem, &text, false).or_else(|| entry_to_app(&stem, &text, true)) {
+            if let Some(app) = entry_to_app(&stem, &text, root) {
                 found.push(app);
             }
-        }
-    }
-    for (stem, text) in read_dir_entries(LINUX_DIR) {
-        if let Some(app) = entry_to_app(&stem, &text, true) {
-            found.push(app);
         }
     }
     found
@@ -480,10 +484,7 @@ pub fn fingerprint() -> u64 {
             hash = (hash ^ *b as u64).wrapping_mul(0x100_0000_01b3);
         }
     };
-    let mut dirs: Vec<String> = NATIVE_DIRS.iter().map(|d| d.to_string()).collect();
-    dirs.extend(user_dir());
-    dirs.push(String::from(LINUX_DIR));
-    for dir in dirs {
+    for (dir, _) in app_dirs() {
         mix(dir.as_bytes());
         for entry in sys::read_dir(&dir).unwrap_or_default() {
             mix(entry.name.as_bytes());
@@ -540,8 +541,9 @@ pub fn scan(ui: &mut Ui, sized_cache: &mut BTreeMap<(String, i32), Image>) -> bo
 fn install_app_icon(ui: &mut Ui, app: &App, themes: &mut Option<Vec<String>>) {
     let icon = app.icon_value.as_str();
     if app.linux {
-        let themes = themes.get_or_insert_with(icon_themes);
-        let source = find_icon(icon, themes).or_else(|| find_icon(&app.stem, themes)).or_else(|| find_icon(&app.exec_name, themes));
+        let linux_themes = icon_themes(LINUX_ROOT);
+        let themes = &linux_themes;
+        let source = find_icon(icon, themes, LINUX_ROOT).or_else(|| find_icon(&app.stem, themes, LINUX_ROOT)).or_else(|| find_icon(&app.exec_name, themes, LINUX_ROOT));
         install_icons(ui, &app.key, source.as_deref());
         return;
     }
@@ -562,8 +564,8 @@ fn install_app_icon(ui: &mut Ui, app: &App, themes: &mut Option<Vec<String>>) {
             ui.insert_icon(&format!("apps/{}-24", app.key), small);
         }
     } else {
-        let themes = themes.get_or_insert_with(icon_themes);
-        let source = find_icon(icon, themes);
+        let themes = themes.get_or_insert_with(|| icon_themes(""));
+        let source = find_icon(icon, themes, "");
         install_icons(ui, &app.key, source.as_deref());
     }
 }
@@ -610,8 +612,14 @@ pub fn adhoc_key(ui: &mut Ui, candidates: &[String]) -> String {
     if ui.icon(&format!("apps/{}", key)).is_some() {
         return key;
     }
-    let themes = icon_themes();
-    let source = ids.iter().find_map(|id| find_icon(id, &themes).or_else(|| find_icon(last_segment(id), &themes)).or_else(|| find_icon(&id.replace(' ', "-"), &themes)));
+    let mut source = None;
+    for root in ["", LINUX_ROOT] {
+        let themes = icon_themes(root);
+        source = ids.iter().find_map(|id| find_icon(id, &themes, root).or_else(|| find_icon(last_segment(id), &themes, root)).or_else(|| find_icon(&id.replace(' ', "-"), &themes, root)));
+        if source.is_some() {
+            break;
+        }
+    }
     install_icons(ui, &key, source.as_deref());
     key
 }

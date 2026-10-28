@@ -1,0 +1,18 @@
+pkgname=cairo
+pkgver=1.18.2
+pkgdesc="2D graphics library"
+source="https://cairographics.org/releases/cairo-$pkgver.tar.xz"
+sha256="a62b9bb42425e844cc3d6ddde043ff39dbabedd1542eba57a2eb79f85889d45a"
+builddir="cairo-$pkgver"
+depends="pixman freetype libpng zlib fontconfig glib libX11 libxcb libXrender libXext"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Dtests=disabled -Dxlib=enabled -Dxcb=enabled -Dxlib-xcb=disabled -Dfontconfig=enabled -Dfreetype=enabled \
+        -Dpng=enabled -Dzlib=enabled -Dglib=enabled -Dspectre=disabled -Dsymbol-lookup=disabled -Dgtk_doc=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

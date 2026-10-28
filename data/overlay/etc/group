@@ -1,0 +1,10 @@
+root:x:0:
+audio:x:29:root,user
+video:x:44:root,user
+input:x:97:root,user
+messagebus:x:101:messagebus
+user:x:1000:
+inet:x:3003:root,user
+power:x:3004:root,user
+sysconf:x:3005:root,user
+lightdm:x:102:

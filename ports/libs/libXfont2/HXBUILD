@@ -1,0 +1,17 @@
+pkgname=libXfont2
+pkgver=2.0.7
+pkgdesc="X font rasterisation library for X servers"
+source="https://www.x.org/releases/individual/lib/libXfont2-$pkgver.tar.xz"
+sha256="8b7b82fdeba48769b69433e8e3fbb984a5f6bf368b0d5f47abeec49de3e58efb"
+builddir="libXfont2-$pkgver"
+depends="libfontenc freetype xtrans zlib"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --disable-devel-docs --without-fop --disable-ipv6 --disable-snfformat
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

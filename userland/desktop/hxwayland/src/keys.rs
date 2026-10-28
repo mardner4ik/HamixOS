@@ -60,6 +60,7 @@ pub fn translate(code: i32, mods: u32) -> Option<(u32, u32)> {
     }
     let key = match code {
         -1 => 103,
+        -21 => 125,
         -2 => 108,
         -3 => 105,
         -4 => 106,

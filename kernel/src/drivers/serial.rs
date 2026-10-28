@@ -65,6 +65,22 @@ pub fn init() {
     SERIAL.lock().init();
 }
 
+static DEBUG: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+pub fn debug_enabled() -> bool {
+    use core::sync::atomic::Ordering;
+    match DEBUG.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ if crate::memory::cmdline().is_empty() => true,
+        _ => {
+            let on = crate::memory::cmdline_value("console").map(|c| c.contains("ttyS")).unwrap_or(false) || crate::memory::cmdline_value("debug").is_some();
+            DEBUG.store(if on { 1 } else { 2 }, Ordering::Relaxed);
+            on
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! serial_print {
     ($($arg:tt)*) => {
@@ -95,7 +111,8 @@ macro_rules! debug_println {
         {
             if $crate::drivers::video::text_mode::serial_mirror() {
                 $crate::drivers::klog::record(&alloc::format!($($arg)*));
-            } else {
+            }
+            if $crate::drivers::serial::debug_enabled() {
                 $crate::serial_println!($($arg)*);
             }
         }

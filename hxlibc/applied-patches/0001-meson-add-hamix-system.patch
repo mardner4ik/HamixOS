@@ -1,0 +1,25 @@
+--- a/meson.build	2026-09-27 22:03:41.080426059 +0300
++++ b/meson.build	2026-09-27 22:03:41.106977630 +0300
+@@ -209,6 +209,22 @@
+ 	internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', true)
+ 	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
+ 	subdir('sysdeps/linux')
++elif host_machine.system() == 'hamix'
++	provides_bits_syscall_h = true
++	rtld_include_dirs += include_directories('sysdeps/hamix/include')
++	libc_include_dirs += include_directories('sysdeps/hamix/include')
++
++	if not headers_only
++		if get_option('linux_kernel_headers') == ''
++			error('linux_kernel_headers is not set')
++		endif
++		rtld_include_dirs += include_directories(get_option('linux_kernel_headers'))
++		libc_include_dirs += include_directories(get_option('linux_kernel_headers'))
++	endif
++
++	internal_conf.set10('MLIBC_MAP_DSO_SEGMENTS', true)
++	internal_conf.set10('MLIBC_MMAP_ALLOCATE_DSO', true)
++	subdir('sysdeps/hamix')
+ elif host_machine.system() == 'aero'
+ 	rtld_include_dirs += include_directories('sysdeps/aero/include')
+ 	libc_include_dirs += include_directories('sysdeps/aero/include')

@@ -1,5 +1,10 @@
 pub mod tar;
+pub mod media;
+pub mod epoll;
+pub mod procfs;
 pub mod hextfs;
+pub mod iso9660;
+pub mod exfat;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -13,6 +18,30 @@ pub const DEV_CONSOLE: u8 = 2;
 pub const DEV_RANDOM: u8 = 3;
 pub const DEV_FB0: u8 = 4;
 pub const DEV_BLOCK: u8 = 5;
+pub const DEV_DRI: u8 = 6;
+pub const DEV_EVDEV: u8 = 16;
+pub const DEV_DSP: u8 = 8;
+pub const DEV_MIXER: u8 = 9;
+
+pub fn encode_dev(major: u32, minor: u32) -> u64 {
+    let (major, minor) = (major as u64, minor as u64);
+    ((major & 0xffff_f000) << 32) | ((major & 0xfff) << 8) | ((minor & 0xffff_ff00) << 12) | (minor & 0xff)
+}
+
+pub fn device_number(dev: u8) -> u64 {
+    match dev {
+        DEV_NULL => encode_dev(1, 3),
+        DEV_ZERO => encode_dev(1, 5),
+        DEV_CONSOLE => encode_dev(5, 1),
+        DEV_RANDOM => encode_dev(1, 9),
+        DEV_FB0 => encode_dev(29, 0),
+        DEV_DRI => encode_dev(226, 0),
+        DEV_DSP => encode_dev(14, 3),
+        DEV_MIXER => encode_dev(14, 0),
+        d if (DEV_EVDEV..DEV_EVDEV + 16).contains(&d) => encode_dev(13, 64 + (d - DEV_EVDEV) as u32),
+        _ => 0,
+    }
+}
 
 pub const MODE_DIR_DEFAULT: u16 = 0o755;
 pub const MODE_FILE_DEFAULT: u16 = 0o644;
@@ -134,6 +163,7 @@ pub struct Node {
     kind: NodeKind,
     parent: usize,
     owner: u32,
+    group: u32,
     mode: u16,
     ino: u32,
     dirty: u8,
@@ -144,8 +174,10 @@ pub struct Stat {
     pub kind: u32,
     pub mode: u16,
     pub owner: u32,
+    pub group: u32,
     pub size: u64,
     pub dev: u16,
+    pub rdev: u64,
 }
 
 static FILE_CACHE_BYTES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
@@ -178,6 +210,7 @@ impl Vfs {
             kind: NodeKind::Dir(BTreeMap::new()),
             parent: 0,
             owner: 0,
+            group: 0,
             mode: MODE_DIR_DEFAULT,
             ino: 0,
             dirty: 0,
@@ -199,7 +232,7 @@ impl Vfs {
             }
             _ => return,
         };
-        let data = hextfs::load_backing(dev, backing).unwrap_or_default();
+        let data = if media::owns(dev) { media::load(dev, backing) } else { hextfs::load_backing(dev, backing) }.unwrap_or_default();
         self.clock += 1;
         let stamp = self.clock;
         self.cached += data.len();
@@ -290,7 +323,6 @@ impl Vfs {
                     if previous.contains(&id) {
                         freed += body.bytes.len();
                         body.discard();
-                        crate::memory::page_cache::invalidate(id);
                         node.dirty = 0;
                     } else {
                         candidates.insert(id);
@@ -381,26 +413,23 @@ impl Vfs {
         format!("/{}", parts.join("/"))
     }
 
-    pub fn can_write(&self, id: usize, uid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
+    pub fn can_write(&self, id: usize, cred: impl Into<crate::task::Cred>) -> bool {
         let node = &self.nodes[id];
-        if node.owner == uid && node.mode & 0o200 != 0 {
-            return true;
-        }
-        node.mode & 0o002 != 0
+        cred.into().allows(node.owner, node.group, node.mode, 0o2)
     }
 
-    pub fn can_read(&self, id: usize, uid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
+    pub fn can_read(&self, id: usize, cred: impl Into<crate::task::Cred>) -> bool {
         let node = &self.nodes[id];
-        if node.owner == uid {
-            return node.mode & 0o400 != 0;
-        }
-        node.mode & 0o004 != 0
+        cred.into().allows(node.owner, node.group, node.mode, 0o4)
+    }
+
+    pub fn can_exec(&self, id: usize, cred: impl Into<crate::task::Cred>) -> bool {
+        let node = &self.nodes[id];
+        cred.into().allows(node.owner, node.group, node.mode, 0o1)
+    }
+
+    pub fn is_block_device(&self, id: usize) -> bool {
+        matches!(self.nodes[id].kind, NodeKind::Device(DEV_BLOCK))
     }
 
     pub fn stat(&self, id: usize) -> Stat {
@@ -411,7 +440,8 @@ impl Vfs {
             NodeKind::Device(_) => KIND_DEVICE,
             NodeKind::Proc(_) => KIND_PROC,
         };
-        Stat { kind, mode: node.mode, owner: node.owner, size: self.node_size(id) as u64, dev: node.dev }
+        let rdev = if let NodeKind::Device(d) = node.kind { device_number(d) } else { 0 };
+        Stat { kind, mode: node.mode, owner: node.owner, group: node.group, size: self.node_size(id) as u64, dev: node.dev, rdev }
     }
 
     pub fn chmod(&mut self, cwd: usize, path: &str, uid: u32, mode: u16) -> Result<(), &'static str> {
@@ -424,12 +454,30 @@ impl Vfs {
         Ok(())
     }
 
-    pub fn chown(&mut self, cwd: usize, path: &str, uid: u32, new_owner: u32) -> Result<(), &'static str> {
-        if uid != 0 {
-            return Err("permission denied");
-        }
+    pub fn chown(&mut self, cwd: usize, path: &str, cred: impl Into<crate::task::Cred>, owner: Option<u32>, group: Option<u32>) -> Result<(), &'static str> {
         let id = self.resolve(cwd, path).ok_or("no such file or directory")?;
-        self.nodes[id].owner = new_owner;
+        self.chown_node(id, cred, owner, group)
+    }
+
+    pub fn chown_node(&mut self, id: usize, cred: impl Into<crate::task::Cred>, owner: Option<u32>, group: Option<u32>) -> Result<(), &'static str> {
+        let cred = cred.into();
+        if !cred.is_root() {
+            let own = self.nodes[id].owner == cred.uid;
+            let owner_ok = owner.map(|o| o == self.nodes[id].owner).unwrap_or(true);
+            let group_ok = group.map(|g| cred.in_group(g)).unwrap_or(true);
+            if !own || !owner_ok || !group_ok {
+                return Err("permission denied");
+            }
+        }
+        if let Some(o) = owner {
+            self.nodes[id].owner = o;
+        }
+        if let Some(g) = group {
+            self.nodes[id].group = g;
+        }
+        if !cred.is_root() && (owner.is_some() || group.is_some()) {
+            self.nodes[id].mode &= !0o6000;
+        }
         self.touch(id, DIRTY_META);
         Ok(())
     }
@@ -456,10 +504,12 @@ impl Vfs {
             return Err("already exists");
         }
         let dev = self.nodes[parent].dev;
+        let group = self.nodes[parent].group;
         let id = self.push_node(Node {
             kind: NodeKind::Dir(BTreeMap::new()),
             parent,
             owner,
+            group,
             mode: MODE_DIR_DEFAULT,
             ino: 0,
             dirty: DIRTY_META,
@@ -508,10 +558,12 @@ impl Vfs {
             return Err("permission denied");
         }
         let dev = self.nodes[parent].dev;
+        let group = self.nodes[parent].group;
         let id = self.push_node(Node {
             kind: NodeKind::File(FileBody::held(data)),
             parent,
             owner,
+            group,
             mode: MODE_FILE_DEFAULT,
             ino: 0,
             dirty: DIRTY_DATA | DIRTY_META,
@@ -524,7 +576,8 @@ impl Vfs {
     fn mknod(&mut self, cwd: usize, path: &str, kind: NodeKind, owner: u32, mode: u16) -> Result<usize, &'static str> {
         let (parent, name) = self.resolve_parent(cwd, path).ok_or("bad path")?;
         let dev = self.nodes[parent].dev;
-        let id = self.push_node(Node { kind, parent, owner, mode, ino: VOLATILE, dirty: 0, dev });
+        let group = self.nodes[parent].group;
+        let id = self.push_node(Node { kind, parent, owner, group, mode, ino: VOLATILE, dirty: 0, dev });
         self.attach_child(parent, name, id)?;
         Ok(id)
     }
@@ -971,25 +1024,46 @@ pub fn init() {
     }
     let _ = vfs.chmod(root, "/tmp", 0, 0o1777);
 
-    let _ = vfs.create_file(root, "/etc/hostname", b"hamix\n".to_vec(), 0);
-    let _ = vfs.create_file(
-        root,
-        "/etc/passwd",
-        b"root:x:0:0:root:/root:/usr/bin/hsh\nuser:x:1000:1000:user:/home/user:/usr/bin/hsh\n".to_vec(),
-        0,
-    );
-    let shadow_text = format!(
-        "root:{}\nuser:{}\n",
-        crate::users::make_shadow_entry("hamix", 0x9f31a2c1),
-        crate::users::make_shadow_entry("user", 0x1b4d7e93)
-    );
-    let _ = vfs.create_file(root, "/etc/shadow", shadow_text.into_bytes(), 0);
-    let _ = vfs.chmod(root, "/etc/shadow", 0, 0o600);
-    let _ = vfs.create_file(root, "/etc/sudoers", b"user\n".to_vec(), 0);
-    let _ = vfs.chmod(root, "/etc/sudoers", 0, 0o600);
-    let _ = vfs.create_file(root, "/etc/hamix/login.conf", b"shell=/usr/bin/hsh\ndesktop=/usr/bin/hxserver\nautostart_desktop=no\n".to_vec(), 0);
-
     *VFS.lock() = Some(vfs);
+}
+
+pub fn set_linux_nodes(on: bool) {
+    let mut guard = VFS.lock();
+    let Some(vfs) = guard.as_mut() else {
+        return;
+    };
+    let root = vfs.root_id();
+    let tracking = vfs.tracking;
+    vfs.tracking = false;
+    if on {
+        device_nodes(vfs, root);
+    }
+    vfs.tracking = tracking;
+}
+
+fn device_nodes(vfs: &mut Vfs, root: usize) {
+    for dir in ["/dev/dri", "/dev/input"] {
+        if !vfs.exists(root, dir) {
+            if let Ok(id) = vfs.mkdir(root, dir, 0) {
+                vfs.nodes[id].ino = VOLATILE;
+                vfs.nodes[id].dirty = 0;
+            }
+        }
+    }
+    if !vfs.exists(root, "/dev/dri/card0") {
+        let _ = vfs.mknod_device(root, "/dev/dri/card0", DEV_DRI);
+    }
+    for (path, dev) in [("/dev/dsp", DEV_DSP), ("/dev/mixer", DEV_MIXER)] {
+        if !vfs.exists(root, path) {
+            let _ = vfs.mknod_device(root, path, dev);
+        }
+    }
+    for n in 0..crate::drivers::input::evdev::COUNT {
+        let path = format!("/dev/input/event{}", n);
+        if !vfs.exists(root, &path) {
+            let _ = vfs.mknod_device(root, &path, DEV_EVDEV + n as u8);
+        }
+    }
 }
 
 pub fn create_volatile_nodes() {
@@ -1012,6 +1086,7 @@ pub fn create_volatile_nodes() {
             let _ = vfs.mknod_device(root, path, dev);
         }
     }
+    device_nodes(vfs, root);
     for (path, value) in [
         ("/proc/sys/fs/inotify/max_user_watches", "524288\n"),
         ("/proc/sys/fs/inotify/max_user_instances", "128\n"),
@@ -1036,11 +1111,10 @@ pub fn create_volatile_nodes() {
     if !vfs.exists(root, "/proc/self") {
         let _ = vfs.mknod(root, "/proc/self", NodeKind::Dir(BTreeMap::new()), 0, MODE_DIR_DEFAULT);
     }
-    let procs: [(&str, fn() -> String); 20] = [
+    let procs: [(&str, fn() -> String); 18] = [
+        ("/proc/hxprof", crate::prof::report),
         ("/proc/interrupts", proc_interrupts),
         ("/proc/modules_detail", proc_modules_detail),
-        ("/proc/uptime", proc_uptime),
-        ("/proc/meminfo", proc_meminfo),
         ("/proc/version", proc_version),
         ("/proc/cpuinfo", proc_cpuinfo),
         ("/proc/dmesg", proc_dmesg),
@@ -1052,7 +1126,6 @@ pub fn create_volatile_nodes() {
         ("/proc/gpu", proc_gpu),
         ("/proc/mouse", proc_mouse),
         ("/proc/cmdline", proc_cmdline),
-        ("/proc/stat", proc_stat),
         ("/proc/hxinit", proc_hxinit),
         ("/proc/audio", proc_audio),
         ("/proc/self/exe", proc_self_exe),
@@ -1093,6 +1166,7 @@ pub fn refresh_block_nodes() {
     for volume in volumes {
         let _ = vfs.mknod_device(0, &format!("/dev/{}", volume.name), DEV_BLOCK);
     }
+    crate::drivers::block_node::populate_sysfs(vfs);
 }
 
 pub fn load_initramfs(addr: usize, size: usize) {
@@ -1126,29 +1200,7 @@ fn proc_self_maps() -> String {
     out
 }
 
-fn proc_uptime() -> String {
-    let ms = crate::task::uptime_ms();
-    format!("{}.{:02}\n", ms / 1000, (ms % 1000) / 10)
-}
 
-fn proc_meminfo() -> String {
-    let (free, total) = crate::memory::frame::memory_info();
-    let (heap_free, heap_total) = crate::memory::heap_stats();
-    let cached = file_cache_bytes();
-    let (vmalloc_bytes, vmalloc_blocks) = crate::memory::vmalloc::stats();
-    format!(
-        "MemTotal:   {:>10} kB\nMemFree:    {:>10} kB\nMemUsed:    {:>10} kB\nKernelHeap: {:>10} kB\nHeapFree:   {:>10} kB\nVmalloc:    {:>10} kB\nVmallocBlk: {:>10}\nFileCache:  {:>10} kB\nVfsNodes:   {:>10}\n",
-        total / 1024,
-        free / 1024,
-        (total - free) / 1024,
-        heap_total / 1024,
-        heap_free / 1024,
-        vmalloc_bytes / 1024,
-        vmalloc_blocks,
-        cached / 1024,
-        vfs_node_count()
-    )
-}
 
 fn proc_version() -> String {
     format!("HamixOS version 0.6.1 (rustc nightly, no_std) #1 {}\n", crate::arch::MACHINE)
@@ -1172,9 +1224,10 @@ fn proc_mounts() -> String {
 }
 
 fn proc_partitions() -> String {
-    let mut out = String::new();
+    let mut out = String::from("major minor  #blocks  name\n\n");
     for volume in crate::drivers::block::volumes() {
-        out.push_str(&format!("{}\t{}\t{}\n", volume.name, volume.offset, volume.sectors));
+        let minor = crate::drivers::block_node::minor_of(&volume.name).unwrap_or(0);
+        out.push_str(&format!("{:>4} {:>7} {:>10} {}\n", crate::drivers::block_node::SCSI_DISK_MAJOR, minor, volume.sectors / 2, volume.name));
     }
     out
 }
@@ -1293,9 +1346,6 @@ fn proc_cmdline() -> String {
     format!("{}\n", crate::memory::cmdline())
 }
 
-fn proc_stat() -> String {
-    crate::syscall::cpu_stats_text()
-}
 
 fn proc_hxinit() -> String {
     crate::hxinit::status_text()

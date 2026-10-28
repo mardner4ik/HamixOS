@@ -1,0 +1,17 @@
+pkgname=libXinerama
+pkgver=1.1.5
+pkgdesc="Xinerama extension library"
+source="https://www.x.org/releases/individual/lib/libXinerama-$pkgver.tar.xz"
+sha256="5094d1f0fcc1828cb1696d0d39d9e866ae32520c54d01f618f1a3c1e30c2085c"
+builddir="libXinerama-$pkgver"
+depends="libXext"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --enable-malloc0returnsnull
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

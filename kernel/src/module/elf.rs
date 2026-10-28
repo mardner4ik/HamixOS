@@ -128,25 +128,6 @@ pub fn load(blob: &[u8]) -> Result<Loaded, &'static str> {
         sections.push(read::<SectionHeader>(blob, header.shoff as usize + i * header.shentsize as usize)?);
     }
 
-    let mut placement = alloc::vec![u64::MAX; sections.len()];
-    let mut text_bytes = 0usize;
-    let mut data_bytes = 0usize;
-    let mut cursor = 0usize;
-    for (i, s) in sections.iter().enumerate() {
-        if s.flags & SHF_ALLOC == 0 || (s.kind != SHT_PROGBITS && s.kind != SHT_NOBITS) {
-            continue;
-        }
-        let align = (s.align.max(1) as usize).min(4096);
-        cursor = cursor.div_ceil(align) * align;
-        placement[i] = cursor as u64;
-        cursor += s.size as usize;
-        if s.flags & SHF_EXECINSTR != 0 {
-            text_bytes += s.size as usize;
-        } else {
-            data_bytes += s.size as usize;
-        }
-    }
-
     let symtab_index = sections.iter().position(|s| s.kind == SHT_SYMTAB).ok_or("module: no symbol table")?;
     let symtab = &sections[symtab_index];
     let strtab = *sections.get(symtab.link as usize).ok_or("module: symbol table has no string table")?;
@@ -161,6 +142,29 @@ pub fn load(blob: &[u8]) -> Result<Loaded, &'static str> {
         syms.push(read::<Sym>(blob, symtab.offset as usize + i * core::mem::size_of::<Sym>())?);
     }
 
+    let (got_slots, stub_slots) = count_slots(blob, &sections, &syms);
+    let loadable = |s: &SectionHeader| s.flags & SHF_ALLOC != 0 && (s.kind == SHT_PROGBITS || s.kind == SHT_NOBITS);
+    let mut placement = alloc::vec![u64::MAX; sections.len()];
+    let mut cursor = 0usize;
+    for executable in [true, false] {
+        for (i, s) in sections.iter().enumerate() {
+            if !loadable(s) || (s.flags & SHF_EXECINSTR != 0) != executable {
+                continue;
+            }
+            let align = (s.align.max(1) as usize).min(4096);
+            cursor = cursor.div_ceil(align) * align;
+            placement[i] = cursor as u64;
+            cursor += s.size as usize;
+        }
+        if executable {
+            cursor = cursor.div_ceil(16) * 16 + stub_slots * reloc::STUB_SIZE;
+            cursor = cursor.div_ceil(4096) * 4096;
+        }
+    }
+    let text_end = placement.iter().zip(sections.iter()).filter(|(p, s)| **p != u64::MAX && s.flags & SHF_EXECINSTR != 0).map(|(p, s)| *p as usize + s.size as usize).max().unwrap_or(0);
+    let stub_at = text_end.div_ceil(16) * 16;
+    let text_end = stub_at + stub_slots * reloc::STUB_SIZE;
+    let data_start = text_end.div_ceil(4096) * 4096;
     let mut commons = cursor;
     for sym in syms.iter() {
         if sym.shndx == SHN_COMMON {
@@ -169,10 +173,10 @@ pub fn load(blob: &[u8]) -> Result<Loaded, &'static str> {
             commons += sym.size as usize;
         }
     }
-    let (got_slots, stub_slots) = count_slots(blob, &sections, &syms);
     let got_at = commons.div_ceil(8) * 8;
-    let stub_at = (got_at + got_slots * 8).div_ceil(16) * 16;
-    let total = stub_at + stub_slots * reloc::STUB_SIZE;
+    let total = got_at + got_slots * 8;
+    let text_bytes = text_end;
+    let data_bytes = total - data_start;
     if total == 0 {
         return Err("module: object has nothing to load");
     }

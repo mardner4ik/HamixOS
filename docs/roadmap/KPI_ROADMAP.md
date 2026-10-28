@@ -1,6 +1,6 @@
 # План розширення HamixOS KPI
 
-`docs/MODULES.md` описує те, що вже є: завантажувач ET_REL-модулів, шим
+`docs/architecture/MODULES.md` описує те, що вже є: завантажувач ET_REL-модулів, шим
 `kernel/src/module/kpi.rs`, крейт `sdk/hamix_kpi` і три драйвери
 (`example-nic`, `virtio-gpu`, `intel-display`). Цей документ -- про те, куди
 цей KPI росте далі: **шість напрямків**, у порядку, в якому їх має сенс
@@ -54,7 +54,7 @@ framebuffer, один `set_mode(w, h)`, один список частот. Це
   більше не вигадує список зі `STANDARD`, якщо модуль його дає.
 * `CAP_SCALE` -- модуль повідомляє, що менші режими він робить
   масштабуванням, а не зміною таймінгів панелі.
-* `drivers/intel-display` реалізує `set_mode` через panel fitter (gen6-gen8)
+* `modules/intel-display` реалізує `set_mode` через panel fitter (gen6-gen8)
   і pipe scaler (gen9): змінюється `PIPESRC` + stride площини, таймінги
   панелі не чіпаються взагалі, PLL не чіпається взагалі.
 
@@ -63,7 +63,7 @@ framebuffer, один `set_mode(w, h)`, один список частот. Це
 1. `hamix_display_connectors(out, max)` + `ConnectorDesc { kind, id, status,
    native_w, native_h, edid_len }`: eDP/LVDS/HDMI/DP/VGA, підключено чи ні.
    `set_mode` отримує `connector_id` першим аргументом (ABI 3).
-2. Таблиця режимів з EDID, а не зі сталого масиву: `drivers/intel-display/src/edid.rs`
+2. Таблиця режимів з EDID, а не зі сталого масиву: `modules/intel-display/src/edid.rs`
    вже читає блок 128 байт через GMBUS -- лишається розібрати детальні
    дескриптори й стандартні таймінги і віддати їх у `mode_list`.
 3. Гаряче підключення: `hamix_display_hotplug()` -- зворотний виклик модуля
@@ -100,14 +100,14 @@ framebuffer, один `set_mode(w, h)`, один список частот. Це
 > * `/proc/interrupts` і команда `interrupts` показують вектор, вид
 >   (pic/msi), лічильник і модуль-власник.
 >
-> Перевірено в QEMU: `drivers/virtio-gpu` бере лінію 11 (вектор 0x2b),
+> Перевірено в QEMU: `modules/virtio-gpu` бере лінію 11 (вектор 0x2b),
 > `/proc/interrupts` показує зростаючий лічильник, spurious -- 0.
 >
 > Не зроблено в межах пункту: програмування **таблиці MSI-X** (пристрій із
 > самим лише 0x11 лишається на INTx) і IOAPIC (використовується 8259).
 
 **Де зараз (початковий опис).** Переривань у KPI немає взагалі -- це записано в
-`docs/MODULES.md` як свідома відсутність. IDT у `kernel/src/arch/x86_64/idt.rs`
+`docs/architecture/MODULES.md` як свідома відсутність. IDT у `kernel/src/arch/x86_64/idt.rs`
 веде вектори 34-47 у заглушки, а кожен драйвер (e1000, Yukon, AR9285,
 virtio-gpu) *опитує* залізо з `poll`-колбека, який реєструє
 `hamix_claim_device`.
@@ -146,14 +146,14 @@ Linux-драйвері обробник переривання -- не дета�
 > * `DeviceHandle` (PCI / платформа), `hamix_pci_find_class`,
 >   `hamix_platform_find`, `hamix_bus_publish` і рядки `.ids` виду
 >   `class:CC:SS:PP` та `<bus> vendor:device`.
-> * `CLASS_BLOCK` (`hamix_register_block`) -- `drivers/ahci` замінює
->   вбудований AHCI; модулі з `early = 1` вантажаться з `/boot/kmods.tar`
+> * `CLASS_BLOCK` (`hamix_register_block`) -- `modules/ahci` замінює
+>   вбудований AHCI; модулі з `early = 1` вантажаться з `/boot/initfs.tar`
 >   (GRUB `module2 ... kmods`) ще до монтування кореня, тож встановлена
 >   система стартує з `ahci.ko`.
 > * `CLASS_INPUT` (`hamix_input_key/pointer/absolute`), `CLASS_AUDIO`
 >   (`hamix_register_audio`).
 > * `CLASS_USB_HCD`: `hamix_usb_register_hcd`, `hamix_usb_add_device`,
->   `hamix_usb_remove_device`, `hamix_usb_hid_report`. `drivers/xhci` --
+>   `hamix_usb_remove_device`, `hamix_usb_hid_report`. `modules/xhci` --
 >   xHCI як модуль: передача від BIOS, скидання, DCBAA і scratchpad-и,
 >   кільця команд/подій, скидання порту, Address Device, дескриптори,
 >   HID boot-протокол для клавіатур і мишей, MSI/INTx, гаряче підключення.
@@ -204,12 +204,12 @@ bus/device/function. Усе інше залізо (AHCI, HDA, UHCI/USB-HID, та
 >   capability, `request_irq` поверх `hamix_request_irq` (MSI або INTx),
 >   `dma_alloc_coherent`/`dma_map_single`, `sk_buff` з DMA-пулом, NAPI
 >   через чергу робіт, `net_device` -> `hamix_register_netdev`.
-> * `build.sh` збирає C-модулі clang-ом (`drivers/<name>/src/*.c` без
+> * `build.sh` збирає C-модулі clang-ом (`modules/<name>/src/*.c` без
 >   `Cargo.toml`), лінкує `ld.lld -r` в один ET_REL і генерує `.ids` з
 >   `MODULE_DEVICE_TABLE` (`tools/linuxkpi/device-ids.py`).
-> * `drivers/e1000e` -- драйвер Intel e1000e з Linux v6.6. Від апстріму
+> * `modules/e1000e` -- драйвер Intel e1000e з Linux v6.6. Від апстріму
 >   відрізняється лише видаленим: без `ethtool.c` і `ptp.c` і без трьох
->   рядків, що їх викликали. `tools/linuxkpi/check-upstream.sh drivers/e1000e`
+>   рядків, що їх викликали. `tools/linuxkpi/check-upstream.sh modules/e1000e`
 >   завантажує апстрім і перевіряє, що немає жодного доданого чи
 >   переписаного рядка.
 >
@@ -280,7 +280,7 @@ sysfs/debugfs/firmware-loader, компілюється й працює", а **�
 >    (`ok`/`bad`/`unsigned`) видно в `modinfo`.
 
 **Де зараз (початковий опис).** Модуль виконується в ring 0 з тими ж правами, що ядро; сторінки
-образу RWX (`docs/MODULES.md`: NX не увімкнено, `boot.S` ставить лише
+образу RWX (`docs/architecture/MODULES.md`: NX не увімкнено, `boot.S` ставить лише
 EFER.LME); `hamix_ioremap` повертає фізичну адресу як є, тож модуль може
 відобразити **будь-що**; `poll`-колбек без таймауту; вивантаження живого
 драйвера не зупиняє DMA.
@@ -303,7 +303,7 @@ EFER.LME); `hamix_ioremap` повертає фізичну адресу як є,
    позначається несправним, його claim-и скидаються, і система далі працює
    без нього (замість зависання).
 5. Підпис: `module.sig` поряд із `.ko`, перевірка тим самим кодом, який
-   `apps/pantry/src/crypto.rs` уже використовує для пакетів. Спершу -- режим
+   `userland/core/pantry/src/crypto.rs` уже використовує для пакетів. Спершу -- режим
    попередження в `dmesg`, і тільки потім -- обов'язковий.
 
 **Зроблено, коли:** модуль, який навмисно пише за межі свого BAR або
@@ -336,7 +336,7 @@ EFER.LME); `hamix_ioremap` повертає фізичну адресу як є,
 >    масштабування, `edid=0` -- читання EDID.
 
 **Де зараз (початковий опис).** Модуль завантажується один раз на старті (`modules`-юніт у
-`kernel/src/hxinit.rs`), `module::unload` формально існує, але `docs/MODULES.md`
+`kernel/src/hxinit.rs`), `module::unload` формально існує, але `docs/architecture/MODULES.md`
 чесно каже: ніщо не зупиняє пристрій, який далі пише в звільнену DMA-пам'ять.
 Діагностика -- `modules` і `/proc/modules`.
 

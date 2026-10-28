@@ -1,0 +1,22 @@
+pkgname=wayland
+pkgver=1.23.1
+pkgdesc="Wayland protocol libraries"
+source="https://gitlab.freedesktop.org/wayland/wayland/-/releases/$pkgver/downloads/wayland-$pkgver.tar.xz"
+sha256="864fb2a8399e2d0ec39d56e9d9b753c093775beadc6022ce81f441929a81e5ed"
+builddir="wayland-$pkgver"
+depends="libffi expat"
+
+build() {
+    env -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR -u CFLAGS -u CPPFLAGS -u LDFLAGS CC=gcc \
+        meson setup native --prefix="$srcdir/native-root" -Dlibraries=false -Dscanner=true -Ddocumentation=false -Dtests=false -Ddtd_validation=false
+    meson compile -C native
+    meson install -C native
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dbuild.pkg_config_path="$srcdir/native-root/lib/pkgconfig:$srcdir/native-root/lib64/pkgconfig:$srcdir/native-root/share/pkgconfig" \
+        -Ddefault_library=shared -Ddocumentation=false -Dtests=false -Ddtd_validation=false -Dscanner=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

@@ -1,0 +1,9 @@
+[package]
+name = "hxclient"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hxstd = { path = "../hxstd" }
+vellum = { path = "../../../crates/vellum" }
+hxproto = { path = "../../../crates/hxproto" }

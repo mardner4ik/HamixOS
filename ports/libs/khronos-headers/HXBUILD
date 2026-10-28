@@ -1,0 +1,19 @@
+pkgname=khronos-headers
+pkgver=20240926
+pkgdesc="EGL and KHR headers from the Khronos EGL registry (no X11 by default)"
+source="https://github.com/KhronosGroup/EGL-Registry/archive/29c4314e0ef04c730992d295f91b76635019fbba.tar.gz"
+sha256="33e9535351fa5891c0e8b83c8f68189ffcc79b3aa54d8b031b8236b6ef94aa86"
+builddir="EGL-Registry-29c4314e0ef04c730992d295f91b76635019fbba"
+depends=""
+
+build() {
+    true
+}
+
+package() {
+    install -Dm644 api/KHR/khrplatform.h "$pkgdir/usr/include/KHR/khrplatform.h"
+    for h in egl.h eglext.h; do
+        install -Dm644 "api/EGL/$h" "$pkgdir/usr/include/EGL/$h"
+    done
+    { printf '#ifndef EGL_NO_X11\n#define EGL_NO_X11\n#endif\n'; cat api/EGL/eglplatform.h; } > "$pkgdir/usr/include/EGL/eglplatform.h"
+}

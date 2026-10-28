@@ -1,10 +1,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::syscall::{copy_out, user_cstr, user_slice, EAGAIN, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM};
+use crate::usercopy::{copy_out, user_cstr, user_slice};
+use crate::errno::{EAGAIN, EBADF, ECHILD, EFAULT, EINVAL, ENOENT, ENOEXEC, ENOMEM};
 use crate::arch::paging;
 use crate::task::switch::{InterruptFrame, FX_SIZE};
-use crate::task::{self, elf, Abi, OpenFile, Pid, ReapResult, SigAction};
+use crate::task::{self, elf, OpenFile, Pid, ReapResult, SigAction};
 
 const CLONE_VM: u64 = 0x100;
 const CLONE_SIGHAND: u64 = 0x800;
@@ -15,6 +16,7 @@ const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
 const CLONE_CHILD_CLEARTID: u64 = 0x200000;
 const CLONE_CHILD_SETTID: u64 = 0x1000000;
+const CLONE_NAMESPACES: u64 = 0x20000 | 0x0200_0000 | 0x0400_0000 | 0x0800_0000 | 0x1000_0000 | 0x2000_0000 | 0x4000_0000 | 0x80;
 
 const WNOHANG: u64 = 1;
 const WNOWAIT: u64 = 0x0100_0000;
@@ -54,6 +56,9 @@ pub fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u
     if thread && flags & (CLONE_VM | CLONE_SIGHAND) != (CLONE_VM | CLONE_SIGHAND) {
         return EINVAL;
     }
+    if flags >> 32 != 0 || flags & CLONE_NAMESPACES != 0 || (flags & CLONE_SIGHAND != 0 && flags & CLONE_VM == 0) {
+        return EINVAL;
+    }
     let fs_base = if flags & CLONE_SETTLS != 0 && !frame.set_child_tls(tls) { Some(tls) } else { crate::arch::context::save_tls() };
     if thread {
         let tid = task::clone_task(true, None, &frame, &fx, |leader, current, child| {
@@ -62,6 +67,11 @@ pub fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u
             child.vt = leader.vt;
             child.uid = leader.uid;
             child.ruid = leader.ruid;
+            child.suid = leader.suid;
+            child.egid = leader.egid;
+            child.rgid = leader.rgid;
+            child.sgid = leader.sgid;
+            child.groups = leader.groups.clone();
             child.cwd = leader.cwd.clone();
             child.abi = leader.abi;
             child.exe = leader.exe.clone();
@@ -83,7 +93,13 @@ pub fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u
         }
         return tid as i64;
     }
-    let Some(aspace) = task::with_current(|t| t.aspace.as_ref().and_then(|a| a.duplicate())) else {
+    let single = task::group_of(task::current_pid()).len() <= 1;
+    let source = task::with_current(|t| t.aspace.as_ref().map(|a| a as *const crate::memory::aspace::AddressSpace));
+    let copied = source.and_then(|a| {
+        let a = unsafe { &*a };
+        if single { a.duplicate_cow() } else { a.duplicate() }
+    });
+    let Some(aspace) = copied else {
         return ENOMEM;
     };
     if flags & CLONE_CHILD_SETTID != 0 || flags & CLONE_PARENT_SETTID != 0 {
@@ -103,7 +119,11 @@ pub fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u
         child.vt = leader.vt;
         child.uid = leader.uid;
         child.ruid = leader.ruid;
-        child.root_ticket_until = leader.root_ticket_until;
+        child.suid = leader.suid;
+        child.egid = leader.egid;
+        child.rgid = leader.rgid;
+        child.sgid = leader.sgid;
+        child.groups = leader.groups.clone();
         child.cwd = leader.cwd.clone();
         child.abi = leader.abi;
         child.exe = leader.exe.clone();
@@ -189,7 +209,39 @@ pub fn sys_execve(path_ptr: u64, argv_ptr: u64, envp_ptr: u64) -> i64 {
     if raw_path.is_empty() {
         return ENOENT;
     }
-    let path = if crate::syscall::linux_abi() { super::base::guest_path(&crate::syscall::absolute(&raw_path)) } else { crate::syscall::absolute(&raw_path) };
+    let path = if crate::syscall::linux_abi() { crate::linux::paths::guest_path(&crate::syscall::absolute(&raw_path)) } else { crate::syscall::absolute(&raw_path) };
+    execve_path(path, raw_path, argv_ptr, envp_ptr)
+}
+
+pub fn sys_execveat(dirfd: u64, path_ptr: u64, argv_ptr: u64, envp_ptr: u64, flags: u64) -> i64 {
+    const AT_EMPTY_PATH: u64 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+    if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
+        return EINVAL;
+    }
+    let raw_path = match user_cstr(path_ptr) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let path = if raw_path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return ENOENT;
+        }
+        match crate::syscall::base::fd_path(dirfd) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    } else {
+        match crate::syscall::base::resolve_at(dirfd, path_ptr) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    };
+    let name = if raw_path.is_empty() { path.clone() } else { raw_path };
+    execve_path(path, name, argv_ptr, envp_ptr)
+}
+
+fn execve_path(path: String, raw_path: String, argv_ptr: u64, envp_ptr: u64) -> i64 {
     let path = self_exe(&path).unwrap_or(path);
     let mut argv = match read_string_array(argv_ptr) {
         Ok(a) => a,
@@ -251,12 +303,20 @@ fn exec_image(path: &str, argv: Vec<String>, envp: Vec<String>) -> i64 {
         file.release();
     }
     task::ipc::unmap_range(pid, paging::USER_BASE, paging::USER_END - paging::USER_BASE);
-    let crate::task::UserImage { aspace, entry, stack, brk, abi, exe, env, args } = image;
+    let crate::task::UserImage { aspace, entry, stack, brk, abi, exe, env, args, set_uid, set_gid } = image;
     if let Some(mut old) = task::replace_aspace(aspace) {
         old.destroy();
     }
     task::with_current(|t| {
         t.name = name.clone();
+        if let Some(owner) = set_uid {
+            t.uid = owner;
+        }
+        if let Some(group) = set_gid {
+            t.egid = group;
+        }
+        t.suid = t.uid;
+        t.sgid = t.egid;
         t.abi = abi;
         t.exe = exe;
         t.env = env;
@@ -292,7 +352,7 @@ fn exec_image(path: &str, argv: Vec<String>, envp: Vec<String>) -> i64 {
         let fx = unsafe { core::slice::from_raw_parts_mut(fx_ptr as *mut u8, FX_SIZE) };
         crate::arch::context::reset_fx(fx);
     }
-    crate::debug_println!("execve: pid {} -> {} ({})", pid, name, if abi == Abi::Linux { "linux" } else { "native" });
+    crate::debug_println!("execve: pid {} -> {} ({})", pid, name, abi.name());
     0
 }
 
@@ -318,7 +378,7 @@ pub fn sys_wait4(pid: u64, status: u64, options: u64, rusage: u64) -> i64 {
         match task::reap_matching(me, wait_filter(pid, me), options & WNOWAIT == 0) {
             ReapResult::Exited(child, code, signal) => {
                 if status != 0 {
-                    let word = super::signal::wait_status(code, signal);
+                    let word = crate::syscall::signal::wait_status(code, signal);
                     if copy_out(status, 4, &word.to_le_bytes()) < 0 {
                         return EFAULT;
                     }
@@ -333,8 +393,8 @@ pub fn sys_wait4(pid: u64, status: u64, options: u64, rusage: u64) -> i64 {
                 if options & WNOHANG != 0 {
                     return 0;
                 }
-                if super::signal::pending() {
-                    return super::signal::EINTR;
+                if crate::syscall::signal::pending() {
+                    return crate::syscall::signal::EINTR;
                 }
                 task::block(task::WAIT_CHILD, Some(task::TICK_HZ / 10), task::input_seq());
                 task::check_killed();
@@ -348,6 +408,10 @@ pub fn sys_waitid(idtype: u64, id: u64, info: u64, options: u64) -> i64 {
         0 => -1,
         1 => id as i64,
         2 => -(id as i64),
+        3 => match crate::syscall::special::pidfd_of_fd(id) {
+            Some(pid) => pid as i64,
+            None => return EBADF,
+        },
         _ => return EINVAL,
     };
     let me = task::current_pid();
@@ -375,8 +439,8 @@ pub fn sys_waitid(idtype: u64, id: u64, info: u64, options: u64) -> i64 {
                     }
                     return 0;
                 }
-                if super::signal::pending() {
-                    return super::signal::EINTR;
+                if crate::syscall::signal::pending() {
+                    return crate::syscall::signal::EINTR;
                 }
                 task::block(task::WAIT_CHILD, Some(task::TICK_HZ / 10), task::input_seq());
                 task::check_killed();

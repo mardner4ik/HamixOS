@@ -1,0 +1,15 @@
+[package]
+name = "hx-upower"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hx-upower"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../../../userland/libs/hxstd" }
+hxdbus = { path = "../hxdbus" }
+
+[package.metadata.hamix]
+install = "libexec"

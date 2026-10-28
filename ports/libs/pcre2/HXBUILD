@@ -1,0 +1,16 @@
+pkgname=pcre2
+pkgver=10.44
+pkgdesc="Perl-compatible regular expressions"
+source="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-$pkgver/pcre2-$pkgver.tar.bz2"
+sha256="d34f02e113cf7193a1ebf2770d3ac527088d485d4e047ed10e5d217c6ef5de96"
+builddir="pcre2-$pkgver"
+depends="zlib"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --enable-shared --disable-static --enable-unicode --enable-pcre2-16 --enable-pcre2-32 --disable-jit
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

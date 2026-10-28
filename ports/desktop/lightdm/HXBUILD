@@ -1,0 +1,26 @@
+pkgname=lightdm
+pkgver=1.32.0
+pkgdesc="Light display manager (X greeter, X and Wayland sessions, Nook session)"
+source="https://github.com/canonical/lightdm/releases/download/$pkgver/lightdm-$pkgver.tar.xz"
+sha256="12f5ab432748f0387c7cf8b94430495a558a035a4f8465e5181af6faff133e4b"
+builddir="lightdm-$pkgver"
+depends="glib libxcb libXdmcp linux-pam libgcrypt dbus xorg-server"
+
+build() {
+    mkdir -p hx-tools
+    printf '#!/bin/sh\necho "intltool-update GNU 0.51.0"\n' > hx-tools/intltool-update
+    printf '#!/bin/sh\nfor last; do :; done\neval "input=\\${$(($#-1))}"\ncp "$input" "$last"\n' > hx-tools/intltool-merge
+    printf '#!/bin/sh\nexit 0\n' > hx-tools/intltool-extract
+    chmod +x hx-tools/*
+    export PATH="$PWD/hx-tools:$PATH:$HX_ROOT/usr/bin"
+    ITSTOOL=/bin/true CFLAGS="$CFLAGS -D__linux__=1" ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --libexecdir=/usr/libexec --disable-static --disable-tests --disable-liblightdm-qt5 --disable-introspection --disable-vala \
+        --disable-gtk-doc --disable-libaudit --disable-nls --with-greeter-session=lightdm-gtk-greeter --with-greeter-user=lightdm \
+        --with-libgcrypt-prefix="$HX_ROOT/usr"
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/usr/share/help" "$pkgdir/usr/share/gtk-doc" "$pkgdir/etc/init" "$pkgdir/etc/apparmor.d"
+}

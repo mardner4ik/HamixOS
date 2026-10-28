@@ -91,6 +91,13 @@ fn secondary_display(device: &PciDevice, devices: &[PciDevice]) -> bool {
         && devices.iter().any(|d| d.class == 0x03 && d.address.function == 0 && d.address.bus == device.address.bus && d.address.device == device.address.device)
 }
 
+fn link(vfs: &mut crate::fs::Vfs, path: &str, target: &str) {
+    let mut body = Vec::from(crate::fs::LINK_MAGIC);
+    body.extend_from_slice(target.as_bytes());
+    let _ = vfs.write(0, path, &body, false, 0);
+    let _ = vfs.chmod(0, path, 0, 0o777);
+}
+
 pub fn populate() {
     let devices = pci::devices();
     let mut guard = crate::fs::VFS.lock();
@@ -101,6 +108,9 @@ pub fn populate() {
     vfs.tracking = false;
     let _ = vfs.mkdir_all(PCI_DEVICES, 0);
     let _ = vfs.mkdir_all(DRM_CLASS, 0);
+    let _ = vfs.mkdir_all("/sys/dev/char", 0);
+    let _ = vfs.mkdir_all("/sys/dev/block", 0);
+    let _ = vfs.mkdir_all("/sys/class/input", 0);
     let mut card = 0usize;
     for device in devices.iter() {
         if secondary_display(device, &devices) {
@@ -109,19 +119,95 @@ pub fn populate() {
         let files = attributes(device);
         let base = format!("{}/{}", PCI_DEVICES, slot(device));
         put(vfs, &base, &files);
+        link(vfs, &format!("{}/subsystem", base), "/sys/bus/pci");
         if device.class != 0x03 {
             continue;
         }
-        let drm = format!("{}/card{}", DRM_CLASS, card);
-        put(vfs, &format!("{}/device", drm), &files);
-        let _ = vfs.mkdir_all(&format!("{}/device/drm/card{}", drm, card), 0);
-        let _ = vfs.mkdir_all(&format!("{}/drm/card{}", base, card), 0);
-        let _ = vfs.write(0, &format!("{}/device/power/runtime_status", drm), b"active\n", false, 0);
-        let _ = vfs.write(0, &format!("{}/dev", drm), format!("226:{}\n", card).as_bytes(), false, 0);
-        let _ = vfs.write(0, &format!("{}/uevent", drm), format!("MAJOR=226\nMINOR={}\nDEVNAME=dri/card{}\nDEVTYPE=drm_minor\n", card, card).as_bytes(), false, 0);
+        let dir = format!("{}/drm/card{}", base, card);
+        let _ = vfs.mkdir_all(&format!("{}/power", base), 0);
+        let _ = vfs.write(0, &format!("{}/power/runtime_status", base), b"active\n", false, 0);
+        let _ = vfs.write(0, &format!("{}/boot_vga", base), if card == 0 { b"1\n" } else { b"0\n" }, false, 0);
+        put(
+            vfs,
+            &dir,
+            &[
+                ("dev", format!("226:{}\n", card)),
+                ("uevent", format!("MAJOR=226\nMINOR={}\nDEVNAME=dri/card{}\nDEVTYPE=drm_minor\n", card, card)),
+            ],
+        );
+        link(vfs, &format!("{}/subsystem", dir), "/sys/class/drm");
+        link(vfs, &format!("{}/device", dir), &base);
+        link(vfs, &format!("{}/card{}", DRM_CLASS, card), &dir);
+        link(vfs, &format!("/sys/dev/char/226:{}", card), &dir);
         card += 1;
     }
+    populate_input(vfs);
     vfs.tracking = tracking;
+}
+
+fn populate_input(vfs: &mut crate::fs::Vfs) {
+    use crate::drivers::input::evdev;
+    let dmi = "dmi:bvnHamixOS:bvr1:svnHamixOS:pnPC:pvr1:rvnHamixOS:rnPC:rvr1:cvnHamixOS:ct3:cvr1:";
+    put(
+        vfs,
+        "/sys/devices/virtual/dmi/id",
+        &[
+            ("uevent", format!("MODALIAS={}\n", dmi)),
+            ("modalias", format!("{}\n", dmi)),
+            ("sys_vendor", String::from("HamixOS\n")),
+            ("product_name", String::from("PC\n")),
+            ("chassis_type", String::from("3\n")),
+        ],
+    );
+    let _ = vfs.mkdir_all("/sys/class/dmi", 0);
+    link(vfs, "/sys/class/dmi/id", "/sys/devices/virtual/dmi/id");
+    for (n, info) in evdev::DEVICES.iter().enumerate() {
+        let base = format!("/sys/devices/virtual/input/input{}", n);
+        let keys = evdev::key_bits(n);
+        let ev = evdev::hex_words(&[evdev::ev_bits(n)]);
+        let key = evdev::hex_words(&keys);
+        let rel = evdev::hex_words(&[evdev::rel_bits(n)]);
+        let abs = evdev::hex_words(&[evdev::abs_bits(n)]);
+        let product = format!("{:x}/{:x}/{:x}/{:x}", info.bus, info.vendor, info.product, info.version);
+        put(
+            vfs,
+            &base,
+            &[
+                ("name", format!("{}\n", info.name)),
+                ("phys", format!("{}\n", info.phys)),
+                ("uniq", String::from("\n")),
+                ("properties", String::from("0\n")),
+                (
+                    "uevent",
+                    format!("PRODUCT={}\nNAME=\"{}\"\nPHYS=\"{}\"\nPROP=0\nEV={}\nKEY={}\nREL={}\nABS={}\n", product, info.name, info.phys, ev, key, rel, abs),
+                ),
+            ],
+        );
+        put(vfs, &format!("{}/capabilities", base), &[("ev", format!("{}\n", ev)), ("key", format!("{}\n", key)), ("rel", format!("{}\n", rel)), ("abs", format!("{}\n", abs)), ("msc", String::from("0\n")), ("led", String::from("0\n")), ("sw", String::from("0\n")), ("ff", String::from("0\n")), ("snd", String::from("0\n"))]);
+        put(
+            vfs,
+            &format!("{}/id", base),
+            &[
+                ("bustype", format!("{:04x}\n", info.bus)),
+                ("vendor", format!("{:04x}\n", info.vendor)),
+                ("product", format!("{:04x}\n", info.product)),
+                ("version", format!("{:04x}\n", info.version)),
+            ],
+        );
+        link(vfs, &format!("{}/subsystem", base), "/sys/class/input");
+        let minor = evdev::FIRST_MINOR + n as u32;
+        let event = format!("{}/event{}", base, n);
+        put(
+            vfs,
+            &event,
+            &[("dev", format!("{}:{}\n", evdev::MAJOR, minor)), ("uevent", format!("MAJOR={}\nMINOR={}\nDEVNAME=input/event{}\n", evdev::MAJOR, minor, n))],
+        );
+        link(vfs, &format!("{}/subsystem", event), "/sys/class/input");
+        link(vfs, &format!("{}/device", event), &base);
+        link(vfs, &format!("/sys/class/input/input{}", n), &base);
+        link(vfs, &format!("/sys/class/input/event{}", n), &event);
+        link(vfs, &format!("/sys/dev/char/{}:{}", evdev::MAJOR, minor), &event);
+    }
 }
 
 pub fn display_name() -> String {

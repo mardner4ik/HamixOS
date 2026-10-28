@@ -146,7 +146,7 @@ impl Device {
             return;
         }
         self.moved = false;
-        match self.abs.take() {
+        match self.abs {
             Some((x, y)) => {
                 let (w, h) = crate::drivers::input::mouse::bounds();
                 let (max_x, max_y) = (self.abs_max.0.max(1) as i64, self.abs_max.1.max(1) as i64);

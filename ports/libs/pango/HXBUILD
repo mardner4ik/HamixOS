@@ -1,0 +1,19 @@
+pkgname=pango
+pkgver=1.54.0
+pkgdesc="Text layout and rendering library"
+source="https://download.gnome.org/sources/pango/1.54/pango-$pkgver.tar.xz"
+sha256="8a9eed75021ee734d7fc0fdf3a65c3bba51dfefe4ae51a9b414a60c70b2d1ed8"
+builddir="pango-$pkgver"
+depends="glib harfbuzz fribidi fontconfig freetype cairo libcxx"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    sed -i "s/'-Werror=unused-but-set-variable',//" meson.build
+    meson setup build $HX_MESON -Ddefault_library=shared -Dintrospection=disabled -Dfontconfig=enabled -Dfreetype=enabled -Dcairo=enabled \
+        -Dlibthai=disabled -Dxft=disabled -Dbuild-testsuite=false -Dbuild-examples=false -Ddocumentation=false -Dsysprof=disabled -Dc_args="-I$HX_ROOT/usr/include -D_GNU_SOURCE -Wno-error -Wno-unused-but-set-global" -Dwerror=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

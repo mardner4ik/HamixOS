@@ -1,27 +1,12 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "hamix", no_std)]
+#![cfg_attr(target_os = "hamix", no_main)]
 
 extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{entry, eprintln};
-use hxclient::ui::{self, theme, Hits, Ui};
-use hxclient::{Event, Window, MOUSE_LEAVE, MOUSE_MOVE, MOUSE_PRESS};
-use vellum::gfx::ellipsize;
-use vellum::{Area, Painter};
-
-const INITIAL_W: i32 = 340;
-const INITIAL_H: i32 = 500;
-
-fn ww() -> i32 {
-    hxclient::window_width()
-}
-
-fn hh() -> i32 {
-    hxclient::window_height()
-}
+use hxtoolkit::{button, column, row, text, App, Align, Context, Element, Key, KeyPress, Length, Settings, TextSize, Tone};
 
 const KEYS: [&str; 20] = ["C", "(", ")", "÷", "7", "8", "9", "×", "4", "5", "6", "−", "1", "2", "3", "+", "±", "0", ".", "="];
 
@@ -154,19 +139,21 @@ fn format_number(value: f64) -> String {
     text
 }
 
-struct App {
-    window: Window,
-    ui: Ui,
+#[derive(Default)]
+struct Calculator {
     expr: String,
     result: String,
     error: bool,
     history: Vec<String>,
-    hits: Hits<usize>,
-    hover: Option<usize>,
-    pressed: Option<usize>,
 }
 
-impl App {
+#[derive(Clone)]
+enum Msg {
+    Press(&'static str),
+    Back,
+}
+
+impl Calculator {
     fn press(&mut self, key: &str) {
         if self.error {
             self.expr.clear();
@@ -211,117 +198,69 @@ impl App {
             };
         }
     }
+}
 
-    fn draw(&mut self) {
-        let ui = &self.ui;
-        let buffer = self.window.buffer();
-        let mut p = Painter::new(buffer, ww(), hh());
-        let hits = &mut self.hits;
-        hits.clear();
-        p.fill(Area::new(0, 0, ww(), hh()), theme::bg());
-        let display = Area::new(16, 16, ww() - 32, 138);
-        ui::card(&mut p, display);
-        let mut y = display.y + 10;
-        for line in self.history.iter().rev().take(2).collect::<Vec<_>>().iter().rev() {
-            let text = ellipsize(&ui.small, line, display.w - 28);
-            let tw = ui.small.measure(&text);
-            p.text(&ui.small, display.right() - 14 - tw, y, &text, theme::faint());
-            y += 16;
+impl App for Calculator {
+    type Message = Msg;
+
+    fn title(&self) -> String {
+        String::from("Calculator")
+    }
+
+    fn view(&self) -> Element<Msg> {
+        let mut display = column![].spacing(4).align(Align::End).card();
+        for line in self.history.iter().rev().take(2).collect::<Vec<_>>().into_iter().rev() {
+            display = display.push(text(line.clone()).small().tone(Tone::Faint));
         }
         let shown = if self.expr.is_empty() { String::from("0") } else { self.expr.clone() };
-        let font = if ui.big.measure(&shown) < display.w - 28 { &ui.big } else { &ui.title };
-        let text = ellipsize(font, &shown, display.w - 28);
-        let tw = font.measure(&text);
-        p.text(font, display.right() - 14 - tw, display.y + 58, &text, theme::text());
-        let rw = ui.font.measure(&self.result);
-        p.text(&ui.font, display.right() - 14 - rw, display.bottom() - 26, &self.result, if self.error { theme::danger() } else { theme::dim() });
-
-        let grid_top = display.bottom() + 16;
-        let (bw, bh, gap) = ((ww() - 32 - 3 * 10) / 4, (hh() - grid_top - 16 - 4 * 10) / 5, 10);
-        for (i, key) in KEYS.iter().enumerate() {
-            let area = Area::new(16 + (i as i32 % 4) * (bw + gap), grid_top + (i as i32 / 4) * (bh + gap), bw, bh);
-            let operator = i % 4 == 3 || i < 3;
-            let equals = *key == "=";
-            let hot = self.hover == Some(i);
-            let down = self.pressed == Some(i);
-            let fill = if equals {
-                if hot { theme::accent_hover() } else { theme::accent() }
-            } else if operator {
-                if hot { theme::pressed() } else { theme::surface_2() }
-            } else if hot {
-                theme::hover()
-            } else {
-                theme::surface()
-            };
-            p.rounded(if down { area.inset(1) } else { area }, 12, fill, 255);
-            let font = &ui.title;
-            ui::centered_text(&mut p, font, area, key, if equals { 0xffffff } else if operator { theme::accent_hover() } else { theme::text() });
-            hits.add(area, i);
-        }
-        self.window.present();
-    }
-}
-
-fn main() -> i32 {
-    let ui = Ui::load();
-    let window = match Window::open("Calculator", INITIAL_W as u32, INITIAL_H as u32) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("hxcalc: {}", e);
-            return 1;
-        }
-    };
-    let mut app = App { window, ui, expr: String::new(), result: String::new(), error: false, history: Vec::new(), hits: Hits::new(), hover: None, pressed: None };
-    app.window.set_icon("calculator");
-    app.window.set_size_hints(300, 440, 640, 900);
-    app.draw();
-    loop {
-        match app.window.wait_event(-1) {
-            Some(Event::Close { .. }) => return 0,
-            Some(Event::Resize { .. }) | Some(Event::Theme { .. }) => app.draw(),
-            Some(Event::Mouse { x, y, kind, .. }) => match kind {
-                MOUSE_MOVE | MOUSE_LEAVE => {
-                    let hover = if kind == MOUSE_LEAVE { None } else { app.hits.at(x, y) };
-                    if hover != app.hover {
-                        app.hover = hover;
-                        app.draw();
-                    }
-                }
-                MOUSE_PRESS => {
-                    if let Some(i) = app.hits.at(x, y) {
-                        app.press(KEYS[i]);
-                        app.pressed = Some(i);
-                        app.draw();
-                        app.pressed = None;
-                        app.draw();
-                    }
-                }
-                _ => {}
-            },
-            Some(Event::Key { code, .. }) => {
-                let key = match code {
-                    c if (b'0' as i32..=b'9' as i32).contains(&c) => Some(String::from(c as u8 as char)),
-                    43 => Some(String::from("+")),
-                    45 => Some(String::from("−")),
-                    42 | 120 => Some(String::from("×")),
-                    47 => Some(String::from("÷")),
-                    40 => Some(String::from("(")),
-                    41 => Some(String::from(")")),
-                    46 | 44 => Some(String::from(".")),
-                    37 => Some(String::from("%")),
-                    10 | 61 => Some(String::from("=")),
-                    8 => Some(String::from("back")),
-                    27 | 99 => Some(String::from("C")),
-                    _ => None,
-                };
-                if let Some(k) = key {
-                    app.press(&k);
-                    app.draw();
-                }
+        display = display.push(text(shown).size(TextSize::Display)).push(text(self.result.clone()).tone(if self.error { Tone::Danger } else { Tone::Dim }));
+        let mut keypad = column![].spacing(10).height(Length::Fill);
+        for chunk in KEYS.chunks(4) {
+            let mut line = row![].spacing(10).height(Length::Fill).align(Align::Stretch);
+            for key in chunk.iter() {
+                let b = button(*key).on_press(Msg::Press(key)).width(Length::Fill).height(Length::Fill).size(TextSize::Title);
+                line = line.push(if *key == "=" { b.primary() } else { b });
             }
-            _ => {}
+            keypad = keypad.push(line);
         }
+        column![display, keypad].padding(16).spacing(16).fill().into()
+    }
+
+    fn update(&mut self, message: Msg, _cx: &mut Context<Msg>) {
+        match message {
+            Msg::Press(key) => self.press(key),
+            Msg::Back => self.press("back"),
+        }
+    }
+
+    fn key(&self, press: &KeyPress) -> Option<Msg> {
+        if press.mods.ctrl || press.mods.alt {
+            return None;
+        }
+        Some(match press.key {
+            Key::Char(c) if c.is_ascii_digit() => Msg::Press(KEYS.iter().find(|k| k.starts_with(c)).copied()?),
+            Key::Char('+') => Msg::Press("+"),
+            Key::Char('-') => Msg::Press("−"),
+            Key::Char('*') | Key::Char('x') => Msg::Press("×"),
+            Key::Char('/') => Msg::Press("÷"),
+            Key::Char('(') => Msg::Press("("),
+            Key::Char(')') => Msg::Press(")"),
+            Key::Char('.') | Key::Char(',') => Msg::Press("."),
+            Key::Char('%') => Msg::Press("%"),
+            Key::Enter | Key::Char('=') => Msg::Press("="),
+            Key::Backspace => Msg::Back,
+            Key::Escape | Key::Char('c') => Msg::Press("C"),
+            _ => return None,
+        })
     }
 }
 
-entry!(main);
+fn run() -> i32 {
+    hxtoolkit::run(Settings::new("calculator").size(340, 500).min_size(300, 440), Calculator::default())
+}
+
+#[cfg(target_os = "hamix")]
+hxstd::entry!(run);
+
+#[cfg(not(target_os = "hamix"))]
+hxtoolkit::main!(run);

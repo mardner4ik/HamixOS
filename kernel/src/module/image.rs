@@ -68,7 +68,7 @@ impl Image {
 
     pub fn unprotect(&mut self) {
         if self.protected {
-            crate::arch::paging::protect_kernel_range(self.base as u64, self.len as u64, true, true);
+            crate::arch::paging::protect_kernel_range(self.base as u64, self.len as u64, true, false);
             self.protected = false;
         }
     }

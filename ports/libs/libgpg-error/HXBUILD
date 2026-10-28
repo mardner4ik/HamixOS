@@ -1,0 +1,18 @@
+pkgname=libgpg-error
+pkgver=1.50
+pkgdesc="Error codes shared by GnuPG libraries"
+source="https://gnupg.org/ftp/gcrypt/libgpg-error/libgpg-error-$pkgver.tar.bz2"
+sha256="69405349e0a633e444a28c5b35ce8f14484684518a508dc48a089992fe93e20a"
+builddir="libgpg-error-$pkgver"
+depends=""
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-static --enable-shared --disable-nls \
+        --disable-doc --disable-tests --disable-languages
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/usr/share/info" "$pkgdir/usr/share/common-lisp"
+}

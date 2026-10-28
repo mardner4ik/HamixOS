@@ -1,0 +1,18 @@
+pkgname=harfbuzz
+pkgver=10.0.1
+pkgdesc="Text shaping engine"
+source="https://github.com/harfbuzz/harfbuzz/releases/download/$pkgver/harfbuzz-$pkgver.tar.xz"
+sha256="b2cb13bd351904cb9038f907dc0dee0ae07127061242fe3556b2795c4e9748fc"
+builddir="harfbuzz-$pkgver"
+depends="freetype glib libcxx"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Ddefault_library=shared -Dtests=disabled -Ddocs=disabled -Dintrospection=disabled -Dcairo=disabled \
+        -Dicu=disabled -Dgraphite2=disabled -Dfreetype=enabled -Dglib=enabled -Dgobject=disabled -Dutilities=disabled -Dbenchmark=disabled
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

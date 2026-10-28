@@ -1,0 +1,24 @@
+--- a/options/glibc/generic/execinfo.cpp	2026-09-29 17:48:47.481785941 +0300
++++ b/options/glibc/generic/execinfo.cpp	2026-09-29 17:48:47.483372999 +0300
+@@ -1,17 +1,13 @@
+ #include <execinfo.h>
+-#include <bits/ensure.h>
++#include <stdlib.h>
+ 
+ int backtrace(void **, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++	return 0;
+ }
+ 
+-char **backtrace_symbols(void *const *, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
++char **backtrace_symbols(void *const *, int count) {
++	return static_cast<char **>(calloc(count > 0 ? count : 1, sizeof(char *)));
+ }
+ 
+ void backtrace_symbols_fd(void *const *, int, int) {
+-	__ensure(!"Not implemented");
+-	__builtin_unreachable();
+ }

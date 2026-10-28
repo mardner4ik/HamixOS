@@ -54,6 +54,9 @@ const ATA_READ_DMA: u8 = 0xC8;
 const ATA_WRITE_DMA: u8 = 0xCA;
 const ATA_FLUSH_EXT: u8 = 0xEA;
 const ATA_FLUSH: u8 = 0xE7;
+const ATA_PACKET: u8 = 0xA0;
+const ATA_IDENTIFY_PACKET: u8 = 0xA1;
+const OPTICAL_BLOCK: usize = 2048;
 
 const PRD_MAX: usize = 56;
 const PRD_CHUNK: usize = 0x10000;
@@ -67,6 +70,8 @@ struct Port {
     table_virt: usize,
     lba48: bool,
     sectors: u64,
+    atapi: bool,
+    staging: usize,
 }
 
 static mut PORTS: [Option<Port>; MAX_PORTS] = [None; MAX_PORTS];
@@ -152,7 +157,7 @@ fn recover(p: &Port) {
 
 fn fill_fis(table: usize, command: u8, lba: u64, count: u16) {
     let fis = table as *mut u8;
-    let lba_mode = command != ATA_IDENTIFY;
+    let lba_mode = command != ATA_IDENTIFY && command != ATA_IDENTIFY_PACKET && command != ATA_PACKET;
     let short = command == ATA_READ_DMA || command == ATA_WRITE_DMA;
     unsafe {
         core::ptr::write_bytes(fis, 0, 0x80);
@@ -172,12 +177,22 @@ fn fill_fis(table: usize, command: u8, lba: u64, count: u16) {
 }
 
 fn execute(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: usize, write_data: bool) -> bool {
+    execute_with(p, command, lba, count, buffer, bytes, write_data, None)
+}
+
+fn execute_with(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: usize, write_data: bool, packet: Option<&[u8; 12]>) -> bool {
     let port = p.base;
     if !wait_until(30_000, || read(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0) {
         recover(p);
         return false;
     }
     fill_fis(p.table_virt, command, lba, count);
+    if let Some(packet) = packet {
+        unsafe {
+            *(p.table_virt as *mut u8).add(3) = 1;
+            core::ptr::copy_nonoverlapping(packet.as_ptr(), (p.table_virt + 0x40) as *mut u8, 12);
+        }
+    }
     let mut chunks = 0usize;
     let mut offset = 0usize;
     while offset < bytes {
@@ -198,7 +213,7 @@ fn execute(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: 
     }
     unsafe {
         let header = p.list_virt as *mut u32;
-        let flags = 5u32 | if write_data { 1 << 6 } else { 0 } | ((chunks as u32) << 16);
+        let flags = 5u32 | if write_data { 1 << 6 } else { 0 } | if packet.is_some() { 1 << 5 } else { 0 } | ((chunks as u32) << 16);
         core::ptr::write_volatile(header, flags);
         core::ptr::write_volatile(header.add(1), 0);
         core::ptr::write_volatile(header.add(2), p.table as u32);
@@ -273,14 +288,15 @@ fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16;
     write(port, PX_SERR, 0xFFFF_FFFF);
     wait_until(10_000, || read(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0);
     let signature = read(port, PX_SIG);
-    if signature == SIG_ATAPI || (signature != SIG_ATA && signature != 0xFFFF_FFFF) {
+    let atapi = signature == SIG_ATAPI;
+    if !atapi && signature != SIG_ATA && signature != 0xFFFF_FFFF {
         stop_port(port);
         return None;
     }
     start_port(port);
-    let p = Port { base: port, list_virt, table, table_virt, lba48: true, sectors: 0 };
     let (_, buffer) = dma_page()?;
-    if !execute(&p, ATA_IDENTIFY, 0, 0, buffer as *mut u8, 512, false) {
+    let p = Port { base: port, list_virt, table, table_virt, lba48: true, sectors: 0, atapi, staging: buffer };
+    if !execute(&p, if atapi { ATA_IDENTIFY_PACKET } else { ATA_IDENTIFY }, 0, 0, buffer as *mut u8, 512, false) {
         return None;
     }
     let mut words = [0u16; 256];
@@ -288,6 +304,52 @@ fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16;
         *word = unsafe { core::ptr::read_unaligned((buffer + i * 2) as *const u16) };
     }
     Some((p, words))
+}
+
+fn read_blocks(p: &Port, block: u64, count: usize, buffer: *mut u8) -> bool {
+    let mut command = [0u8; 12];
+    command[0] = 0x28;
+    command[2..6].copy_from_slice(&(block as u32).to_be_bytes());
+    command[7..9].copy_from_slice(&(count as u16).to_be_bytes());
+    execute_with(p, ATA_PACKET, 0, 0, buffer, count * OPTICAL_BLOCK, false, Some(&command))
+}
+
+fn optical_capacity(p: &Port) -> u64 {
+    let mut command = [0u8; 12];
+    command[0] = 0x25;
+    for _ in 0..3 {
+        if execute_with(p, ATA_PACKET, 0, 0, p.staging as *mut u8, 8, false, Some(&command)) {
+            let reply = unsafe { core::slice::from_raw_parts(p.staging as *const u8, 8) };
+            return (u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as u64 + 1) * 4;
+        }
+    }
+    0
+}
+
+fn optical_read(p: &Port, lba: u64, count: u32, buffer: *mut u8) -> bool {
+    let start = lba * 512;
+    let end = start + count as u64 * 512;
+    let mut at = start;
+    while at < end {
+        let block = at / OPTICAL_BLOCK as u64;
+        let inside = (at % OPTICAL_BLOCK as u64) as usize;
+        let out = unsafe { buffer.add((at - start) as usize) };
+        let whole = ((end - at) / OPTICAL_BLOCK as u64).min(16) as usize;
+        if inside == 0 && whole > 0 {
+            if !read_blocks(p, block, whole, out) {
+                return false;
+            }
+            at += (whole * OPTICAL_BLOCK) as u64;
+            continue;
+        }
+        if !read_blocks(p, block, 1, p.staging as *mut u8) {
+            return false;
+        }
+        let take = ((OPTICAL_BLOCK - inside) as u64).min(end - at) as usize;
+        unsafe { core::ptr::copy_nonoverlapping((p.staging + inside) as *const u8, out, take) };
+        at += take as u64;
+    }
+    true
 }
 
 fn model_of(words: &[u16; 256]) -> [u8; 40] {
@@ -323,6 +385,15 @@ fn transfer(context: u64, lba: u64, count: u32, buffer: *mut u8, write_data: boo
     if lba + count as u64 > p.sectors {
         return -22;
     }
+    if p.atapi {
+        if write_data {
+            return -30;
+        }
+        lock();
+        let ok = optical_read(&p, lba, count, buffer);
+        unlock();
+        return if ok { 0 } else { -5 };
+    }
     lock();
     let (command, max) = match (p.lba48, write_data) {
         (true, false) => (ATA_READ_DMA_EXT, 65535usize),
@@ -357,6 +428,9 @@ extern "C" fn block_flush(context: u64) -> i32 {
     let Some(p) = ports().get(context as usize).copied().flatten() else {
         return -19;
     };
+    if p.atapi {
+        return 0;
+    }
     lock();
     let ok = execute(&p, if p.lba48 { ATA_FLUSH_EXT } else { ATA_FLUSH }, 0, 0, core::ptr::null_mut(), 0, false);
     unlock();
@@ -411,8 +485,10 @@ fn attach(handle: &PciHandle) -> Option<usize> {
         let Some((mut port, words)) = setup_port(abar, index, staggered) else {
             continue;
         };
-        port.lba48 = words[83] & (1 << 10) != 0;
-        port.sectors = if port.lba48 {
+        port.lba48 = !port.atapi && words[83] & (1 << 10) != 0;
+        port.sectors = if port.atapi {
+            optical_capacity(&port)
+        } else if port.lba48 {
             words[100] as u64 | (words[101] as u64) << 16 | (words[102] as u64) << 32 | (words[103] as u64) << 48
         } else {
             words[60] as u64 | (words[61] as u64) << 16
@@ -432,8 +508,10 @@ fn attach(handle: &PciHandle) -> Option<usize> {
             flush: Some(block_flush),
             model: model_of(&words),
         };
-        let mut name = *b"ahci-p00";
-        name[6] = b'0' + (index / 10) as u8;
+        let mut name = if port.atapi { *b"ahci-cd0" } else { *b"ahci-p00" };
+        if !port.atapi {
+            name[6] = b'0' + (index / 10) as u8;
+        }
         name[7] = b'0' + (index % 10) as u8;
         if kpi::register_block(unsafe { core::str::from_utf8_unchecked(&name) }, &ops) >= 0 {
             found += 1;

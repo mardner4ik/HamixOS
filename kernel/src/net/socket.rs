@@ -1,7 +1,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::syscall::{absolute, copy_out, euid, install_fd, target, user_slice, Target, EBADF, EFAULT, EINVAL, EMFILE, ENOENT};
+use crate::task::fdtable::{absolute, euid, install_fd, target, Target};
+use crate::usercopy::{copy_out, user_slice, user_slice_mut};
+use crate::errno::{EBADF, EFAULT, EINVAL, EMFILE, ENOENT};
 use crate::fs;
 use crate::net::inet::is_inet;
 use crate::net::unix::{self, Cred, SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM};
@@ -34,17 +36,17 @@ const MAX_IOV: u64 = 1024;
 const MAX_MSG: usize = 16 << 20;
 const MAX_PASSED_FDS: usize = 253;
 
-const ENOTSOCK: i64 = -88;
-const ENOPROTOOPT: i64 = -92;
-const EPROTONOSUPPORT: i64 = -93;
-const ESOCKTNOSUPPORT: i64 = -94;
-const EAFNOSUPPORT: i64 = -97;
-const EEXIST: i64 = -17;
-const EADDRINUSE: i64 = -98;
+use crate::errno::ENOTSOCK;
+use crate::errno::ENOPROTOOPT;
+use crate::errno::EPROTONOSUPPORT;
+use crate::errno::ESOCKTNOSUPPORT;
+use crate::errno::EAFNOSUPPORT;
+use crate::errno::EEXIST;
+use crate::errno::EADDRINUSE;
 
 fn cred() -> Cred {
     let (pid, uid) = task::with_current(|t| (t.pid, t.uid));
-    Cred { pid, uid, gid: super::base::gid_for(uid) }
+    Cred { pid, uid, gid: task::with_current(|t| t.egid) }
 }
 
 fn socket_of(fd: u64) -> Result<(u32, bool), i64> {
@@ -56,14 +58,14 @@ fn socket_of(fd: u64) -> Result<(u32, bool), i64> {
 }
 
 fn wait_socket() -> Result<(), i64> {
-    if super::signal::pending() {
-        return Err(super::signal::EINTR);
+    if crate::syscall::signal::pending() {
+        return Err(crate::syscall::signal::EINTR);
     }
     task::block(task::WAIT_PIPE, Some(task::TICK_HZ / 5), task::input_seq());
     task::check_killed();
-    crate::vt::service_pending();
-    if super::signal::pending() {
-        return Err(super::signal::EINTR);
+    crate::tty::vt::service_pending();
+    if crate::syscall::signal::pending() {
+        return Err(crate::syscall::signal::EINTR);
     }
     Ok(())
 }
@@ -92,14 +94,14 @@ fn sock_kind(kind: u64) -> Result<u8, i64> {
 }
 
 pub fn sys_socket(domain: u64, kind: u64, protocol: u64) -> i64 {
-    if domain == super::netlink::AF_NETLINK {
-        return match super::netlink::create(protocol, cred()) {
+    if domain == crate::net::netlink::AF_NETLINK {
+        return match crate::net::netlink::create(protocol, cred()) {
             Ok(id) => install_fd(OpenFile::Socket { id, nonblock: kind & SOCK_NONBLOCK != 0 }),
             Err(e) => e,
         };
     }
-    if domain == super::inet::AF_INET || domain == super::inet::AF_INET6 {
-        return super::inet::socket(domain, kind, protocol);
+    if domain == crate::net::socket_inet::AF_INET || domain == crate::net::socket_inet::AF_INET6 {
+        return crate::net::socket_inet::socket(domain, kind, protocol);
     }
     if domain != AF_UNIX {
         return EAFNOSUPPORT;
@@ -129,7 +131,7 @@ pub fn sys_socketpair(domain: u64, kind: u64, protocol: u64, out: u64) -> i64 {
         Ok(k) => k,
         Err(e) => return e,
     };
-    if let Err(e) = user_slice(out, 8) {
+    if let Err(e) = user_slice_mut(out, 8) {
         return e;
     }
     let nonblock = kind & SOCK_NONBLOCK != 0;
@@ -183,7 +185,8 @@ fn read_address(ptr: u64, len: u64) -> Result<Address, i64> {
     }
     let end = path.iter().position(|b| *b == 0).unwrap_or(path.len());
     let text = String::from_utf8_lossy(&path[..end]).into_owned();
-    Ok(Address::Path(absolute(&text)))
+    let path = absolute(&text);
+    Ok(Address::Path(if crate::task::with_current(|t| t.abi) == crate::task::Abi::Linux { crate::linux::loader::to_native(&path) } else { path }))
 }
 
 fn write_address(ptr: u64, len_ptr: u64, name: Option<&str>) -> i64 {
@@ -219,11 +222,11 @@ pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if super::netlink::is_netlink(id) {
+    if crate::net::netlink::is_netlink(id) {
         return 0;
     }
     if is_inet(id) {
-        return super::inet::bind(id, addr, len);
+        return crate::net::socket_inet::bind(id, addr, len);
     }
     let address = match read_address(addr, len) {
         Ok(a) => a,
@@ -266,7 +269,7 @@ pub fn sys_bind(fd: u64, addr: u64, len: u64) -> i64 {
 
 pub fn sys_listen(fd: u64, backlog: u64) -> i64 {
     match socket_of(fd) {
-        Ok((id, _)) if is_inet(id) => super::inet::listen(id, backlog),
+        Ok((id, _)) if is_inet(id) => crate::net::socket_inet::listen(id, backlog),
         Ok((id, _)) => unix::listen(id, (backlog as i32).max(1) as usize).map(|_| 0).unwrap_or_else(|e| e),
         Err(e) => e,
     }
@@ -278,7 +281,7 @@ pub fn sys_connect(fd: u64, addr: u64, len: u64) -> i64 {
         Err(e) => return e,
     };
     if is_inet(id) {
-        return super::inet::connect(id, nonblock, addr, len);
+        return crate::net::socket_inet::connect(id, nonblock, addr, len);
     }
     let address = match read_address(addr, len) {
         Ok(a) => a,
@@ -316,7 +319,7 @@ pub fn sys_accept4(fd: u64, addr: u64, addr_len: u64, flags: u64) -> i64 {
         Err(e) => return e,
     };
     if is_inet(id) {
-        return super::inet::accept(id, nonblock, addr, addr_len, flags);
+        return crate::net::socket_inet::accept(id, nonblock, addr, addr_len, flags);
     }
     if !unix::is_listening(id) {
         return EINVAL;
@@ -359,7 +362,12 @@ fn gather_iov(iov: u64, count: u64) -> Result<Vec<u8>, i64> {
         if data.len() + len as usize > MAX_MSG {
             return Err(unix::EMSGSIZE);
         }
-        data.extend_from_slice(user_slice(base, len)?);
+        let piece = user_slice(base, len)?;
+        if data.try_reserve(piece.len()).is_err() {
+            crate::memory::reclaim();
+            data.try_reserve(piece.len()).map_err(|_| crate::errno::ENOMEM)?;
+        }
+        data.extend_from_slice(piece);
     }
     Ok(data)
 }
@@ -378,7 +386,7 @@ fn scatter_iov(iov: u64, count: u64, data: &[u8]) -> Result<(), i64> {
         let len = u64::from_le_bytes(chunk[8..16].try_into().unwrap()) as usize;
         let n = len.min(data.len() - done);
         if n > 0 {
-            user_slice(base, n as u64)?.copy_from_slice(&data[done..done + n]);
+            user_slice_mut(base, n as u64)?.copy_from_slice(&data[done..done + n]);
             done += n;
         }
     }
@@ -419,7 +427,7 @@ fn collect_fds(control: u64, control_len: u64) -> Result<Vec<OpenFile>, i64> {
                 if fd < 0 || files.len() >= MAX_PASSED_FDS {
                     return fail(files, if fd < 0 { EBADF } else { EINVAL });
                 }
-                match task::with_current(|t| super::base::open_file_for(t, fd as u64)) {
+                match task::with_current(|t| crate::syscall::base::open_file_for(t, fd as u64)) {
                     Some(file) => files.push(file),
                     None => return fail(files, EBADF),
                 }
@@ -431,11 +439,11 @@ fn collect_fds(control: u64, control_len: u64) -> Result<Vec<OpenFile>, i64> {
 }
 
 fn send_all(id: u32, nonblock: bool, data: &[u8], mut files: Vec<OpenFile>, to: Option<&str>, flags: u64) -> i64 {
-    if super::netlink::is_netlink(id) {
+    if crate::net::netlink::is_netlink(id) {
         for file in files {
             file.release();
         }
-        return super::netlink::handle(id, data).map(|n| n as i64).unwrap_or_else(|e| e);
+        return crate::net::netlink::handle(id, data).map(|n| n as i64).unwrap_or_else(|e| e);
     }
     let nonblock = nonblock || flags & MSG_DONTWAIT != 0;
     let stream = unix::kind(id) == Some(SOCK_STREAM);
@@ -459,8 +467,8 @@ fn send_all(id: u32, nonblock: bool, data: &[u8], mut files: Vec<OpenFile>, to: 
     for file in files {
         file.release();
     }
-    if result == unix::EPIPE && flags & MSG_NOSIGNAL == 0 && crate::syscall::linux_abi() {
-        super::signal::send(task::current_pid(), super::signal::SIGPIPE);
+    if result == unix::EPIPE && flags & MSG_NOSIGNAL == 0 && crate::syscall::posix_abi() {
+        crate::syscall::signal::send(task::current_pid(), crate::syscall::signal::SIGPIPE);
     }
     result
 }
@@ -477,23 +485,23 @@ pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, addr_len: 
         Ok(v) => v,
         Err(e) => return e,
     };
-    let data = match user_slice(buf, len.min(MAX_MSG as u64)) {
-        Ok(d) => d.to_vec(),
+    let data = match user_slice(buf, len.min(MAX_MSG as u64)).and_then(crate::memory::try_copy) {
+        Ok(d) => d,
         Err(e) => return e,
     };
     if is_inet(id) {
         let dest = if addr == 0 {
             None
         } else {
-            match super::inet::read_address(addr, addr_len) {
+            match crate::net::socket_inet::read_address(addr, addr_len) {
                 Ok(d) => d,
                 Err(e) => return e,
             }
         };
-        return super::inet::send(id, nonblock, &data, dest, flags);
+        return crate::net::socket_inet::send(id, nonblock, &data, dest, flags);
     }
-    if super::netlink::is_netlink(id) {
-        return super::netlink::handle(id, &data).map(|n| n as i64).unwrap_or_else(|e| e);
+    if crate::net::netlink::is_netlink(id) {
+        return crate::net::netlink::handle(id, &data).map(|n| n as i64).unwrap_or_else(|e| e);
     }
     let to = match resolve_destination(addr, addr_len) {
         Ok(t) => t,
@@ -504,7 +512,7 @@ pub fn sys_sendto(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, addr_len: 
 
 pub fn send_bytes(id: u32, nonblock: bool, data: &[u8]) -> i64 {
     if is_inet(id) {
-        return super::inet::send(id, nonblock, data, None, 0);
+        return crate::net::socket_inet::send(id, nonblock, data, None, 0);
     }
     send_all(id, nonblock, data, Vec::new(), None, 0)
 }
@@ -529,15 +537,15 @@ pub fn sys_sendmsg(fd: u64, msg: u64, flags: u64) -> i64 {
         let dest = if name == 0 {
             None
         } else {
-            match super::inet::read_address(name, name_len) {
+            match crate::net::socket_inet::read_address(name, name_len) {
                 Ok(d) => d,
                 Err(e) => return e,
             }
         };
-        return super::inet::send(id, nonblock, &data, dest, flags);
+        return crate::net::socket_inet::send(id, nonblock, &data, dest, flags);
     }
-    if super::netlink::is_netlink(id) {
-        return super::netlink::handle(id, &data).map(|n| n as i64).unwrap_or_else(|e| e);
+    if crate::net::netlink::is_netlink(id) {
+        return crate::net::netlink::handle(id, &data).map(|n| n as i64).unwrap_or_else(|e| e);
     }
     let to = match resolve_destination(name, name_len) {
         Ok(t) => t,
@@ -586,7 +594,7 @@ fn receive(id: u32, nonblock: bool, max: usize, flags: u64) -> Result<unix::Rece
 
 pub fn recv_bytes(id: u32, nonblock: bool, buf: u64, count: u64) -> i64 {
     if is_inet(id) {
-        return super::inet::recv_bytes(id, nonblock, buf, count);
+        return crate::net::socket_inet::recv_bytes(id, nonblock, buf, count);
     }
     match receive(id, nonblock, count.min(MAX_MSG as u64) as usize, 0) {
         Ok(r) => {
@@ -604,11 +612,11 @@ pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, addr_len
         Ok(v) => v,
         Err(e) => return e,
     };
-    if let Err(e) = user_slice(buf, len) {
+    if let Err(e) = user_slice_mut(buf, len) {
         return e;
     }
     if is_inet(id) {
-        return super::inet::recvfrom(id, nonblock, buf, len, flags, addr, addr_len);
+        return crate::net::socket_inet::recvfrom(id, nonblock, buf, len, flags, addr, addr_len);
     }
     match receive(id, nonblock, len.min(MAX_MSG as u64) as usize, flags) {
         Ok(r) => {
@@ -619,14 +627,14 @@ pub fn sys_recvfrom(fd: u64, buf: u64, len: u64, flags: u64, addr: u64, addr_len
             if r2 < 0 {
                 return r2;
             }
-            if super::netlink::is_netlink(id) {
+            if crate::net::netlink::is_netlink(id) {
                 if addr != 0 && addr_len != 0 {
                     let capacity = match user_slice(addr_len, 4) {
                         Ok(b) => u32::from_le_bytes((&*b).try_into().unwrap()) as u64,
                         Err(e) => return e,
                     };
                     let mut raw = [0u8; 12];
-                    super::netlink::kernel_address(&mut raw);
+                    crate::net::netlink::kernel_address(&mut raw);
                     copy_out(addr, capacity.min(12), &raw);
                     copy_out(addr_len, 4, &12u32.to_le_bytes());
                 }
@@ -660,7 +668,7 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     if is_inet(id) {
         let mut update = [0u8; 56];
         update.copy_from_slice(&header);
-        let (data, full) = match super::inet::recvmsg_fill(id, nonblock, capacity, flags & !MSG_CMSG_CLOEXEC, &mut update) {
+        let (data, full) = match crate::net::socket_inet::recvmsg_fill(id, nonblock, capacity, flags & !MSG_CMSG_CLOEXEC, &mut update) {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -739,8 +747,8 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
             return EMFILE;
         }
     }
-    let netlink = super::netlink::is_netlink(id);
-    let creds = if netlink && super::netlink::passcred(id) { Some(unix::Cred::default()) } else if netlink { None } else { received.cred };
+    let netlink = crate::net::netlink::is_netlink(id);
+    let creds = if netlink && crate::net::netlink::passcred(id) { Some(unix::Cred::default()) } else if netlink { None } else { received.cred };
     if let (Some(sender), true) = (creds, control != 0) {
         if control_len >= control_used + 32 {
             let mut raw = [0u8; 32];
@@ -767,7 +775,7 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
     if name != 0 && netlink {
         let cap = u32::from_le_bytes(header[8..12].try_into().unwrap()) as u64;
         let mut raw = [0u8; 12];
-        super::netlink::kernel_address(&mut raw);
+        crate::net::netlink::kernel_address(&mut raw);
         if cap > 0 {
             copy_out(name, cap.min(12), &raw);
         }
@@ -796,7 +804,7 @@ pub fn sys_recvmsg(fd: u64, msg: u64, flags: u64) -> i64 {
 
 pub fn sys_shutdown(fd: u64, how: u64) -> i64 {
     match socket_of(fd) {
-        Ok((id, _)) if is_inet(id) => super::inet::shutdown(id, how),
+        Ok((id, _)) if is_inet(id) => crate::net::socket_inet::shutdown(id, how),
         Ok((id, _)) => unix::shutdown(id, how).map(|_| 0).unwrap_or_else(|e| e),
         Err(e) => e,
     }
@@ -807,9 +815,9 @@ pub fn sys_getsockname(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    if super::netlink::is_netlink(id) {
+    if crate::net::netlink::is_netlink(id) {
         let mut raw = [0u8; 12];
-        super::netlink::address(&mut raw);
+        crate::net::netlink::address(&mut raw);
         let capacity = match user_slice(len, 4) {
             Ok(b) => u32::from_le_bytes((&*b).try_into().unwrap()) as u64,
             Err(e) => return e,
@@ -819,7 +827,7 @@ pub fn sys_getsockname(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
         return 0;
     }
     if is_inet(id) {
-        return super::inet::names(id, addr, len, peer);
+        return crate::net::socket_inet::names(id, addr, len, peer);
     }
     let (own, remote) = unix::names(id);
     if peer && !unix::is_connected(id) && remote.is_none() {
@@ -830,14 +838,14 @@ pub fn sys_getsockname(fd: u64, addr: u64, len: u64, peer: bool) -> i64 {
 
 pub fn sys_setsockopt(fd: u64, level: u64, name: u64, value: u64, len: u64) -> i64 {
     match socket_of(fd) {
-        Ok((id, _)) if is_inet(id) => super::inet::setsockopt(id, level, name, value, len),
+        Ok((id, _)) if is_inet(id) => crate::net::socket_inet::setsockopt(id, level, name, value, len),
         Ok((id, _)) if level == SOL_SOCKET && name == SO_PASSCRED => {
             let on = match user_slice(value, 4) {
                 Ok(b) => u32::from_le_bytes((&*b).try_into().unwrap()) != 0,
                 Err(e) => return e,
             };
-            if super::netlink::is_netlink(id) {
-                super::netlink::set_passcred(id, on);
+            if crate::net::netlink::is_netlink(id) {
+                crate::net::netlink::set_passcred(id, on);
             } else {
                 unix::set_passcred(id, on);
             }
@@ -854,7 +862,7 @@ pub fn sys_getsockopt(fd: u64, level: u64, name: u64, value: u64, len_ptr: u64) 
         Err(e) => return e,
     };
     if is_inet(id) {
-        return super::inet::getsockopt(id, level, name, value, len_ptr);
+        return crate::net::socket_inet::getsockopt(id, level, name, value, len_ptr);
     }
     if level != SOL_SOCKET {
         return ENOPROTOOPT;

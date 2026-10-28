@@ -1,0 +1,33 @@
+#!/bin/sh
+case "$(basename "$0")" in
+    aarch64-*) emulation=aarch64linux ;;
+    riscv64-*) emulation=elf64lriscv ;;
+    *) emulation=elf_x86_64 ;;
+esac
+out=""
+expect=""
+for a in "$@"; do
+    if [ -n "$expect" ]; then
+        out="$out $expect $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+        expect=""
+        continue
+    fi
+    case "$a" in
+        -o|-e|-T|-soname|-rpath|-z|--version-script|-Map|-dynamic-linker) expect="$a" ;;
+        -Wl,*)
+            rest="${a#-Wl,}"
+            old_ifs="$IFS"; IFS=,
+            for w in $rest; do out="$out $(printf '%s' "$w" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"; done
+            IFS="$old_ifs"
+            ;;
+        -Xlinker) expect=" " ;;
+        -rdynamic) out="$out --export-dynamic" ;;
+        -pie|-shared|-static|-r|-s) out="$out $a" ;;
+        -no-pie) out="$out -no-pie" ;;
+        -L*|-l*) out="$out $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")" ;;
+        -*) ;;
+        *) out="$out $(printf '%s' "$a" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")" ;;
+    esac
+done
+eval "set -- $out"
+exec ld.lld -m "$emulation" "$@"

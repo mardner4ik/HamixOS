@@ -1,0 +1,5 @@
+description = org.freedesktop.login1 for Linux programs (hx-login1)
+exec = /usr/libexec/hamix/hx-login1
+start = boot
+restart = on-failure
+layer = linux

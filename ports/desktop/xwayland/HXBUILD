@@ -1,0 +1,22 @@
+pkgname=xwayland
+pkgver=24.1.4
+pkgdesc="X server for Wayland compositors (hxwayland)"
+source="https://www.x.org/releases/individual/xserver/xwayland-$pkgver.tar.xz"
+sha256="d96a78dbab819f55750173444444995b5031ebdcc15b77afebbd8dbc02af34f4"
+builddir="xwayland-$pkgver"
+depends="libxshmfence xorgproto xtrans libxkbfile libXfont2 libxcvt pixman wayland wayland-protocols libXau openssl xkbcomp xkeyboard-config"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dglamor=false -Dglx=false -Ddri3=false -Ddrm=false -Dxwayland_ei=false \
+        -Dxvfb=false -Dlibdecor=false -Dsecure-rpc=false -Dxdmcp=false -Dxdm-auth-1=false -Dsha1=libcrypto \
+        -Ddocs=false -Ddevel-docs=false -Dxcsecurity=false -Dxselinux=false -Dlisten_tcp=false -Dlisten_unix=true \
+        -Dlisten_local=false -Dipv6=false -Ddtrace=false -Dsystemd_notify=false -Dinput_thread=false \
+        -Dxkb_bin_dir=/usr/bin -Dxkb_dir=/usr/share/X11/xkb -Dxkb_output_dir=/var/lib/xkb -Ddefault_font_path=built-ins
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/man"
+}

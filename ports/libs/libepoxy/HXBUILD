@@ -1,0 +1,17 @@
+pkgname=libepoxy
+pkgver=1.5.10
+pkgdesc="OpenGL function pointer management"
+source="https://github.com/anholt/libepoxy/archive/refs/tags/$pkgver.tar.gz"
+sha256="a7ced37f4102b745ac86d6a70a9da399cc139ff168ba6b8002b4d8d43c900c15"
+builddir="libepoxy-$pkgver"
+depends="khronos-headers libX11"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dtests=false -Ddocs=false -Dglx=yes -Dx11=true -Degl=yes
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

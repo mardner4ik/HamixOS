@@ -1,0 +1,43 @@
+pkgname=efl
+pkgver=1.27.0
+pkgdesc="Enlightenment Foundation Libraries (Wayland, DRM and libinput backends)"
+source="https://download.enlightenment.org/rel/libs/efl/efl-$pkgver.tar.xz"
+sha256="3dfb99fbcc268c0bc797e2f83e8c503ef9de66284f40b381bb597a08185c00f4"
+builddir="efl-$pkgver"
+depends="libsndfile zlib libpng libjpeg-turbo freetype fontconfig fribidi harfbuzz openssl dbus lua51 wayland wayland-protocols libxkbcommon libdrm libudev-zero libinput"
+
+loaders="gst,pdf,ps,raw,svg,rsvg,xcf,jp2k,tiff,webp,json,avif,heif,jxl,gif,dds,psd,tga,tgv,wbmp,pmaps,xpm,generic"
+common="-Dopengl=none -Dsystemd=false -Dpulseaudio=false -Dgstreamer=false -Dv4l2=false -Dphysics=false -Davahi=false -Dbuild-tests=false -Dbuild-examples=false -Dbindings= -Delua=false -Dnls=false -Dedje-sound-and-video=false -Dlibmount=false -Dglib=false -Dx11=false -Dfb=false -Dsdl=false -Dinstall-eo-files=false -Devas-loaders-disabler=$loaders -Decore-imf-loaders-disabler=xim,ibus,scim"
+
+host="$srcdir/../../efl-host-$pkgver"
+
+host_tools() {
+    [ -x "$host/bin/edje_cc" ] && [ -x "$host/bin/elm_prefs_cc" ] && [ -e "$host/lib/libeolian.so.1" ] && return 0
+    rm -rf "$host"
+    (
+        unset CC CXX AR RANLIB STRIP NM CFLAGS CPPFLAGS CXXFLAGS LDFLAGS PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+        meson setup build-host --prefix="$(realpath -m "$host")" --libdir=lib --buildtype=release -Dc_std=gnu17 $common -Dwl=false -Ddrm=false -Dinput=false -Deeze=false -Dharfbuzz=false -Dfribidi=false
+        meson compile -C build-host -j "$JOBS"
+        meson install -C build-host --quiet --destdir "$srcdir/host-root"
+        mkdir -p "$host"
+        cp -a "$srcdir/host-root$(realpath -m "$host")/." "$(realpath "$host")/"
+        rm -rf "$srcdir/host-root"
+    )
+    rm -rf build-host
+    [ -x "$host/bin/edje_cc" ] && [ -x "$host/bin/elm_prefs_cc" ] && [ -e "$host/lib/libeolian.so.1" ]
+}
+
+build() {
+    host_tools
+    export PATH="$(realpath "$host")/bin:$PATH"
+    export LD_LIBRARY_PATH="$(realpath "$host")/lib"
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dc_args="-D__linux__ -D__linux -D_GNU_SOURCE -I$HX_ROOT/usr/include" -Dcpp_args="-D__linux__ -D__linux -D_GNU_SOURCE -I$HX_ROOT/usr/include" \
+        $common -Dwl=true -Ddrm=true -Dinput=true -Deeze=true -Dc_std=gnu17 -Dlua-interpreter=lua -Dcrypto=openssl -Dnative-arch-optimization=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild --quiet
+    rm -rf "$pkgdir/usr/share/doc" "$pkgdir/usr/share/gdb" "$pkgdir/usr/share/mime" "$pkgdir/usr/lib/cmake"
+}

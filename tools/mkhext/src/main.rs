@@ -39,6 +39,8 @@ fn content_size(path: &Path) -> u64 {
     total
 }
 
+const LINK_MAGIC: &[u8] = b"\x7fHXLINK\n";
+
 fn owner_of(path: &Path, owners: &[(std::path::PathBuf, u32)]) -> u32 {
     owners.iter().filter(|(p, _)| path.starts_with(p)).map(|(_, u)| *u).next().unwrap_or(0)
 }
@@ -70,6 +72,22 @@ fn copy_tree(fs_image: &mut Hext<VecDevice>, dir: &Path, ino: u32, files: &mut u
                 }
             };
             copy_tree(fs_image, &entry.path(), child, files, owners);
+        } else if meta.file_type().is_symlink() {
+            let target = fs::read_link(entry.path()).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default();
+            if target.is_empty() || target.len() > 4096 {
+                continue;
+            }
+            let mut data = LINK_MAGIC.to_vec();
+            data.extend_from_slice(target.as_bytes());
+            let child = fs_image.create(ino, &name, S_IFREG | 0o777, uid, uid).unwrap_or_else(|e| {
+                eprintln!("mkhext: {}: {:?}", entry.path().display(), e);
+                exit(1);
+            });
+            fs_image.write_file(child, &data).unwrap_or_else(|e| {
+                eprintln!("mkhext: {}: {:?}", entry.path().display(), e);
+                exit(1);
+            });
+            *files += 1;
         } else if meta.is_file() {
             let data = fs::read(entry.path()).unwrap_or_default();
             let child = fs_image.create(ino, &name, S_IFREG | perm, uid, uid).unwrap_or_else(|e| {
@@ -85,6 +103,72 @@ fn copy_tree(fs_image: &mut Hext<VecDevice>, dir: &Path, ino: u32, files: &mut u
                 fs_image.commit().expect("commit");
             }
         }
+    }
+}
+
+fn id_table(path: &Path) -> Vec<(String, u32)> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split(':').collect();
+            Some((f.first()?.to_string(), f.get(2)?.parse().ok()?))
+        })
+        .collect()
+}
+
+fn apply_mtree(fs_image: &mut Hext<VecDevice>, source: &Path) {
+    let Ok(spec) = fs::read_to_string(source.join("etc/mtree/hamix.dist")) else {
+        return;
+    };
+    let users = id_table(&source.join("etc/passwd"));
+    let groups = id_table(&source.join("etc/group"));
+    let lookup = |table: &[(String, u32)], name: &str| table.iter().find(|(n, _)| n == name).map(|(_, id)| *id).or_else(|| name.parse().ok());
+    for line in spec.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let Some(path) = fields.next() else { continue };
+        let path = path.trim_start_matches('.');
+        let mut kind = "file";
+        let (mut uid, mut gid, mut mode) = (None, None, None);
+        for field in fields {
+            let Some((key, value)) = field.split_once('=') else { continue };
+            match key {
+                "type" => kind = if value == "dir" { "dir" } else { "file" },
+                "uname" => uid = lookup(&users, value),
+                "gname" => gid = lookup(&groups, value),
+                "uid" => uid = value.parse().ok(),
+                "gid" => gid = value.parse().ok(),
+                "mode" => mode = u16::from_str_radix(value, 8).ok(),
+                _ => {}
+            }
+        }
+        let ino = match fs_image.resolve(path) {
+            Ok(ino) => ino,
+            Err(_) if kind == "dir" => {
+                let mut parent = hext::ROOT_INO;
+                for part in path.split('/').filter(|p| !p.is_empty()) {
+                    parent = match fs_image.lookup(parent, part) {
+                        Ok(Some(ino)) => ino,
+                        _ => fs_image.create(parent, part, S_IFDIR | 0o755, 0, 0).unwrap_or_else(|e| {
+                            eprintln!("mkhext: mtree {}: {:?}", path, e);
+                            exit(1);
+                        }),
+                    };
+                }
+                parent
+            }
+            Err(_) => continue,
+        };
+        let inode = fs_image.read_inode(ino).expect("inode");
+        let mode = mode.unwrap_or(inode.mode & 0o7777);
+        fs_image.set_attributes(ino, mode, uid.unwrap_or(inode.uid), gid.unwrap_or(inode.gid)).unwrap_or_else(|e| {
+            eprintln!("mkhext: mtree {}: {:?}", path, e);
+            exit(1);
+        });
     }
 }
 
@@ -134,6 +218,7 @@ fn main() {
         }
     }
     copy_tree(&mut fs_image, source, hext::ROOT_INO, &mut files, &owners);
+    apply_mtree(&mut fs_image, source);
     fs_image.commit().unwrap_or_else(|e| {
         eprintln!("mkhext: commit failed: {:?}", e);
         exit(1);

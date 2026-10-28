@@ -1,0 +1,28 @@
+pkgname=fastfetch
+pkgver=2.28.0
+pkgdesc="Fast system information tool"
+source="fastfetch-$pkgver.tar.gz::https://github.com/fastfetch-cli/fastfetch/archive/refs/tags/$pkgver.tar.gz"
+sha256="115d9947ee0acf6246894888998db31de024f651123396c6251033390c241dc7"
+builddir="fastfetch-$pkgver"
+depends="libdrm wayland libxcb libX11 dbus sqlite"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    cmake -G Ninja -S . -B build \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR="$HX_ARCH" \
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_AR="$(command -v llvm-ar)" -DCMAKE_RANLIB="$(command -v llvm-ranlib)" \
+        -DCMAKE_C_FLAGS="-D__linux__ -I$HX_ROOT/usr/include -I$HX_ROOT/usr/include/libdrm -I$HX_ROOT/usr/include/dbus-1.0 -I$HX_ROOT/usr/lib/dbus-1.0/include" \
+        -DIS_MUSL=ON -DENABLE_LTO=OFF -DSET_TWEAK=OFF -DINSTALL_LICENSE=OFF -DBUILD_TESTS=OFF \
+        -DENABLE_VULKAN=OFF -DENABLE_XRANDR=OFF -DENABLE_XCB_RANDR=OFF -DENABLE_DRM_AMDGPU=OFF \
+        -DENABLE_GIO=OFF -DENABLE_DCONF=OFF -DENABLE_XFCONF=OFF -DENABLE_RPM=OFF \
+        -DENABLE_IMAGEMAGICK7=OFF -DENABLE_IMAGEMAGICK6=OFF -DENABLE_CHAFA=OFF -DENABLE_ZLIB=OFF \
+        -DENABLE_EGL=OFF -DENABLE_GLX=OFF -DENABLE_OSMESA=OFF -DENABLE_OPENCL=OFF -DENABLE_PULSE=OFF \
+        -DENABLE_DDCUTIL=OFF -DENABLE_DIRECTX_HEADERS=OFF -DENABLE_ELF=OFF -DENABLE_LIBZFS=OFF
+    cmake --build build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" cmake --install build
+    rm -rf "$pkgdir/usr/share/bash-completion" "$pkgdir/usr/share/zsh" "$pkgdir/usr/share/fish" "$pkgdir/usr/share/man"
+}

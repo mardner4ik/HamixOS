@@ -7,8 +7,17 @@ edition = "2021"
 name = "hxserver"
 path = "src/main.rs"
 
+[features]
+default = ["wayland"]
+wayland = ["dep:hxwayland"]
+
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
-vellum = { path = "../../libs/vellum" }
-hxproto = { path = "../../libs/hxproto" }
+hxwayland = { path = "../hxwayland", optional = true }
+hxstd = { path = "../../libs/hxstd" }
+vellum = { path = "../../../crates/vellum" }
+imago = { path = "../../../crates/imago" }
+hxproto = { path = "../../../crates/hxproto" }
 hxclient = { path = "../../libs/hxclient" }
+
+[package.metadata.hamix]
+desktop = "nook"

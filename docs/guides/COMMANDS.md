@@ -15,9 +15,10 @@ notes                        runs /usr/bin/hed /home/user/notes.txt
 notes --view                 extra arguments are appended
 ```
 
-Shell builtins always win; names of builtins cannot be registered. Unknown
-words are looked up in `/usr/bin`, `/bin`, `/sbin` first, then in the
-registry.
+Every registered command also gets an executable wrapper
+`/var/lib/hamix/commands/bin/NAME` (`exec PROGRAM ARGS "$@"`); that directory is at
+the end of `PATH`, so the command works from bash, scripts, `sudo` and `env`.
+Programs in `/usr/bin`, `/bin`, `/sbin` win over registered names.
 
 ## From a program (`hamix_std::sys`)
 

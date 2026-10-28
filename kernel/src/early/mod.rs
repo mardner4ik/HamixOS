@@ -159,7 +159,7 @@ fn test_paging() {
     assert_eq!(unsafe { core::ptr::read_volatile(phys as *const u64) }, 0xC0FF_EE00_1234_5678);
     assert_eq!(arch::traps::probe_read(base as usize), Ok(0));
     space.unmap_range(base + PAGE_SIZE, PAGE_SIZE);
-    arch::paging::flush_tlb();
+    crate::memory::tlb::sync();
     assert!(arch::traps::probe_read((base + PAGE_SIZE) as usize).is_err());
     let other = AddressSpace::new().expect("no memory for an address space");
     assert!(other.translate(base).is_none());

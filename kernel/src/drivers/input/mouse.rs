@@ -248,7 +248,7 @@ pub fn inject_absolute(x: i32, y: i32, buttons: u8, wheel: i32) {
         let state = STATE.lock();
         (state.x, state.y)
     };
-    inject(x - cx, y - cy, buttons, wheel);
+    apply(x - cx, y - cy, buttons, wheel, Some((x, y)));
 }
 
 pub fn bounds() -> (i32, i32) {
@@ -256,9 +256,13 @@ pub fn bounds() -> (i32, i32) {
 }
 
 pub fn inject(dx: i32, dy: i32, buttons: u8, wheel: i32) {
+    apply(dx, dy, buttons, wheel, None);
+}
+
+fn apply(dx: i32, dy: i32, buttons: u8, wheel: i32, absolute: Option<(i32, i32)>) {
     *PRESENT.lock() = true;
     let (max_x, max_y) = *BOUNDS.lock();
-    let (x, y, pressed, released) = {
+    let (x, y, previous) = {
         let mut state = STATE.lock();
         let previous = state.buttons;
         state.x = (state.x + dx).clamp(0, max_x - 1);
@@ -270,9 +274,13 @@ pub fn inject(dx: i32, dy: i32, buttons: u8, wheel: i32) {
         }
         state.buttons = buttons;
         state.wheel += wheel;
-        (state.x, state.y, buttons & !previous, previous & !buttons)
+        (state.x, state.y, previous)
     };
-    let event = MouseEvent { x, y, buttons, pressed, released, wheel };
+    match absolute {
+        Some((ax, ay)) => super::evdev::on_absolute(ax, ay, max_x, max_y, previous, buttons, wheel),
+        None => super::evdev::on_relative(dx, dy, previous, buttons, wheel),
+    }
+    let event = MouseEvent { x, y, buttons, pressed: buttons & !previous, released: previous & !buttons, wheel };
     EVENTS.lock().push(event);
     crate::task::notify_input();
     crate::drivers::video::console_mouse::on_event(event);
@@ -318,33 +326,5 @@ fn on_byte(byte: u8) {
         0
     };
 
-    let buttons = flags & 0x07;
-    let (max_x, max_y) = *BOUNDS.lock();
-
-    let (x, y, pressed, released) = {
-        let mut state = STATE.lock();
-        let previous = state.buttons;
-        state.x = (state.x + dx).clamp(0, max_x - 1);
-        state.y = (state.y - dy).clamp(0, max_y - 1);
-        for bit in 0..3 {
-            if buttons & !previous & (1 << bit) != 0 {
-                state.presses[bit] = state.presses[bit].saturating_add(1);
-            }
-        }
-        state.buttons = buttons;
-        state.wheel += wheel;
-        (state.x, state.y, buttons & !previous, previous & !buttons)
-    };
-
-    EVENTS.lock().push(MouseEvent { x, y, buttons, pressed, released, wheel });
-    crate::task::notify_input();
-
-    crate::drivers::video::console_mouse::on_event(MouseEvent {
-        x,
-        y,
-        buttons,
-        pressed,
-        released,
-        wheel,
-    });
+    apply(dx, -dy, flags & 0x07, wheel, None);
 }

@@ -2,7 +2,7 @@
 
 `pantry` installs software on HamixOS. For now all packages come from
 **Alpine Linux** (musl-based x86_64 builds) and run through hxlinuxulator
-(see `docs/LINUXULATOR.md`). Repositories with native HamixOS software are
+(see `docs/architecture/LINUXULATOR.md`). Repositories with native HamixOS software are
 planned: the configuration format already knows about them, but Pantry
 skips them for now.
 
@@ -159,7 +159,7 @@ regular file: the bytes `\x7fHXLINK\n` followed by the target.
 The applications menu is now built from desktop entries at runtime:
 
 * `/usr/share/applications/*.desktop` holds the native apps (shipped in
-  `overlay/`, with `X-Nook-Key`, `X-Nook-Order` and `X-Nook-LiveOnly`).
+  `data/overlay/`, with `X-Nook-Key`, `X-Nook-Order` and `X-Nook-LiveOnly`).
 * `/opt/linux/usr/share/applications/*.desktop` holds apps installed by
   Pantry.
 
@@ -176,7 +176,7 @@ apps than fit. Search also matches `Keywords`, `GenericName` and
   a generic "linux-app" icon.
 * **Terminal apps** (`Terminal=true`) open in the Nook terminal.
 * **Graphical Linux apps** open their windows through the Wayland bridge
-  `hxwayland` (see `docs/LINUXULATOR.md`). Software-rendered (`wl_shm`)
+  `hxwayland` (see `docs/architecture/LINUXULATOR.md`). Software-rendered (`wl_shm`)
   clients work; clients that need EGL/GPU buffers do not.
 
 Tested in QEMU:

@@ -1,0 +1,78 @@
+#!/bin/bash
+secs="${HXDIAG_SECONDS:-10}"
+home="$HOME"
+if [ -n "$SUDO_USER" ]; then
+    home=$(awk -F: -v u="$SUDO_USER" '$1 == u {print $6}' /etc/passwd)
+fi
+out="${1:-${home:-/tmp}/hxdiag-$(date +%Y%m%d-%H%M%S).txt}"
+if [ "$(id -u)" != 0 ]; then
+    echo "hxdiag needs root for the kernel profiler: run 'sudo hxdiag'."
+    exit 1
+fi
+section() {
+    printf '\n===== %s =====\n' "$1"
+    shift
+    "$@" 2>&1
+}
+show() {
+    [ -r "$1" ] && cat "$1" || echo "(no $1)"
+}
+procs() {
+    for d in /proc/[0-9]*; do
+        [ -r "$d/stat" ] || continue
+        read -r line < "$d/stat"
+        echo "$line"
+    done
+}
+timed() {
+    local a b
+    a=${EPOCHREALTIME/[.,]/}
+    "$@" > /dev/null 2>&1
+    b=${EPOCHREALTIME/[.,]/}
+    echo "$* : $(( (b - a) / 1000 )) ms"
+}
+bench() {
+    timed ls -la /usr/bin
+    timed cat /proc/meminfo
+    timed bash -c 'for i in $(seq 1 200); do :; done'
+    timed bash -c 'for i in 1 2 3 4 5 6 7 8 9 10; do /bin/true; done'
+    timed dd if=/usr/bin/bash of=/dev/null bs=64k
+    timed find /usr/share -maxdepth 3
+}
+echo "Collecting... keep using the system the way it feels slow for the next $secs seconds."
+{
+    echo "HamixOS performance report"
+    date
+    uname -a
+    section "kernel command line" show /proc/cmdline
+    section "processor" show /proc/cpuinfo
+    section "memory" show /proc/meminfo
+    section "load" show /proc/loadavg
+    section "cpu counters" show /proc/stat
+    section "boot units (hxinit)" show /proc/hxinit
+    section "disks" show /proc/partitions
+    section "mounts" show /proc/mounts
+    section "drivers" show /proc/drivers
+    section "interrupts (before)" show /proc/interrupts
+    section "processes (before)" procs
+    hxctl prof reset > /dev/null 2>&1
+    hxctl prof start > /dev/null 2>&1
+    sleep "$secs"
+    section "micro benchmarks" bench
+    hxctl prof stop > /dev/null 2>&1
+    section "profile" hxctl prof report
+    section "interrupts (after)" show /proc/interrupts
+    section "processes (after)" procs
+    section "cpu counters (after)" show /proc/stat
+    section "load (after)" show /proc/loadavg
+    section "kernel log" show /proc/dmesg
+} > "$out"
+chmod 644 "$out"
+[ -n "$SUDO_USER" ] && chown "$SUDO_USER" "$out" 2>/dev/null
+echo "Report written to $out ($(wc -c < "$out") bytes)."
+media=$(awk '$2 ~ "^/(media|mnt)/" {print $2}' /proc/mounts 2>/dev/null)
+if [ -n "$media" ]; then
+    echo "Copy it to a USB stick, e.g.: cp \"$out\" ${media%%$'\n'*}/"
+else
+    echo "To send it, plug in a USB stick (it appears under /media) and copy the file there."
+fi

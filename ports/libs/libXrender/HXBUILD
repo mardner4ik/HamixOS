@@ -1,0 +1,17 @@
+pkgname=libXrender
+pkgver=0.9.12
+pkgdesc="X Render extension library"
+source="https://www.x.org/releases/individual/lib/libXrender-$pkgver.tar.xz"
+sha256="b832128da48b39c8d608224481743403ad1691bf4e554e4be9c174df171d1b97"
+builddir="libXrender-$pkgver"
+depends="libX11"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static --enable-malloc0returnsnull
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

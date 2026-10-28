@@ -1,18 +1,18 @@
 # musl libc support in HamixOS
 
-> Superseded for running real Linux/musl binaries by `docs/LINUXULATOR.md`
+> Superseded for running real Linux/musl binaries by `docs/architecture/LINUXULATOR.md`
 > (hxlinuxulator); the syscall table below predates it.
 
-See `docs/USERSPACE_ROADMAP.md` for the full milestone-by-milestone plan --
+See `docs/history/USERSPACE_ROADMAP.md` for the full milestone-by-milestone plan --
 this file only covers the syscall ABI side of the story, which is already
 built and testable today.
 
 If the goal is a pure-Rust userspace binary rather than a musl/C one, see
-`sdk/hamix_std` instead: it is a small `#![no_std]` runtime (raw `syscall`
+`userland/libs/hxstd` instead: it is a small `#![no_std]` runtime (raw `syscall`
 wrappers, a `brk`-backed global allocator, `println!`/`eprintln!`, an
 `entry!` macro for `_start`) built directly against the same syscall table
-documented below, with no musl toolchain required. `apps/hello_world` and
-`apps/hxserver` are both built against it and are a better starting point
+documented below, with no musl toolchain required. `userland/core/hello_world` and
+`userland/desktop/hxserver` are both built against it and are a better starting point
 for a new Rust program than raw musl-gcc.
 
 ## Where the syscall table lives
@@ -43,7 +43,7 @@ stubs use):
 | 186 | gettid | always returns 1 |
 | 218 | set_tid_address | stub, returns 1 |
 | 228 | clock_gettime | derived from the PIT tick counter (`kernel/src/task`), ignores `clockid_t` |
-| 9001 | **hamix_fbmap** (HamixOS-specific, not a real Linux number) | fills `{addr,pitch,width,height,bpp}` for the boot framebuffer and grants the calling ring-3 program access to that memory range. This is how userspace programs (e.g. `apps/hxserver`, see `docs/XORG.md`) get at the screen without a kernel-side display component. |
+| 9001 | **hamix_fbmap** (HamixOS-specific, not a real Linux number) | fills `{addr,pitch,width,height,bpp}` for the boot framebuffer and grants the calling ring-3 program access to that memory range. This is how userspace programs (e.g. `userland/desktop/hxserver`, see `docs/architecture/XORG.md`) get at the screen without a kernel-side display component. |
 | anything else | — | returns `-ENOSYS` (-38), exactly like real Linux |
 
 None of the syscalls above need more than 3 arguments (`rdi`,`rsi`,`rdx`), which is all `syscall_entry`'s trampoline currently forwards to `handle_syscall` — `r10`/`r8`/`r9` (musl's arg4-arg6 registers) reach the trampoline but are not yet threaded through. A real 6-argument `mmap(addr,len,prot,flags,fd,offset)` needs `fd`/`offset` (arg5/arg6) and is the next syscall-ABI milestone once a program actually needs file-backed mmap instead of the `hamix_fbmap` shortcut above.
@@ -96,5 +96,5 @@ make -j$(nproc) && sudo make install
 
 The loader now exists: `kernel/src/task/elf.rs` loads static ELF binaries
 and `PT_INTERP` dynamic ones, so a musl binary built this way runs directly.
-The packages under `/opt/linux` (see `docs/LINUXULATOR.md`) are the real
+The packages under `/opt/linux` (see `docs/architecture/LINUXULATOR.md`) are the real
 users of this path; `pantry` installs them.

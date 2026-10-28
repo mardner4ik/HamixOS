@@ -1,6 +1,8 @@
 use alloc::vec::Vec;
 
-use crate::syscall::{copy_out, install_fd, user_slice, EFAULT, EINVAL};
+use crate::task::fdtable::install_fd;
+use crate::usercopy::{copy_out, user_slice};
+use crate::errno::{EFAULT, EINVAL};
 use crate::net::inet::{self, Endpoint, Proto};
 use crate::task::{self, OpenFile};
 
@@ -9,6 +11,8 @@ pub const AF_INET6: u64 = 10;
 const AF_UNSPEC: u16 = 0;
 const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
+pub const AID_INET: u32 = 3003;
+const IPPROTO_ICMP: u64 = 1;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 const IPPROTO_IP: u64 = 0;
@@ -33,23 +37,23 @@ const MSG_TRUNC: u64 = 0x20;
 const MSG_DONTWAIT: u64 = 0x40;
 const MSG_WAITALL: u64 = 0x100;
 const MSG_NOSIGNAL: u64 = 0x4000;
-const EAFNOSUPPORT: i64 = -97;
-const EPROTONOSUPPORT: i64 = -93;
-const ESOCKTNOSUPPORT: i64 = -94;
-const ENOPROTOOPT: i64 = -92;
+use crate::errno::EAFNOSUPPORT;
+use crate::errno::EPROTONOSUPPORT;
+use crate::errno::ESOCKTNOSUPPORT;
+use crate::errno::ENOPROTOOPT;
 const MAX_CHUNK: usize = 16 << 20;
 
 fn wait(deadline: u64) -> Result<(), i64> {
-    if super::signal::pending() {
-        return Err(super::signal::EINTR);
+    if crate::syscall::signal::pending() {
+        return Err(crate::syscall::signal::EINTR);
     }
     if deadline != 0 && task::uptime_ms() >= deadline {
         return Err(inet::EAGAIN);
     }
     task::block(task::WAIT_PIPE, Some(4), task::input_seq());
     task::check_killed();
-    if super::signal::pending() {
-        return Err(super::signal::EINTR);
+    if crate::syscall::signal::pending() {
+        return Err(crate::syscall::signal::EINTR);
     }
     Ok(())
 }
@@ -59,6 +63,10 @@ fn deadline_after(ms: u64) -> u64 {
 }
 
 pub fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
+    let cred = task::current_cred();
+    if !cred.is_root() && !cred.in_group(AID_INET) {
+        return -13;
+    }
     if domain == AF_INET6 {
         return EAFNOSUPPORT;
     }
@@ -68,6 +76,7 @@ pub fn socket(domain: u64, kind: u64, protocol: u64) -> i64 {
     let proto = match (kind & 0xF, protocol) {
         (SOCK_STREAM, IPPROTO_IP) | (SOCK_STREAM, IPPROTO_TCP) => Proto::Tcp,
         (SOCK_DGRAM, IPPROTO_IP) | (SOCK_DGRAM, IPPROTO_UDP) => Proto::Udp,
+        (SOCK_DGRAM, IPPROTO_ICMP) => Proto::Icmp,
         (SOCK_STREAM, _) | (SOCK_DGRAM, _) => return EPROTONOSUPPORT,
         _ => return ESOCKTNOSUPPORT,
     };
@@ -221,8 +230,8 @@ pub fn send(id: u32, nonblock: bool, data: &[u8], dest: Option<Endpoint>, flags:
             Err(e) => break if sent > 0 { sent as i64 } else { e },
         }
     };
-    if result == inet::EPIPE && flags & MSG_NOSIGNAL == 0 && crate::syscall::linux_abi() {
-        super::signal::send(task::current_pid(), super::signal::SIGPIPE);
+    if result == inet::EPIPE && flags & MSG_NOSIGNAL == 0 && crate::syscall::posix_abi() {
+        crate::syscall::signal::send(task::current_pid(), crate::syscall::signal::SIGPIPE);
     }
     result
 }
@@ -369,7 +378,7 @@ pub fn getsockopt(id: u32, level: u64, name: u64, value: u64, len_ptr: u64) -> i
     let bytes: Vec<u8> = match (level, name) {
         (SOL_SOCKET, SO_TYPE) => int(if proto == Some(Proto::Tcp) { SOCK_STREAM as u32 } else { SOCK_DGRAM as u32 }),
         (SOL_SOCKET, SO_ERROR) => int((-inet::take_error(id)) as u32),
-        (SOL_SOCKET, SO_PROTOCOL) => int(if proto == Some(Proto::Tcp) { IPPROTO_TCP as u32 } else { IPPROTO_UDP as u32 }),
+        (SOL_SOCKET, SO_PROTOCOL) => int(match proto { Some(Proto::Tcp) => IPPROTO_TCP as u32, Some(Proto::Icmp) => IPPROTO_ICMP as u32, _ => IPPROTO_UDP as u32 }),
         (SOL_SOCKET, SO_DOMAIN) => int(AF_INET as u32),
         (SOL_SOCKET, SO_SNDBUF) => int(128 * 1024),
         (SOL_SOCKET, SO_RCVBUF) => int(256 * 1024),

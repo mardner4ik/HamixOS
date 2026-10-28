@@ -1,0 +1,21 @@
+pkgname=dillo
+pkgver=3.2.0
+pkgdesc="Small, fast graphical web browser (FLTK, X11 via Xwayland)"
+source="https://github.com/dillo-browser/dillo/releases/download/v$pkgver/dillo-$pkgver.tar.bz2"
+sha256="1066ed42ea7fe0ce19e79becd029c651c15689922de8408e13e70bb5701931bf"
+builddir="dillo-$pkgver"
+depends="fltk openssl libpng zlib libX11"
+
+build() {
+    sed "s#^prefix=.*#prefix=$HX_ROOT/usr#" "$HX_ROOT/usr/bin/fltk-config" > "$srcdir/fltk-config"
+    chmod 755 "$srcdir/fltk-config"
+    PATH="$srcdir:$PATH" ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc \
+        --disable-jpeg --disable-webp --disable-svg --disable-mbedtls --enable-openssl \
+        --with-ca-certs-file=/etc/ssl/certs/ca-certificates.crt
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+    rm -rf "$pkgdir/usr/share/doc" "$pkgdir/usr/share/man"
+}

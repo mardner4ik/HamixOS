@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Commands
+Comment=Dynamic command registry
+Keywords=registry;
+Exec=/usr/bin/hxcmd
+Icon=commands
+Terminal=false
+X-Nook-Key=commands
+X-Nook-Order=80
+Categories=System;
+X-Hamix-Permissions=inet;audio;

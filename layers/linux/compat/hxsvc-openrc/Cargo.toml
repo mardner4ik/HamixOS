@@ -1,0 +1,14 @@
+[package]
+name = "hxsvc-openrc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hxsvc-openrc"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../../../userland/libs/hxstd" }
+
+[package.metadata.hamix]
+install = "libexec"

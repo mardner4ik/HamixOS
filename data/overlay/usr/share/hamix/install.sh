@@ -1,15 +1,19 @@
-#!/usr/bin/hsh
+#!/usr/bin/bash
 # HamixOS installer back end. The graphical installer (hxinstall) writes a
-# KEY=value file and runs: hsh /usr/share/hamix/install.sh <file>
+# KEY=value file and runs: bash /usr/share/hamix/install.sh <file>
 # Lines starting with @ are progress messages for the installer window.
 
 if [ -z "$1" ]; then
     echo "usage: install.sh config-file"
-    echo "keys: DISK HOSTNAME USERNAME USER_PASSWORD ROOT_PASSWORD ADMIN AUTOSTART"
+    echo "keys: DISK HOSTNAME USERNAME USER_PASSWORD ROOT_PASSWORD ADMIN AUTOSTART LINUX"
     exit 2
 fi
 
-loadconf "$1"
+while IFS='=' read -r key value; do
+    case "$key" in
+        DISK|HOSTNAME|USERNAME|USER_PASSWORD|ROOT_PASSWORD|ADMIN|AUTOSTART|LINUX) declare "$key=$value" ;;
+    esac
+done < "$1"
 
 if [ "$(whoami)" != "root" ]; then
     echo "@error the installer must run as root"
@@ -21,6 +25,7 @@ if [ -z "$DISK" ]; then
 fi
 HOSTNAME=${HOSTNAME:-hamix}
 AUTOSTART=${AUTOSTART:-no}
+LINUX=${LINUX:-yes}
 ADMIN=${ADMIN:-yes}
 PART=/dev/${DISK}1
 TARGET=/mnt/hamix-target
@@ -43,7 +48,7 @@ mkfs.hext -L hamix $PART || fail "cannot format $PART"
 mount $PART $TARGET || fail "cannot mount $PART"
 
 echo "@step 3 Copying the system"
-for dir in usr etc bin sbin boot root var opt srv lib; do
+for dir in usr etc bin boot root var lib linux; do
     if [ -d /$dir ]; then
         echo "@detail /$dir"
         cp -a /$dir $TARGET/$dir || fail "copying /$dir failed"
@@ -55,21 +60,22 @@ done
 chmod 1777 $TARGET/tmp
 rm -rf $TARGET/var/cache/nook
 rm -f $TARGET/etc/commands
-rm -f $TARGET/root/.hsh_history
+rm -f $TARGET/root/.hsh_history $TARGET/root/.bash_history
 
 echo "@step 4 Creating accounts"
 userdel --root $TARGET user
 if [ -n "$USERNAME" ]; then
     if [ "$ADMIN" = "yes" ]; then
-        useradd --root $TARGET -G sudo -s /usr/bin/hsh $USERNAME || fail "cannot create $USERNAME"
+        useradd --root $TARGET -G sudo -s /usr/bin/bash $USERNAME || fail "cannot create $USERNAME"
     else
-        useradd --root $TARGET -s /usr/bin/hsh $USERNAME || fail "cannot create $USERNAME"
+        useradd --root $TARGET -s /usr/bin/bash $USERNAME || fail "cannot create $USERNAME"
     fi
     chpasswd --root $TARGET "$USERNAME" "$USER_PASSWORD" || fail "cannot set the password of $USERNAME"
 fi
 chpasswd --root $TARGET root "$ROOT_PASSWORD" || fail "cannot set the root password"
 hostname --root $TARGET $HOSTNAME
 setconf $TARGET/etc/hamix/login.conf autostart_desktop $AUTOSTART
+setconf $TARGET/etc/hamix/linux.conf enabled $LINUX
 setconf $TARGET/etc/os-release PRETTY_NAME "\"HamixOS 0.6.1\""
 echo "Welcome to HamixOS. On a text console, type startx for Nook; type help for shell commands." > $TARGET/etc/motd
 

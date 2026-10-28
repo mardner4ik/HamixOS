@@ -62,7 +62,7 @@ pub fn gzip_stream(rest: &[u8], sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<u
         crc = crc_update(&table, crc, chunk);
         sink(chunk)
     };
-    let (used, total) = mini_png::inflate::inflate_stream(deflate, &mut forward)?;
+    let (used, total) = imago::inflate::inflate_stream(deflate, &mut forward)?;
     let trailer = off + used;
     let footer = rest.get(trailer..trailer + 8).ok_or("truncated gzip trailer")?;
     let stored_crc = u32::from_le_bytes(footer[0..4].try_into().unwrap());
@@ -109,7 +109,7 @@ pub fn gzip_members(bytes: &[u8], limit: usize) -> Result<Vec<Member<'_>>, &'sta
             off += 2;
         }
         let deflate = rest.get(off..).ok_or("truncated gzip")?;
-        let (data, used) = mini_png::inflate::inflate_counted(deflate, 0)?;
+        let (data, used) = imago::inflate::inflate_counted(deflate, 0)?;
         let trailer = off + used;
         let footer = rest.get(trailer..trailer + 8).ok_or("truncated gzip trailer")?;
         let crc = u32::from_le_bytes(footer[0..4].try_into().unwrap());

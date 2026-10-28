@@ -9,7 +9,7 @@ use crate::arch::io;
 use crate::drivers::pci::{self, PciAddress};
 use crate::memory::frame;
 
-pub const KPI_VERSION: u32 = 6;
+pub const KPI_VERSION: u32 = 7;
 
 pub const CLASS_NETWORK: u32 = 1;
 pub const CLASS_DISPLAY: u32 = 2;
@@ -602,6 +602,40 @@ pub extern "C" fn hamix_display_current(out: *mut FbDesc) -> i32 {
     0
 }
 
+static FIRMWARE: Mutex<Vec<(usize, Vec<u8>)>> = Mutex::new(Vec::new());
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hamix_firmware_load(name: *const u8, len: usize, size_out: *mut usize) -> *const u8 {
+    let Some(name) = text_arg(name, len) else {
+        return core::ptr::null();
+    };
+    let owner = current_module().unwrap_or_else(|| String::from("?"));
+    if name.contains('/') || name.starts_with('.') {
+        return core::ptr::null();
+    }
+    let path = alloc::format!("/lib/firmware/{}", name);
+    let data = {
+        let mut guard = crate::fs::VFS.lock();
+        guard.as_mut().and_then(|v| v.read(0, &path).ok())
+    };
+    let Some(data) = data.filter(|d| !d.is_empty()) else {
+        crate::drivers::klog::log(&alloc::format!("module {}: firmware {} is missing", owner, path));
+        return core::ptr::null();
+    };
+    crate::drivers::klog::log(&alloc::format!("module {}: firmware {} ({} KiB)", owner, name, data.len() / 1024));
+    let ptr = data.as_ptr();
+    if !size_out.is_null() {
+        unsafe { core::ptr::write_unaligned(size_out, data.len()) };
+    }
+    FIRMWARE.lock().push((ptr as usize, data));
+    ptr
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn hamix_firmware_release(data: *const u8) {
+    FIRMWARE.lock().retain(|(ptr, _)| *ptr != data as usize);
+}
+
 fn text_arg(ptr: *const u8, len: usize) -> Option<String> {
     if ptr.is_null() || len == 0 {
         return None;
@@ -691,8 +725,18 @@ pub extern "C" fn hamix_request_irq(handle: *const PciHandle, handler: Option<cr
             crate::drivers::irq::release_vector(&name, vector);
         }
     }
-    if handle.irq == 0 || (handle.irq > 15 && cfg!(target_arch = "x86_64")) || handle.irq == 0xFF {
+    if handle.irq == 0 || handle.irq == 0xFF {
         return -19;
+    }
+    if handle.irq > 15 && cfg!(target_arch = "x86_64") {
+        disable_intx(address, false);
+        return match crate::drivers::irq::request_gsi(&name, handle.irq as u32, handler, context as u64) {
+            Some(vector) => {
+                crate::drivers::klog::log(&alloc::format!("module {}: IOAPIC GSI {} (vector {:#x}) for {:04x}:{:04x}", name, handle.irq, vector, handle.vendor, handle.device_id));
+                vector as i32
+            }
+            None => -19,
+        };
     }
     disable_intx(address, false);
     match crate::drivers::irq::request_legacy(&name, handle.irq, handler, context as u64) {

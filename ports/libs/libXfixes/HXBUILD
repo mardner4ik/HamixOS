@@ -1,0 +1,17 @@
+pkgname=libXfixes
+pkgver=6.0.1
+pkgdesc="X Fixes extension library"
+source="https://www.x.org/releases/individual/lib/libXfixes-$pkgver.tar.xz"
+sha256="b695f93cd2499421ab02d22744458e650ccc88c1d4c8130d60200213abc02d58"
+builddir="libXfixes-$pkgver"
+depends="libX11"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
+        --enable-shared --disable-static
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

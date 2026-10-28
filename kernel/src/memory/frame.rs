@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::arch::without_interrupts;
@@ -145,7 +146,93 @@ pub fn alloc_contiguous(count: usize, below: usize) -> Option<usize> {
     without_interrupts(|| FRAME_ALLOCATOR.lock().alloc_contiguous(count, below))
 }
 
+static REFS: AtomicUsize = AtomicUsize::new(0);
+static REFS_LEN: AtomicUsize = AtomicUsize::new(0);
+static SHARED: AtomicUsize = AtomicUsize::new(0);
+static REFS_INIT: Mutex<()> = Mutex::new(());
+
+fn refs() -> Option<&'static [AtomicU8]> {
+    let mut base = REFS.load(Ordering::Acquire);
+    if base == 0 {
+        without_interrupts(|| {
+            let _guard = REFS_INIT.lock();
+            if REFS.load(Ordering::Acquire) != 0 {
+                return;
+            }
+            let frames = FRAME_ALLOCATOR.lock().limit;
+            if let Some((ptr, _)) = crate::memory::vmalloc::alloc(frames.max(1)) {
+                unsafe { core::ptr::write_bytes(ptr, 0, frames) };
+                REFS_LEN.store(frames, Ordering::Release);
+                REFS.store(ptr as usize, Ordering::Release);
+            }
+        });
+        base = REFS.load(Ordering::Acquire);
+        if base == 0 {
+            return None;
+        }
+    }
+    Some(unsafe { core::slice::from_raw_parts(base as *const AtomicU8, REFS_LEN.load(Ordering::Acquire)) })
+}
+
+pub fn share(addr: usize) -> bool {
+    let Some(refs) = refs() else {
+        return false;
+    };
+    let Some(count) = refs.get(addr / PAGE_SIZE) else {
+        return false;
+    };
+    let mut current = count.load(Ordering::Relaxed);
+    loop {
+        if current == u8::MAX {
+            return false;
+        }
+        match count.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => {
+                SHARED.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
+            Err(now) => current = now,
+        }
+    }
+}
+
+pub fn is_shared(addr: usize) -> bool {
+    if SHARED.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    refs().and_then(|r| r.get(addr / PAGE_SIZE)).map(|c| c.load(Ordering::Acquire) != 0).unwrap_or(false)
+}
+
+pub fn shared_frames() -> usize {
+    SHARED.load(Ordering::Relaxed)
+}
+
+fn drop_share(addr: usize) -> bool {
+    if SHARED.load(Ordering::Relaxed) == 0 {
+        return false;
+    }
+    let Some(count) = refs().and_then(|r| r.get(addr / PAGE_SIZE)) else {
+        return false;
+    };
+    let mut current = count.load(Ordering::Relaxed);
+    loop {
+        if current == 0 {
+            return false;
+        }
+        match count.compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => {
+                SHARED.fetch_sub(1, Ordering::Relaxed);
+                return true;
+            }
+            Err(now) => current = now,
+        }
+    }
+}
+
 pub fn free_frame(addr: usize) {
+    if drop_share(addr) {
+        return;
+    }
     without_interrupts(|| FRAME_ALLOCATOR.lock().free(addr));
 }
 

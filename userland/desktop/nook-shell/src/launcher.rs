@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
+use hxstd::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
 use hxclient::ui::{self, theme, Style};
 use vellum::gfx::ellipsize;
 use vellum::Area;
@@ -343,7 +343,7 @@ impl Nook {
         let user = self.user.clone();
         let focus = self.launcher_focus;
         let dragging = matches!(self.grab, Grab::LauncherScroll { .. });
-        let icons: Vec<Option<*const vellum::Image>> = rows
+        let names: Vec<Option<String>> = rows
             .iter()
             .enumerate()
             .map(|(i, row)| {
@@ -353,12 +353,18 @@ impl Nook {
                 if !areas[i].overlaps(&list) {
                     return None;
                 }
-                let name = match entry {
+                Some(match entry {
                     Entry::App(app) => format!("apps/{}-24", apps::get(*app).key),
                     Entry::Command(_) => String::from("apps/commands-24"),
-                };
-                self.sized_icon(&name, ICON).map(|img| img as *const vellum::Image)
+                })
             })
+            .collect();
+        for name in names.iter().flatten() {
+            self.sized_icon(name, ICON);
+        }
+        let icons: Vec<Option<*const vellum::Image>> = names
+            .iter()
+            .map(|name| name.as_ref().and_then(|n| self.sized_icons.get(&(n.clone(), ICON))).map(|img| img as *const vellum::Image))
             .collect();
         let ui = self.ui();
         let mut search = core::mem::take(&mut self.search);

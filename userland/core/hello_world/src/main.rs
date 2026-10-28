@@ -4,7 +4,7 @@
 extern crate alloc;
 
 use alloc::vec;
-use hamix_std::{entry, env, println, sys, unix};
+use hxstd::{entry, env, println, sys, unix};
 
 fn check(ok: bool, what: &str, failures: &mut u32) {
     println!("{} {}", if ok { "  ok  " } else { "  FAIL" }, what);
@@ -93,7 +93,7 @@ fn main() -> i32 {
         return unix_client(&args[2]);
     }
 
-    println!("HamixOS userspace: hello from Rust + hamix_std!");
+    println!("HamixOS userspace: hello from Rust + hxstd!");
 
     let numbers = vec![1u32, 2, 3, 4, 5];
     let sum: u32 = numbers.iter().sum();

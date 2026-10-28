@@ -1,5 +1,6 @@
 pub mod ac97;
 pub mod hda;
+pub mod oss;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -29,10 +30,10 @@ pub trait AudioDevice: Send {
     }
 }
 
-pub const ENODEV: i64 = -19;
-pub const EINVAL: i64 = -22;
-pub const EBADF: i64 = -9;
-pub const EBUSY: i64 = -16;
+pub use crate::errno::ENODEV;
+pub use crate::errno::EINVAL;
+pub use crate::errno::EBADF;
+pub use crate::errno::EBUSY;
 
 const ONE: u64 = 1 << 32;
 const MAX_STREAMS: usize = 16;

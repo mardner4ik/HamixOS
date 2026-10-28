@@ -1,0 +1,3 @@
+CPU_ZERO cleared only CPU_ALLOC_SIZE(setsize) bytes, treating the byte size as a CPU count
+(16 of 128 bytes), so CPU_COUNT after sched_getaffinity counted stack garbage.
+Fixed in hxlibc/options/linux/generic/cpuset.cpp: memset(set, 0, setsize).

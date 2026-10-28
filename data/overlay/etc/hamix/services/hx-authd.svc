@@ -1,0 +1,5 @@
+description = Password checks, sudo tickets and password changes
+exec = /usr/libexec/hamix/hx-authd
+start = demand
+provides = hamix.auth
+restart = no

@@ -36,7 +36,7 @@
   `wfi`, `gp`, стек, BSS, `kernel_main(hart, dtb)`.
 * Спільний ранній шлях `kernel/src/early/`: консоль (PL011 / NS16550A),
   `kprintln!`, обробник паніки, `alloc_error_handler`.
-* `./build.sh aarch64`, `./build.sh riscv64` -- збірка і команда запуску QEMU.
+* `cargo xtask build --arch aarch64`, `cargo xtask build --arch riscv64` -- збірка і команда запуску QEMU.
 
 ## 2. Device tree, карта фізичної пам'яті, фреймовий алокатор і heap -- ЗРОБЛЕНО
 
@@ -64,10 +64,10 @@
   передає initrd тільки Linux-образам, тому ядро тепер має `Image`-заголовок.
 
 ```
-./build.sh aarch64
+cargo xtask build --arch aarch64
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 512M -nographic \
     -kernel target/aarch64-unknown-none-softfloat/release/kernel
-./build.sh riscv64
+cargo xtask build --arch riscv64
 qemu-system-riscv64 -M virt -m 512M -nographic \
     -kernel target/riscv64imac-unknown-none-elf/release/kernel
 ```
@@ -98,7 +98,7 @@ qemu-system-riscv64 -M virt -m 512M -nographic \
   адресу відмови) -- на цьому пізніше тримається `copy_from_user`.
 * Консоль отримує переривання прийому (PL011 `IMSC`, NS16550 `IER`), тобто
   перевірено реальний шлях IRQ від пристрою, а не лише таймер.
-* x86_64 лишається на `drivers/irq.rs`; переведення його на той самий
+* x86_64 лишається на `modules/irq.rs`; переведення його на той самий
   `arch::irqtab` -- разом із пунктом 5, коли `task/` почне викликати спільний
   API.
 
@@ -125,7 +125,7 @@ qemu-system-riscv64 -M virt -m 512M -nographic \
 * `AddressSpace::{new, map, alloc_range, unmap, translate, activate,
   destroy}` з однаковим API на aarch64/riscv64; `destroy` спершу
   перемикається на корінь ядра, якщо простір активний.
-* `memory::vmalloc` (див. `docs/OPTIMIZATION.md`) працює на всіх трьох
+* `memory::vmalloc` (див. `docs/architecture/OPTIMIZATION.md`) працює на всіх трьох
   архітектурах через `arch::kmap`; самоперевірка при старті розтягує `Vec`
   з 300 KiB до 4 MiB без копіювання.
 * Самоперевірка: відмова на незмапленій сторінці перехоплюється, запис через
@@ -152,7 +152,7 @@ qemu-system-riscv64 -M virt -m 512M -nographic \
   індекси, біти `VALID`/`OWNED`/`LAZY`, write-combining (Normal-NC на
   aarch64), синхронізація I-кешу (`dc cvau`+`ic ialluis`, `fence.i`).
   На riscv64 користувацькі адреси -- 128-192 ГіБ (Sv39), тому
-  `apps/link.ld` бере базу з `--defsym=HAMIX_USER_BASE`.
+  `userland/link.ld` бере базу з `--defsym=HAMIX_USER_BASE`.
 * **Перемикання контексту**: aarch64 зберігає x19-x30 + `DAIF`, riscv64 --
   `ra`, s0-s11 + `sstatus.SIE`. TLS: `TPIDR_EL0` зберігається/відновлюється
   при перемиканні, на riscv64 `tp` живе в кадрі (`CLONE_SETTLS` пише його
@@ -169,7 +169,7 @@ qemu-system-riscv64 -M virt -m 512M -nographic \
   (`O_DIRECTORY`, `O_NOFOLLOW`, `O_DIRECT`, `O_LARGEFILE` мають інші біти) і
   `riscv_flush_icache`. `struct stat` (128 байт замість 144) та
   `epoll_event` (16 байт, без `packed`) кодуються під архітектуру.
-* **Сигнали**: `syscall/linux/sigframe/{x86_64,aarch64,riscv64}.rs`,
+* **Сигнали**: `syscall/sigframe/{x86_64,aarch64,riscv64}.rs`,
   кадри сумісні з Linux (`rt_sigframe`, `fpsimd_context` на aarch64,
   `sc_regs`+D-стан на riscv64). Якщо програма не дала `SA_RESTORER`
   (glibc, riscv64-musl), ядро кладе трамплін `rt_sigreturn` на сторінку
@@ -204,7 +204,7 @@ aarch64/riscv64.
   smoltcp, DHCP), `input` (клавіатура, миша, планшет; коди Linux ->
   scancode set 1) і `gpu` (MMIO, framebuffer-консоль і Nook, апаратний
   курсор, зміна режиму). Ті самі драйвери працюють і на x86_64 через
-  virtio-PCI; GPU на PCI лишається за модулем `drivers/virtio-gpu`.
+  virtio-PCI; GPU на PCI лишається за модулем `modules/virtio-gpu`.
 * **PCIe ECAM** (`pci-host-ecam-generic`): конфігураційний простір через
   MMIO, розстановка BAR-ів із вікна `ranges` (без прошивки їх ніхто інший не
   програмує), маршрутизація INTx через `interrupt-map` у GIC/PLIC.
@@ -220,7 +220,7 @@ aarch64/riscv64.
   JAL/RVC_*/ADD*/SUB*/SET*` (два проходи, щоб `PCREL_LO12` знайшов свій
   `HI20`), `RELAX`/`ALIGN` ігноруються. Після релокацій -- синхронізація
   I-кешу. `build.sh` збирає модулі профілем `module` під target ядра;
-  `hamix_kpi` без змін в API. Перевірено: той самий `drivers/virtio-gpu`
+  `hamix_kpi` без змін в API. Перевірено: той самий `modules/virtio-gpu`
   вантажиться на aarch64 і riscv64, бере переривання з GIC/PLIC.
 * **`build.sh aarch64|riscv64`** збирає ядро, усі застосунки й модулі,
   root-образ `out/<arch>/hext.img`. Для aarch64 ще й `Image` з заголовком
@@ -231,12 +231,12 @@ aarch64/riscv64.
   `out/aarch64/efi.img` -- готовий FAT32 ESP для USB/SD.
 
 ```
-./build.sh aarch64
+cargo xtask build --arch aarch64
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 1G -nographic \
     -kernel out/aarch64/Image -initrd out/aarch64/hext.img
 qemu-system-aarch64 -M virt,acpi=off -cpu cortex-a72 -m 1G -nographic \
     -bios /usr/share/edk2/aarch64/QEMU_EFI.fd -drive file=out/aarch64/efi.img,format=raw,if=virtio
-./build.sh riscv64
+cargo xtask build --arch riscv64
 qemu-system-riscv64 -M virt -m 1G -nographic \
     -bios /usr/share/qemu/opensbi-riscv64-generic-fw_dynamic.bin \
     -kernel out/riscv64/kernel.elf -initrd out/riscv64/hext.img

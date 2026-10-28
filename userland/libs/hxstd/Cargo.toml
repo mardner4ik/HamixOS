@@ -1,0 +1,10 @@
+[package]
+name = "hxstd"
+version = "0.2.0"
+edition = "2021"
+
+[lib]
+
+[dependencies]
+hxlibc-sys = { path = "../../../hxlibc/rust/hxlibc-sys" }
+hext = { path = "../../../crates/hext" }

@@ -1,29 +1,27 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
+use hxstd::sys::{self, MOUSE_LEFT, MOUSE_RIGHT};
 use hxproto::{Event, Request};
 use vellum::Area;
 
 use crate::anim::{Effect, Finish};
 use crate::compositor::window::{edge_cursor, Body, Snap, SHADOW_SIZE, TITLE_H};
 use crate::compositor::send_event;
-use crate::{app_by_icon, apps, Grab, MenuAction, MenuItem, Nook, Popup, KEY_SNAP_DOWN, KEY_SNAP_LEFT, KEY_SNAP_UP};
+use crate::chrome::WindowAction;
+use crate::{apps, Grab, Nook, KEY_SNAP_DOWN, KEY_SNAP_LEFT, KEY_SNAP_UP};
 
 impl Nook {
     pub fn focus(&mut self, id: u32) {
-        if self.core.raise(id) {
+        let hiding = self.hiding(id);
+        if self.core.raise(id) || hiding {
             self.start_animation(id, Effect::Restore, None, Finish::None);
         }
         self.sync_focus();
     }
 
     pub fn sync_focus(&mut self) {
-        if !self.core.sync_focus() {
-            return;
-        }
-        let region = self.dock_region();
-        self.core.add_damage(region);
+        self.core.sync_focus();
     }
 
     fn new_window(&mut self, title: &str, icon: &str, w: i32, h: i32, body: Body) -> u32 {
@@ -52,6 +50,16 @@ impl Nook {
         self.focus(id);
     }
 
+    pub fn add_dialog(&mut self, over: Option<Area>, title: &str, icon: &str, w: i32, h: i32, body: Body) {
+        let id = self.new_window(title, icon, w, h, body);
+        if let (Some(parent), Some(index)) = (over, self.core.index_of(id)) {
+            let (x, y) = self.core.place_over(parent, w, h);
+            self.core.windows[index].x = x;
+            self.core.windows[index].y = y;
+        }
+        self.focus(id);
+    }
+
     pub fn open_about(&mut self) {
         if let Some(id) = self.core.windows.iter().find(|w| matches!(w.body, Body::About)).map(|w| w.id) {
             self.focus(id);
@@ -67,8 +75,13 @@ impl Nook {
         for child in self.core.children_of(id) {
             self.remove_window(child, notify);
         }
-        if self.core.take_window(id, notify).is_none() {
+        let Some(window) = self.core.take_window(id, notify) else {
             return;
+        };
+        if let Body::Wallpaper { client, request, .. } = window.body {
+            if client > 0 {
+                send_event(client, Event::WallpaperResult { request, accepted: false });
+            }
         }
         match self.grab {
             Grab::Move { id: g, .. } | Grab::Resize { id: g, .. } | Grab::Client(g) if g == id => self.grab = Grab::None,
@@ -78,8 +91,7 @@ impl Nook {
             self.hover_client = None;
         }
         self.switcher = None;
-        let region = self.dock_region();
-        self.core.add_damage(region);
+        self.minimize_targets.retain(|(w, _)| *w != id);
         self.sync_focus();
     }
 
@@ -88,14 +100,30 @@ impl Nook {
             return;
         };
         if let Body::Client { pid, .. } = self.core.windows[index].body {
-            send_event(pid, Event::Close { window: id });
+            let now = sys::uptime_ms();
+            self.closing.retain(|(w, _)| self.core.index_of(*w).is_some());
+            let asked = self.closing.iter().find(|(w, _)| *w == id).map(|(_, t)| *t);
+            match asked {
+                Some(at) if now.saturating_sub(at) >= 3000 => {
+                    if !self.trusted_bridge(pid) {
+                        sys::kill(pid);
+                    }
+                    self.closing.retain(|(w, _)| *w != id);
+                }
+                Some(_) => return,
+                None => {
+                    send_event(pid, Event::Close { window: id });
+                    self.closing.push((id, now));
+                    return;
+                }
+            }
         }
         self.start_animation(id, Effect::Close, None, Finish::None);
         self.remove_window(id, false);
     }
 
     pub fn minimize(&mut self, id: u32) {
-        if self.animating(id) {
+        if self.hiding(id) || self.core.index_of(id).map(|i| self.core.windows[i].minimized).unwrap_or(true) {
             return;
         }
         self.dismiss_client_popups();
@@ -184,13 +212,9 @@ impl Nook {
             return;
         }
         self.preload_window_icon(&icon);
-        let before = self.dock_region();
         self.core.windows[index].icon = icon;
         let area = self.core.windows[index].title_bar();
         self.core.add_damage(area);
-        self.core.add_damage(before);
-        let region = self.dock_region();
-        self.core.add_damage(region);
     }
 
     fn launched_ancestor(&self, pid: i64) -> Option<usize> {
@@ -235,10 +259,6 @@ impl Nook {
             None => String::from(apps::GENERIC_LINUX_ICON),
         };
         self.set_window_icon(window, icon);
-    }
-
-    pub fn app_windows(&self, app: usize) -> Vec<u32> {
-        self.core.windows.iter().filter(|w| w.icon == apps::get(app).key).map(|w| w.id).collect()
     }
 
     pub fn window_press(&mut self, x: i32, y: i32, button: u32) -> bool {
@@ -294,18 +314,11 @@ impl Nook {
                 let maximized = self.core.windows[index].tiled.is_some();
                 let mut items = Vec::new();
                 if resizable {
-                    items.push(MenuItem { label: String::from(if maximized { "Restore" } else { "Maximize" }), icon: if maximized { "ui/restore" } else { "ui/maximize" }, action: MenuAction::ToggleMaximize(id), danger: false });
+                    items.push((String::from(if maximized { "Restore" } else { "Maximize" }), if maximized { "ui/restore" } else { "ui/maximize" }, WindowAction::ToggleMaximize, false));
                 }
-                items.push(MenuItem { label: String::from("Minimize"), icon: "ui/minimize", action: MenuAction::Minimize(id), danger: false });
-                if let Some(app) = app_by_icon(&self.core.windows[index].icon) {
-                    if self.pinned.contains(&app) {
-                        items.push(MenuItem { label: String::from("Unpin from dock"), icon: "ui/unpin", action: MenuAction::UnpinApp(app), danger: false });
-                    } else {
-                        items.push(MenuItem { label: String::from("Pin to dock"), icon: "ui/pin", action: MenuAction::PinApp(app), danger: false });
-                    }
-                }
-                items.push(MenuItem { label: String::from("Close"), icon: "ui/close", action: MenuAction::CloseWindow(id), danger: true });
-                self.set_popup(Popup::Menu { x, y, items });
+                items.push((String::from("Minimize"), "ui/minimize", WindowAction::Minimize, false));
+                items.push((String::from("Close"), "ui/close", WindowAction::Close, true));
+                self.open_menu(id, x, y, items);
             }
             return true;
         }
@@ -327,6 +340,14 @@ impl Nook {
                     self.remove_window(id, false);
                 }
                 let _ = area;
+            }
+            Body::Wallpaper { .. } => {
+                let (set, cancel) = Nook::wallpaper_buttons(content);
+                if set.contains(x, y) {
+                    self.answer_wallpaper(id, true);
+                } else if cancel.contains(x, y) {
+                    self.answer_wallpaper(id, false);
+                }
             }
             Body::About => {}
         }
@@ -458,7 +479,7 @@ impl Nook {
     }
 
     pub fn cycle_switcher(&mut self) {
-        let count = self.core.windows.iter().filter(|w| !w.is_popup() && (!w.minimized || w.client_pid().is_some())).count();
+        let count = self.core.windows.iter().filter(|w| !w.is_popup() && w.workspace == self.core.workspace && (!w.minimized || w.client_pid().is_some())).count();
         if count < 2 && self.switcher.is_none() {
             if let Some(w) = self.core.windows.iter().find(|w| w.minimized) {
                 let id = w.id;
@@ -477,7 +498,7 @@ impl Nook {
     }
 
     pub fn switcher_order(&self) -> Vec<u32> {
-        self.core.windows.iter().rev().filter(|w| !w.is_popup() && (!w.minimized || w.client_pid().is_some())).map(|w| w.id).collect()
+        self.core.windows.iter().rev().filter(|w| !w.is_popup() && w.workspace == self.core.workspace && (!w.minimized || w.client_pid().is_some())).map(|w| w.id).collect()
     }
 
     pub fn switcher_area(&self) -> Area {
@@ -511,6 +532,10 @@ impl Nook {
                     return;
                 }
                 let (w, h) = (width as i32, height as i32);
+                if shm == 0 && !self.trusted_bridge(sender) {
+                    send_event(sender, Event::Rejected { reason: 2 });
+                    return;
+                }
                 let pixels = match self.core.adopt_buffer(shm, w, h, 16) {
                     Ok(p) => p,
                     Err(e) => {
@@ -522,9 +547,16 @@ impl Nook {
                 let work = self.core.work;
                 let outer_w = w.min(self.core.screen.width);
                 let outer_h = (h + TITLE_H).min(work.h);
-                let id = self.new_window(title.as_str(), &icon, outer_w, outer_h, Body::Client { pid: sender, shm, pixels, width: w, height: h });
+                let owner = self.pickers.iter().find(|p| p.pid == sender).map(|p| p.client).unwrap_or(sender);
+                let parent = self.core.windows.iter().rev().find(|w| !w.is_popup() && !w.minimized && w.client_pid() == Some(owner)).map(|w| w.outer());
+                let id = self.new_window(title.as_str(), &icon, outer_w, outer_h, Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false });
                 if let Some(index) = self.core.index_of(id) {
                     self.core.windows[index].requested = (w, h);
+                    if let Some(parent) = parent {
+                        let (x, y) = self.core.place_over(parent, outer_w, outer_h);
+                        self.core.windows[index].x = x;
+                        self.core.windows[index].y = y;
+                    }
                 }
                 send_event(sender, Event::Created { window: id });
                 if outer_w != w || outer_h != h + TITLE_H {
@@ -544,6 +576,10 @@ impl Nook {
                     send_event(sender, Event::Rejected { reason: 1 });
                     return;
                 }
+                if shm == 0 && !self.trusted_bridge(sender) {
+                    send_event(sender, Event::Rejected { reason: 2 });
+                    return;
+                }
                 let pixels = match self.core.adopt_buffer(shm, w, h, 1) {
                     Ok(p) => p,
                     Err(e) => {
@@ -552,7 +588,7 @@ impl Nook {
                     }
                 };
                 let area = self.core.popup_area(parent, x, y, w, h);
-                let id = self.core.new_popup(parent, area, Body::Client { pid: sender, shm, pixels, width: w, height: h });
+                let id = self.core.new_popup(parent, area, Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false });
                 send_event(sender, Event::Created { window: id });
             }
             Request::MovePopup { window, x, y } => {
@@ -634,7 +670,7 @@ impl Nook {
                 let Some(index) = self.core.index_of(window) else {
                     return;
                 };
-                if self.core.windows[index].client_pid() != Some(sender) {
+                if self.core.windows[index].client_pid() != Some(sender) || (shm == 0 && !self.trusted_bridge(sender)) {
                     return;
                 }
                 let (w, h) = (width as i32, height as i32);
@@ -677,6 +713,9 @@ impl Nook {
             Request::Destroy { window } => {
                 if let Some(index) = self.core.index_of(window) {
                     if self.core.windows[index].client_pid() == Some(sender) {
+                        if !self.core.windows[index].is_popup() && !self.core.windows[index].minimized {
+                            self.start_animation(window, Effect::Close, None, Finish::None);
+                        }
                         self.remove_window(window, false);
                     }
                 }

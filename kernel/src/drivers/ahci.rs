@@ -73,6 +73,7 @@ pub struct PortInfo {
     pub lba48: bool,
     pub model: String,
     pub serial: String,
+    pub atapi: bool,
 }
 
 struct Port {
@@ -81,6 +82,9 @@ struct Port {
     command_table: usize,
     lba48: bool,
 }
+
+const ATA_PACKET: u8 = 0xA0;
+const ATA_IDENTIFY_PACKET: u8 = 0xA1;
 
 struct Controller {
     abar: usize,
@@ -188,12 +192,22 @@ fn fill_fis(table: usize, command: u8, lba: u64, count: u16, lba_mode: bool) {
 }
 
 fn execute(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: usize, write_data: bool) -> Result<(), ()> {
+    execute_with(p, command, lba, count, buffer, bytes, write_data, None)
+}
+
+fn execute_with(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: usize, write_data: bool, packet: Option<&[u8; 12]>) -> Result<(), ()> {
     let port = p.base;
     if !wait_until(30_000, || read(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0) {
         recover(p);
         return Err(());
     }
-    fill_fis(p.command_table, command, lba, count, command != ATA_IDENTIFY);
+    fill_fis(p.command_table, command, lba, count, command != ATA_IDENTIFY && command != ATA_IDENTIFY_PACKET && command != ATA_PACKET);
+    if let Some(packet) = packet {
+        unsafe {
+            *(p.command_table as *mut u8).add(3) = 1;
+            core::ptr::copy_nonoverlapping(packet.as_ptr(), (p.command_table + 0x40) as *mut u8, 12);
+        }
+    }
 
     let mut chunks = 0usize;
     let mut offset = 0usize;
@@ -215,7 +229,7 @@ fn execute(p: &Port, command: u8, lba: u64, count: u16, buffer: *mut u8, bytes: 
     }
     unsafe {
         let header = p.command_list as *mut u32;
-        let flags = 5u32 | if write_data { 1 << 6 } else { 0 } | ((chunks as u32) << 16);
+        let flags = 5u32 | if write_data { 1 << 6 } else { 0 } | if packet.is_some() { 1 << 5 } else { 0 } | ((chunks as u32) << 16);
         *header.add(0) = flags;
         *header.add(1) = 0;
         *header.add(2) = p.command_table as u32;
@@ -286,7 +300,7 @@ fn ata_string(words: &[u16]) -> String {
     String::from(out.trim())
 }
 
-fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16; 256])> {
+fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16; 256], bool)> {
     let port = abar + 0x100 + index * 0x80;
     if !stop_port(port) {
         comreset(port);
@@ -334,7 +348,8 @@ fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16;
     wait_until(10_000, || read(port, PX_TFD) & (TFD_BSY | TFD_DRQ) == 0);
 
     let signature = read(port, PX_SIG);
-    if signature == SIG_ATAPI || (signature != SIG_ATA && signature != 0xFFFF_FFFF) {
+    let atapi = signature == SIG_ATAPI;
+    if !atapi && signature != SIG_ATA && signature != 0xFFFF_FFFF {
         stop_port(port);
         frame::free_frame(command_list);
         frame::free_frame(fis);
@@ -346,7 +361,7 @@ fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16;
     let p = Port { base: port, command_list, command_table, lba48: true };
     let mut words = [0u16; 256];
     let buffer = alloc_page()?;
-    let result = execute(&p, ATA_IDENTIFY, 0, 0, buffer as *mut u8, 512, false);
+    let result = execute(&p, if atapi { ATA_IDENTIFY_PACKET } else { ATA_IDENTIFY }, 0, 0, buffer as *mut u8, 512, false);
     if result.is_ok() {
         for (i, word) in words.iter_mut().enumerate() {
             *word = unsafe { core::ptr::read_unaligned((buffer + i * 2) as *const u16) };
@@ -354,7 +369,24 @@ fn setup_port(abar: usize, index: usize, staggered: bool) -> Option<(Port, [u16;
     }
     frame::free_frame(buffer);
     result.ok()?;
-    Some((p, words))
+    Some((p, words, atapi))
+}
+
+fn capacity_blocks(p: &Port) -> Option<u64> {
+    let buffer = alloc_page()?;
+    let mut command = [0u8; 12];
+    command[0] = 0x25;
+    let mut result = None;
+    for _ in 0..3 {
+        if execute_with(p, ATA_PACKET, 0, 0, buffer as *mut u8, 8, false, Some(&command)).is_ok() {
+            let reply = unsafe { core::slice::from_raw_parts(buffer as *const u8, 8) };
+            let last = u32::from_be_bytes([reply[0], reply[1], reply[2], reply[3]]) as u64;
+            result = Some(last + 1);
+            break;
+        }
+    }
+    frame::free_frame(buffer);
+    result
 }
 
 fn attach(device: &PciDevice, controllers: &mut Vec<Controller>, ports_out: &mut Vec<PortInfo>) {
@@ -403,15 +435,17 @@ fn attach(device: &PciDevice, controllers: &mut Vec<Controller>, ports_out: &mut
             continue;
         }
         match setup_port(abar, index, staggered) {
-            Some((mut port, words)) => {
-                let lba48 = words[83] & (1 << 10) != 0;
-                let sectors = if lba48 {
+            Some((mut port, words, atapi)) => {
+                let lba48 = !atapi && words[83] & (1 << 10) != 0;
+                let sectors = if atapi {
+                    capacity_blocks(&port).unwrap_or(0) * 4
+                } else if lba48 {
                     words[100] as u64 | (words[101] as u64) << 16 | (words[102] as u64) << 32 | (words[103] as u64) << 48
                 } else {
                     words[60] as u64 | (words[61] as u64) << 16
                 };
                 port.lba48 = lba48;
-                if sectors == 0 {
+                if sectors == 0 && !atapi {
                     ports.push(None);
                     continue;
                 }
@@ -422,10 +456,12 @@ fn attach(device: &PciDevice, controllers: &mut Vec<Controller>, ports_out: &mut
                     lba48,
                     model: ata_string(&words[27..47]),
                     serial: ata_string(&words[10..20]),
+                    atapi,
                 };
                 crate::drivers::klog::log(&format!(
-                    "ahci: port {} -- {} MiB {}",
+                    "ahci: port {} -- {}{} MiB {}",
                     index,
+                    if atapi { "optical, " } else { "" },
                     sectors / 2048,
                     info.model
                 ));
@@ -460,7 +496,11 @@ pub fn init() {
                 crate::drivers::klog::log(&format!("ahci: {:04x}:{:04x} is driven by module {}", device.vendor, device.device, owner));
                 continue;
             }
+            let before = controllers.len();
             attach(&device, &mut controllers, &mut ports);
+            if controllers.len() > before {
+                pci::claim_builtin(device.address, "ahci (built-in)");
+            }
         }
     }
     *CONTROLLERS.lock() = controllers;
@@ -536,4 +576,19 @@ pub fn flush(controller: usize, port: usize) -> Result<(), ()> {
         execute(p, command, 0, 0, core::ptr::null_mut(), 0, false)
     })
     .ok_or(())?
+}
+
+pub fn read_blocks(controller: usize, port: usize, block: u64, count: usize, buf: &mut [u8]) -> Result<(), ()> {
+    let mut done = 0usize;
+    while done < count {
+        let n = (count - done).min(16);
+        let mut command = [0u8; 12];
+        command[0] = 0x28;
+        command[2..6].copy_from_slice(&((block + done as u64) as u32).to_be_bytes());
+        command[7..9].copy_from_slice(&(n as u16).to_be_bytes());
+        let slice = &mut buf[done * 2048..(done + n) * 2048];
+        with_port(controller, port, |p| execute_with(p, ATA_PACKET, 0, 0, slice.as_mut_ptr(), n * 2048, false, Some(&command))).ok_or(())??;
+        done += n;
+    }
+    Ok(())
 }

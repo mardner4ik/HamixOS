@@ -1,4 +1,4 @@
-use super::{frame, kernel_end, modules, FramebufferInfo, ModuleInfo, CMDLINE, FRAMEBUFFER, MODULES, RSDP};
+use super::{frame, kernel_end, modules, FramebufferInfo, ModuleInfo, CMDLINE, FRAMEBUFFER, MODULES, RSDP, TAG_VENTOY};
 
 const MB2_FB_TYPE_RGB: u8 = 1;
 
@@ -120,6 +120,10 @@ pub fn init(multiboot_info_ptr: usize) {
                     if fb_type == MB2_FB_TYPE_RGB {
                         *FRAMEBUFFER.lock() = Some(FramebufferInfo { addr, pitch, width, height, bpp });
                     }
+                }
+                TAG_VENTOY if tag_size > 8 && tag_size <= 0x10000 + 520 => {
+                    let data = core::slice::from_raw_parts((multiboot_info_ptr + offset + 8) as *const u8, tag_size - 8);
+                    super::set_ventoy(data.to_vec());
                 }
                 _ => {}
             }

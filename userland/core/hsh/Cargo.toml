@@ -8,4 +8,7 @@ name = "hsh"
 path = "src/main.rs"
 
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
+hxstd = { path = "../../libs/hxstd" }
+
+[package.metadata.hamix]
+disabled = true

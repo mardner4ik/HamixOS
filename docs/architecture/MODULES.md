@@ -1,10 +1,10 @@
 # Loadable driver modules and the HamixOS KPI
 
-This is stage 1 of point 5 in `docs/ARCHITECTURE_ROADMAP.md`: the piece the
+This is stage 1 of point 5 in `docs/roadmap/ARCHITECTURE_ROADMAP.md`: the piece the
 roadmap calls a prerequisite ("модуль-завантажувач у ядрі -- передумова").
 It makes driver code *optional and separately loadable* instead of statically
 linked into every kernel image, so a machine only pays for a driver it
-actually needs. It now also carries the GPU work: `drivers/virtio-gpu` is a
+actually needs. It now also carries the GPU work: `modules/virtio-gpu` is a
 real accelerated display driver loaded this way, which is stage 3 of the
 roadmap's GPU plan (mode setting and scanout, not 3D). No *Linux* driver has
 been ported yet -- that is still stage 2 (NIC).
@@ -24,34 +24,36 @@ been ported yet -- that is still stage 2 (NIC).
 * `kernel/src/module/symbols.rs` -- the kernel's export table. A module that
   references anything not in this table is refused at load time, by name.
 * `sdk/hamix_kpi` -- the crate a module is written against.
-* `drivers/example-nic` -- a reference module that claims QEMU's
+* `modules/example-nic` -- a reference module that claims QEMU's
   `8086:100e` e1000 through the KPI. It exists to keep the loader honest,
   not to replace `kernel/src/net/e1000.rs`.
-* `drivers/virtio-gpu` -- a real display driver for the virtio-gpu 2D device
+* `modules/virtio-gpu` -- a real display driver for the virtio-gpu 2D device
   (`1af4:1050`, QEMU's `virtio-vga` and `virtio-gpu-pci`): virtio 1.0 PCI
   capability discovery, split virtqueues, scanout resources, damage-driven
   transfer and flush, mode setting, and a hardware cursor plane. See
   "The display class" below.
-* `drivers/intel-display` -- Intel integrated graphics, gen6 (Sandy Bridge,
+* `modules/intel-display` -- Intel integrated graphics, gen6 (Sandy Bridge,
   HD 2000/3000) through gen9 (Skylake HD 520, Kaby Lake, Coffee Lake): panel
   size and timings read from the active transcoder, refresh rate measured
   from the pipe frame counter, EDID over GMBUS, refresh switching, resolution
   changing through the panel fitter (gen6-gen8) or the pipe scaler (gen9),
   and a hardware cursor plane. **Not verified on real hardware** -- see the
   warning at the end of this file.
-* `drivers/ahci` -- the SATA controller as a module (`CLASS_BLOCK`). With
-  `early = 1` in its `.conf` it is packed into `/boot/kmods.tar`, which GRUB
-  loads as `module2 ... kmods`, so the kernel can mount the root disk from it.
-* `drivers/xhci` -- the xHCI USB 3 host controller (`CLASS_USB_HCD`): BIOS
+* `modules/ahci` -- the SATA controller as a module (`CLASS_BLOCK`). With
+  `early = 1` in its `.conf` it is packed into `/boot/initfs.tar` (only such modules, plus
+  `etc/initfs.conf`), which GRUB loads as `module2 ... initfs`, so the kernel can mount the root
+  disk from it. The kernel still accepts the old `kmods` label. A module is not autoloaded for a PCI
+  function that a built-in driver already serves (`pci::claim_builtin`).
+* `modules/xhci` -- the xHCI USB 3 host controller (`CLASS_USB_HCD`): BIOS
   handoff, command and event rings, device enumeration, HID boot keyboards
   and mice, hot-plug. Builds and runs on x86_64, aarch64 and riscv64.
-* `drivers/e1000e` -- Intel's Linux e1000e driver (v6.6) compiled against
+* `modules/e1000e` -- Intel's Linux e1000e driver (v6.6) compiled against
   `sdk/hamix_linuxkpi`. It differs from upstream only by removed parts;
-  `tools/linuxkpi/check-upstream.sh drivers/e1000e` proves it.
+  `tools/linuxkpi/check-upstream.sh modules/e1000e` proves it.
 * `sdk/hamix_linuxkpi` -- the Linux-name layer: `include/linux/*.h` over one
   `hamix/linuxkpi.h`, plus `src/linuxkpi.c` (printk, timers, work queues,
   `pci_driver`, IRQ, DMA, `sk_buff`, NAPI, `net_device`).
-* `docs/KPI_ROADMAP.md` -- the six directions this KPI grew in; all are done.
+* `docs/roadmap/KPI_ROADMAP.md` -- the six directions this KPI grew in; all are done.
 * `kernel/src/drivers/video/sysfs.rs` -- the synthetic `/sys/bus/pci/devices`
   and `/sys/class/drm` trees that let Linux programs (`fastfetch`, and
   anything else that walks sysfs) see the real graphics card.
@@ -169,8 +171,8 @@ A module can also drive the screen. `hamix_register_display(name, ops, fb)`
 hands the kernel a framebuffer the module owns plus a `DisplayOps` table, and
 from that point the kernel's framebuffer *is* the module's scanout buffer:
 the text console, `display::map` (what `hxserver` gets from `fbmap`) and the
-mouse bounds all follow it. `drivers/virtio-gpu` is the reference
-implementation; `docs/GRAPHICS_ROADMAP.md` describes the layer it sits in.
+mouse bounds all follow it. `modules/virtio-gpu` is the reference
+implementation; `docs/roadmap/GRAPHICS_ROADMAP.md` describes the layer it sits in.
 
 `DisplayOps` is a capability table -- a module fills in only what its
 hardware can do, and sets the matching `CAP_*` bit:
@@ -211,7 +213,7 @@ transfer of two 32x32 rectangles.
 Naming a GPU needs no driver at all, only a PCI id database, so that part is
 kept separate from everything above:
 
-* `drivers/intel-graphics-driver/src/chipset/models.rs` maps 84 Intel device
+* `modules/intel-graphics-driver/src/chipset/models.rs` maps 84 Intel device
   ids (gen6 through gen9) to marketing names and generations. `gpuinfo` uses
   it, so an Intel card is named correctly with nothing installed.
 * `kernel/src/drivers/video/sysfs.rs` writes a Linux-shaped
@@ -302,7 +304,7 @@ reports which of the two the device has. There is also no IOAPIC: legacy
 lines go through the 8259 pair, which is enough for one interrupting device
 per line but not for heavy sharing.
 
-**Interrupts themselves are done** -- see `docs/KPI_ROADMAP.md` point 2.
+**Interrupts themselves are done** -- see `docs/roadmap/KPI_ROADMAP.md` point 2.
 `kernel/src/drivers/irq.rs` holds the per-vector handler table, the
 `hamix_schedule_work` bottom half and the callback watchdog; `interrupts`
 and `/proc/interrupts` show the lines. The poll callback registered with
@@ -319,7 +321,7 @@ testable without the hardware. Writing that blind is not defensible, so the
 cursor plane is as far as Intel 2D offload goes here. Until a backend exists
 `gpu::fill` and `gpu::copy` return `-95` and callers fall back to the CPU.
 
-**Intel gen6-gen9 is not verified on hardware.** `drivers/intel-display` was
+**Intel gen6-gen9 is not verified on hardware.** `modules/intel-display` was
 written against the documented register layout and cannot be tested here --
 QEMU has no Intel GPU to emulate. Everything it does at load time is a
 register *read* (transcoder timings, pipe frame counter) plus EDID over

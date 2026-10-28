@@ -1,6 +1,6 @@
 # Wallpaper credits
 
-The photographic wallpapers in `overlay/usr/share/wallpapers/` come from Wikimedia Commons.
+The photographic wallpapers in `data/overlay/usr/share/wallpapers/` come from Wikimedia Commons.
 Each one was centre-cropped to 16:9 and scaled to 1920×1080 (plus a 172×104 thumbnail in `thumbs/`); nothing else was changed.
 The same list ships as `/usr/share/wallpapers/CREDITS` and is shown in Settings → Appearance.
 

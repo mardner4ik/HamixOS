@@ -27,7 +27,10 @@ pub fn is_user_range(addr: u64, len: u64) -> bool {
 pub struct AddressSpace {
     pub root: u64,
     pub lazy: Vec<LazyRegion>,
+    pub spans: Vec<(u64, u64, usize)>,
 }
+
+const MAX_SPANS: usize = 4096;
 
 fn user_top(index: usize) -> bool {
     pte::USER_TOP.contains(&index)
@@ -46,7 +49,7 @@ impl AddressSpace {
             }
         }
         pte::barrier();
-        Some(Self { root, lazy: Vec::new() })
+        Some(Self { root, lazy: Vec::new(), spans: Vec::new() })
     }
 
     unsafe fn entry(&self, virt: u64, create: bool) -> Option<*mut u64> {
@@ -87,6 +90,18 @@ impl AddressSpace {
     }
 
     pub fn is_mapped(&self, addr: u64, len: u64) -> bool {
+        self.is_accessible(addr, len, 0)
+    }
+
+    pub fn is_readable(&self, addr: u64, len: u64) -> bool {
+        self.is_accessible(addr, len, pte::PROT_READ)
+    }
+
+    pub fn is_writable(&self, addr: u64, len: u64) -> bool {
+        self.is_accessible(addr, len, pte::PROT_READ | pte::PROT_WRITE)
+    }
+
+    fn is_accessible(&self, addr: u64, len: u64, need: u8) -> bool {
         if !is_user_range(addr, len.max(1)) {
             return false;
         }
@@ -99,7 +114,8 @@ impl AddressSpace {
             let mut slot = pte::index(page, pte::LEVELS - 1);
             let mut at = first;
             while slot < ENTRIES && page < end {
-                if !pte::valid(unsafe { *at }) {
+                let e = unsafe { *at };
+                if !pte::valid(e) || pte::prot_of(e) & need != need {
                     return false;
                 }
                 at = unsafe { at.add(1) };
@@ -111,7 +127,11 @@ impl AddressSpace {
     }
 
     pub fn map_lazy(&mut self, start: u64, len: u64, region: LazyRegion) -> bool {
-        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len && r.private == region.private && r.prot == region.prot) {
+        self.map_lazy_prot(start, len, region, region.prot)
+    }
+
+    pub fn map_lazy_prot(&mut self, start: u64, len: u64, region: LazyRegion, prot: u8) -> bool {
+        let index = match self.lazy.iter().position(|r| r.node == region.node && r.start == region.start && r.offset == region.offset && r.file_len == region.file_len && r.private == region.private) {
             Some(i) => i,
             None => {
                 self.lazy.push(region);
@@ -123,15 +143,21 @@ impl AddressSpace {
         if !is_user_range(page, end - page) {
             return false;
         }
+        if self.lazy[index].node != ANON_NODE {
+            if self.spans.len() >= MAX_SPANS {
+                self.spans.remove(0);
+            }
+            self.spans.push((page, end, index));
+        }
         while page < end {
             unsafe {
                 let Some(slot) = self.entry(page, true) else {
                     return false;
                 };
                 if pte::valid(*slot) && pte::owned(*slot) {
-                    frame::free_frame(pte::addr(*slot) as usize);
+                    crate::memory::tlb::defer_free(self.root, pte::addr(*slot) as usize);
                 }
-                *slot = pte::lazy_prot(index, region.prot);
+                *slot = pte::lazy_prot(index, prot);
             }
             page += PAGE_SIZE;
         }
@@ -147,6 +173,12 @@ impl AddressSpace {
             return false;
         }
         unsafe { self.entry(virt, false).map(|e| pte::valid(*e) || pte::is_lazy(*e)).unwrap_or(false) }
+    }
+
+    pub fn file_origin(&self, virt: u64) -> Option<(usize, u64)> {
+        let &(_, _, index) = self.spans.iter().rev().find(|(start, end, _)| *start <= virt && virt < *end)?;
+        let region = self.lazy.get(index)?;
+        Some((region.node, region.offset + (virt - region.start)))
     }
 
     pub fn lazy_at(&self, virt: u64) -> Option<(usize, LazyRegion)> {
@@ -203,6 +235,36 @@ impl AddressSpace {
         true
     }
 
+    pub fn protect_range(&mut self, start: u64, len: u64, prot: u8) -> usize {
+        let mut page = start & !(PAGE_SIZE - 1);
+        let end = (start + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if !is_user_range(page, end.saturating_sub(page)) {
+            return 0;
+        }
+        let mut changed = 0;
+        while page < end {
+            unsafe {
+                if let Some(slot) = self.entry(page, false) {
+                    let e = *slot;
+                    if pte::valid(e) || pte::is_lazy(e) {
+                        let shared = pte::valid(e) && pte::owned(e) && frame::is_shared(pte::addr(e) as usize);
+                        let updated = pte::with_prot(e, prot, shared);
+                        if updated != e {
+                            *slot = updated;
+                            if pte::valid(e) {
+                                pte::flush_page(page);
+                            }
+                        }
+                        changed += 1;
+                    }
+                }
+            }
+            page += PAGE_SIZE;
+        }
+        pte::barrier();
+        changed
+    }
+
     pub fn alloc_range(&mut self, start: u64, len: u64) -> bool {
         let mut page = start & !(PAGE_SIZE - 1);
         let end = (start + len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
@@ -237,7 +299,7 @@ impl AddressSpace {
             };
             let replaced = pte::valid(*slot);
             if replaced && pte::owned(*slot) {
-                frame::free_frame(pte::addr(*slot) as usize);
+                crate::memory::tlb::defer_free(self.root, pte::addr(*slot) as usize);
             }
             *slot = pte::user_page(phys, false, write_combining);
             if replaced {
@@ -256,7 +318,7 @@ impl AddressSpace {
                 if let Some(slot) = self.entry(page, false) {
                     if pte::valid(*slot) {
                         if pte::owned(*slot) {
-                            frame::free_frame(pte::addr(*slot) as usize);
+                            crate::memory::tlb::defer_free(self.root, pte::addr(*slot) as usize);
                         }
                         *slot = 0;
                     } else if pte::is_lazy(*slot) {
@@ -293,8 +355,7 @@ impl AddressSpace {
                     let pt = pte::addr(*slot) as *const u64;
                     if (0..ENTRIES).all(|i| *pt.add(i) == 0) {
                         *slot = 0;
-                        pte::flush_all();
-                        frame::free_frame(pt as usize);
+                        crate::memory::tlb::defer_free(self.root, pt as usize);
                     }
                 }
             }
@@ -306,6 +367,7 @@ impl AddressSpace {
         let mut done = 0usize;
         while done < data.len() {
             let addr = virt + done as u64;
+            resolve_cow(self.root, addr);
             let Some(phys) = self.translate(addr) else {
                 return false;
             };
@@ -318,11 +380,11 @@ impl AddressSpace {
         true
     }
 
-    fn copy_level(source: u64, level: usize) -> Option<u64> {
+    fn copy_level(source: u64, level: usize, cow: bool) -> Option<u64> {
         let fresh = frame::alloc_zeroed_frame()? as u64;
         let leaf = level == pte::LEVELS - 1;
         unsafe {
-            let src = source as *const u64;
+            let src = source as *mut u64;
             let dst = fresh as *mut u64;
             for i in 0..ENTRIES {
                 let e = *src.add(i);
@@ -333,7 +395,11 @@ impl AddressSpace {
                     continue;
                 }
                 if leaf {
-                    if pte::owned(e) {
+                    if pte::owned(e) && cow && frame::share(pte::addr(e) as usize) {
+                        let shared = if pte::writable(e) || pte::is_cow(e) { pte::make_cow(e) } else { e };
+                        *src.add(i) = shared;
+                        *dst.add(i) = shared;
+                    } else if pte::owned(e) {
                         let Some(page) = frame::alloc_frame() else {
                             *dst.add(i) = 0;
                             Self::free_level(fresh, level);
@@ -348,7 +414,7 @@ impl AddressSpace {
                 } else if !pte::is_table(e, level) {
                     *dst.add(i) = e;
                 } else {
-                    let Some(child) = Self::copy_level(pte::addr(e), level + 1) else {
+                    let Some(child) = Self::copy_level(pte::addr(e), level + 1, cow) else {
                         Self::free_level(fresh, level);
                         return None;
                     };
@@ -360,15 +426,24 @@ impl AddressSpace {
     }
 
     pub fn duplicate(&self) -> Option<AddressSpace> {
+        self.duplicate_with(false)
+    }
+
+    pub fn duplicate_cow(&self) -> Option<AddressSpace> {
+        self.duplicate_with(pte::COW_SUPPORTED)
+    }
+
+    fn duplicate_with(&self, cow: bool) -> Option<AddressSpace> {
         let mut copy = AddressSpace::new()?;
         copy.lazy = self.lazy.clone();
+        copy.spans = self.spans.clone();
         for index in pte::USER_TOP {
             unsafe {
                 let e = *(self.root as *const u64).add(index);
                 if !pte::valid(e) || !pte::is_table(e, 0) {
                     continue;
                 }
-                let Some(table) = Self::copy_level(pte::addr(e), 1) else {
+                let Some(table) = Self::copy_level(pte::addr(e), 1, cow) else {
                     copy.destroy();
                     return None;
                 };
@@ -376,6 +451,9 @@ impl AddressSpace {
             }
         }
         pte::barrier();
+        if cow && pte::read_root() == self.root {
+            pte::flush_all();
+        }
         Some(copy)
     }
 
@@ -417,6 +495,57 @@ impl AddressSpace {
         }
         frame::free_frame(self.root as usize);
         self.root = 0;
+    }
+}
+
+static COW_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
+pub fn resolve_cow(root: u64, virt: u64) -> bool {
+    if !pte::COW_SUPPORTED || !is_user_range(virt, 1) {
+        return false;
+    }
+    let copied = crate::arch::without_interrupts(|| {
+        let _guard = COW_LOCK.lock();
+        let mut table = root as *mut u64;
+        let slot = unsafe {
+            for level in 0..pte::LEVELS - 1 {
+                let entry = table.add(pte::index(virt, level));
+                if !pte::valid(*entry) || !pte::is_table(*entry, level) {
+                    return None;
+                }
+                table = pte::addr(*entry) as *mut u64;
+            }
+            table.add(pte::index(virt, pte::LEVELS - 1))
+        };
+        let e = unsafe { *slot };
+        if !pte::valid(e) {
+            return None;
+        }
+        if !pte::is_cow(e) {
+            return pte::writable(e).then_some(false);
+        }
+        let old = pte::addr(e) as usize;
+        let fresh = if frame::is_shared(old) {
+            let Some(page) = frame::alloc_frame() else {
+                return None;
+            };
+            unsafe { core::ptr::copy_nonoverlapping(old as *const u8, page as *mut u8, PAGE_SIZE as usize) };
+            frame::free_frame(old);
+            page as u64
+        } else {
+            old as u64
+        };
+        unsafe { *slot = pte::make_private(e, fresh) };
+        pte::flush_page(virt);
+        Some(fresh != old as u64)
+    });
+    match copied {
+        Some(true) => {
+            crate::memory::tlb::shootdown(root);
+            true
+        }
+        Some(false) => true,
+        None => false,
     }
 }
 

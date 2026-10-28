@@ -1,0 +1,68 @@
+--- a/options/posix/generic/posix_locale.cpp	2026-09-29 17:31:22.597783432 +0300
++++ b/options/posix/generic/posix_locale.cpp	2026-09-29 17:32:55.266089590 +0300
+@@ -1,37 +1,45 @@
+ #include <bits/posix/posix_locale.h>
+ #include <bits/ensure.h>
++#include <frg/allocation.hpp>
++#include <mlibc/allocator.hpp>
+ #include <mlibc/debug.hpp>
+ 
+ namespace {
+ 
+-bool newlocale_seen = false;
+-bool uselocale_seen = false;
++struct hamix_locale {
++	int mask;
++};
++
++hamix_locale global_locale{0};
++thread_local locale_t current_locale = nullptr;
+ 
+ }
+ 
+-locale_t newlocale(int, const char *, locale_t) {
+-	// Due to all of the locale functions being stubs, the locale will not be used
+-	if(!newlocale_seen) {
+-		mlibc::infoLogger() << "mlibc: newlocale() is a no-op" << frg::endlog;
+-		newlocale_seen = true;
++locale_t newlocale(int mask, const char *, locale_t base) {
++	if(base && base != &global_locale) {
++		static_cast<hamix_locale *>(base)->mask |= mask;
++		return base;
+ 	}
+-	return nullptr;
++	return frg::construct<hamix_locale>(getAllocator(), hamix_locale{mask});
+ }
+ 
+-void freelocale(locale_t) {
+-	mlibc::infoLogger() << "mlibc: freelocale() is a no-op" << frg::endlog;
+-	return;
++void freelocale(locale_t locale) {
++	if(locale && locale != &global_locale)
++		frg::destruct(getAllocator(), static_cast<hamix_locale *>(locale));
+ }
+ 
+-locale_t uselocale(locale_t) {
+-	if(!uselocale_seen) {
+-		mlibc::infoLogger() << "mlibc: uselocale() is a no-op" << frg::endlog;
+-		uselocale_seen = true;
+-	}
+-	return nullptr;
++locale_t uselocale(locale_t locale) {
++	locale_t previous = current_locale ? current_locale : reinterpret_cast<locale_t>(-1L);
++	if(locale == reinterpret_cast<locale_t>(-1L))
++		current_locale = nullptr;
++	else if(locale)
++		current_locale = locale;
++	return previous;
+ }
+ 
+-locale_t duplocale(locale_t) {
+-	mlibc::infoLogger() << "mlibc: duplocale() is a no-op" << frg::endlog;
+-	return nullptr;
++locale_t duplocale(locale_t locale) {
++	int mask = 0;
++	if(locale && locale != reinterpret_cast<locale_t>(-1L))
++		mask = static_cast<hamix_locale *>(locale)->mask;
++	return frg::construct<hamix_locale>(getAllocator(), hamix_locale{mask});
+ }

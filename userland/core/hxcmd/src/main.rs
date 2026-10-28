@@ -1,203 +1,248 @@
-#![no_std]
-#![no_main]
+#![cfg_attr(target_os = "hamix", no_std)]
+#![cfg_attr(target_os = "hamix", no_main)]
 
 extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::{entry, eprintln, sys};
-use hxclient::ui::{self, theme, FieldAction, Hits, Style, TextField, Ui};
-use hxclient::{Event, Window, MOUSE_LEAVE, MOUSE_MOVE, MOUSE_PRESS};
-use vellum::{Area, Painter};
+use hxtoolkit::{button, column, icon, input, list, row, space, text, title, App, Context, Element, Length, Settings, Tone};
 
-const INITIAL_W: i32 = 640;
-const INITIAL_H: i32 = 480;
+const COMMANDS_DIR: &str = "/var/lib/hamix/commands";
+const COMMANDS_BIN: &str = "/var/lib/hamix/commands/bin";
+const LEGACY_COMMANDS: &str = "/etc/commands";
+const RESERVED: &[&str] = &[
+    "help", "clear", "edit", "echo", "uname", "whoami", "id", "pwd", "ls", "cd", "cat", "mkdir", "touch", "rm", "chmod", "chown", "exec", "startx", "hostname", "date", "sudo", "passwd", "useradd",
+    "halt", "poweroff", "reboot", "version", "history", "dmesg", "logout", "exit", "ps", "kill", "cmd", "sync", "free",
+];
 
-fn ww() -> i32 {
-    hxclient::window_width()
+#[derive(Clone)]
+struct Command {
+    name: String,
+    owner: u32,
+    path: String,
+    args: Vec<String>,
 }
 
-fn hh() -> i32 {
-    hxclient::window_height()
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 32 && !name.starts_with('.') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Hit {
-    Field(usize),
+fn parse(line: &str) -> Option<Command> {
+    let f: Vec<&str> = line.trim_end_matches('\n').split('\t').collect();
+    if f.len() < 3 || !valid_name(f[0]) {
+        return None;
+    }
+    Some(Command { name: String::from(f[0]), owner: f[1].parse().unwrap_or(0), path: String::from(f[2]), args: f[3..].iter().map(|a| String::from(*a)).collect() })
+}
+
+fn quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+fn registered() -> Vec<Command> {
+    let mut out: Vec<Command> = hxport::entries(COMMANDS_DIR)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !e.is_dir)
+        .filter_map(|e| hxport::read_to_string(&format!("{}/{}", COMMANDS_DIR, e.name)).as_deref().and_then(parse))
+        .collect();
+    for line in hxport::read_to_string(LEGACY_COMMANDS).unwrap_or_default().lines() {
+        if let Some(c) = parse(line) {
+            if !out.iter().any(|o| o.name == c.name) {
+                out.push(c);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn register(name: &str, program: &str, args: &[&str]) -> Result<(), String> {
+    if !valid_name(name) || RESERVED.contains(&name) {
+        return Err(String::from("this name is not allowed"));
+    }
+    if args.iter().any(|a| a.contains('\t')) || program.contains('\t') {
+        return Err(String::from("tabs are not allowed"));
+    }
+    if !hxport::exists(program) {
+        return Err(format!("{} does not exist", program));
+    }
+    let uid = hxport::uid();
+    if let Some(existing) = registered().into_iter().find(|c| c.name == name) {
+        if existing.owner != uid && uid != 0 {
+            return Err(String::from("it belongs to another user"));
+        }
+    }
+    hxport::mkdir(COMMANDS_DIR);
+    let mut line = format!("{}\t{}\t{}", name, uid, program);
+    for a in args {
+        line.push('\t');
+        line.push_str(a);
+    }
+    line.push('\n');
+    let file = format!("{}/{}", COMMANDS_DIR, name);
+    if !hxport::write(&file, line.as_bytes()) {
+        return Err(String::from("permission denied"));
+    }
+    hxport::chmod(&file, 0o644);
+    hxport::mkdir(COMMANDS_BIN);
+    let mut script = format!("#!/bin/sh\nexec {}", quote(program));
+    for a in args {
+        script.push(' ');
+        script.push_str(&quote(a));
+    }
+    script.push_str(" \"$@\"\n");
+    let wrapper = format!("{}/{}", COMMANDS_BIN, name);
+    if hxport::write(&wrapper, script.as_bytes()) {
+        hxport::chmod(&wrapper, 0o755);
+    }
+    Ok(())
+}
+
+fn unregister(command: &Command) -> Result<(), String> {
+    let uid = hxport::uid();
+    if command.owner != uid && uid != 0 {
+        return Err(String::from("it belongs to another user"));
+    }
+    hxport::remove(&format!("{}/{}", COMMANDS_BIN, command.name));
+    if hxport::remove(&format!("{}/{}", COMMANDS_DIR, command.name)) { Ok(()) } else { Err(String::from("permission denied")) }
+}
+
+struct Commands {
+    name: String,
+    program: String,
+    args: String,
+    commands: Vec<Command>,
+    message: (String, Tone),
+}
+
+#[derive(Clone)]
+enum Msg {
+    Name(String),
+    Program(String),
+    Args(String),
     Add,
     Run(usize),
     Remove(usize),
+    Refresh,
 }
 
-struct App {
-    window: Window,
-    ui: Ui,
-    fields: [TextField; 3],
-    focus: usize,
-    commands: Vec<sys::CommandEntry>,
-    hits: Hits<Hit>,
-    hover: Option<Hit>,
-    message: (String, bool),
-}
+impl App for Commands {
+    type Message = Msg;
 
-impl App {
-    fn refresh(&mut self) {
-        self.commands = sys::cmd_list();
+    fn title(&self) -> String {
+        String::from("Commands")
     }
 
-    fn add(&mut self) {
-        let name = String::from(self.fields[0].text.trim());
-        let program = String::from(self.fields[1].text.trim());
-        if name.is_empty() || program.is_empty() {
-            self.message = (String::from("Name and program are required"), false);
-            return;
-        }
-        let path = if program.contains('/') { program.clone() } else { format!("/usr/bin/{}", program) };
-        let args: Vec<&str> = self.fields[2].text.split_whitespace().collect();
-        let r = sys::cmd_register(&name, &path, &args);
-        if r < 0 {
-            self.message = (format!("Cannot register '{}': {}", name, sys::error_name(r)), false);
+    fn view(&self) -> Element<Msg> {
+        let field = |label: &str, value: &str, hint: &str, msg: fn(String) -> Msg, width: Length| -> Element<Msg> {
+            column![text(label).small().tone(Tone::Faint), input(value, hint, msg).on_submit(Msg::Add).width(Length::Fill)].spacing(4).width(width).into()
+        };
+        let form = column![
+            row![
+                field("Name", &self.name, "", Msg::Name, Length::Fixed(150)),
+                field("Program", &self.program, "e.g. hxnotes", Msg::Program, Length::Fixed(200)),
+                field("Arguments", &self.args, "", Msg::Args, Length::Fill),
+            ]
+            .spacing(12),
+            row![text(self.message.0.clone()).tone(self.message.1), space(), button("Add").primary().on_press(Msg::Add).width(100)],
+        ]
+        .spacing(10)
+        .card();
+        let body: Element<Msg> = if self.commands.is_empty() {
+            column![text("No commands yet").tone(Tone::Faint)].align(hxtoolkit::Align::Center).padding(40).card().fill().into()
         } else {
-            self.message = (format!("'{}' is now a command in every shell", name), true);
-            for f in self.fields.iter_mut() {
-                f.set("");
-            }
-            self.focus = 0;
-        }
-        self.refresh();
+            list(
+                self.commands
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        row![
+                            icon("ui/run"),
+                            text(c.name.clone()).strong().width(150),
+                            text(format!("{} {}", c.path, c.args.join(" "))).dim().fill(),
+                            button("Run").on_press(Msg::Run(i)),
+                            button("Remove").flat().on_press(Msg::Remove(i)),
+                        ]
+                        .spacing(10)
+                        .into()
+                    })
+                    .collect(),
+            )
+            .row_height(42)
+            .into()
+        };
+        column![
+            title("Command registry"),
+            text("Commands registered here run by name in bash and appear in the Nook menu.").dim(),
+            form,
+            body,
+        ]
+        .padding(16)
+        .spacing(12)
+        .fill()
+        .into()
     }
 
-    fn draw(&mut self) {
-        let ui = &self.ui;
-        let buffer = self.window.buffer();
-        let mut p = Painter::new(buffer, ww(), hh());
-        let hits = &mut self.hits;
-        hits.clear();
-        let hover = self.hover;
-        p.fill(Area::new(0, 0, ww(), hh()), theme::bg());
-        p.text(&ui.title, 20, 16, "Command registry", theme::text());
-        p.text(&ui.font, 20, 44, "Commands registered here run by name in hsh and appear in the Nook menu.", theme::dim());
-        let form = Area::new(16, 72, ww() - 32, 128);
-        ui::card(&mut p, form);
-        let labels = ["Name", "Program", "Arguments"];
-        let widths = [150, 200, form.w - 150 - 200 - 48];
-        let mut x = form.x + 12;
-        for i in 0..3 {
-            p.text(&ui.small, x + 2, form.y + 12, labels[i], theme::faint());
-            let area = Area::new(x, form.y + 30, widths[i], 36);
-            ui::text_field(&mut p, ui, area, &mut self.fields[i], self.focus == i, if i == 1 { "e.g. hxnotes" } else { "" });
-            hits.add(area, Hit::Field(i));
-            x += widths[i] + 12;
-        }
-        let add = Area::new(form.right() - 112, form.bottom() - 46, 100, 34);
-        ui::button(&mut p, ui, add, "Add", Style::Primary, hover == Some(Hit::Add), true);
-        hits.add(add, Hit::Add);
-        if !self.message.0.is_empty() {
-            ui::text_in(&mut p, &ui.font, form.x + 14, add, &self.message.0, if self.message.1 { theme::success() } else { theme::danger() });
-        }
-        let list = Area::new(16, 214, ww() - 32, hh() - 230);
-        ui::card(&mut p, list);
-        if self.commands.is_empty() {
-            ui::centered_text(&mut p, &ui.font, list, "No commands yet", theme::faint());
-        }
-        for (i, c) in self.commands.iter().enumerate() {
-            let row = Area::new(list.x + 8, list.y + 8 + i as i32 * 40, list.w - 16, 36);
-            if row.bottom() > list.bottom() {
-                break;
+    fn update(&mut self, message: Msg, _cx: &mut Context<Msg>) {
+        match message {
+            Msg::Name(v) => self.name = v,
+            Msg::Program(v) => self.program = v,
+            Msg::Args(v) => self.args = v,
+            Msg::Add => {
+                let name = String::from(self.name.trim());
+                let program = String::from(self.program.trim());
+                if name.is_empty() || program.is_empty() {
+                    self.message = (String::from("Name and program are required"), Tone::Danger);
+                    return;
+                }
+                let path = if program.contains('/') { program } else { format!("/usr/bin/{}", program) };
+                let args: Vec<&str> = self.args.split_whitespace().collect();
+                match register(&name, &path, &args) {
+                    Ok(()) => {
+                        self.message = (format!("'{}' is now a command in every shell", name), Tone::Success);
+                        self.name.clear();
+                        self.program.clear();
+                        self.args.clear();
+                    }
+                    Err(e) => self.message = (format!("Cannot register '{}': {}", name, e), Tone::Danger),
+                }
+                self.commands = registered();
             }
-            ui::symbol(&mut p, ui, "ui/run", row.x + 10, row.y + 10, theme::accent_hover());
-            ui::text_in(&mut p, &ui.medium, row.x + 36, Area::new(row.x, row.y, 170, row.h), &c.name, theme::text());
-            let target = format!("{} {}", c.path, c.args.join(" "));
-            ui::text_in(&mut p, &ui.font, row.x + 180, Area::new(row.x, row.y, row.w - 180, row.h), &target, theme::dim());
-            let run = Area::new(row.right() - 150, row.y + 2, 68, 32);
-            let remove = Area::new(row.right() - 76, row.y + 2, 76, 32);
-            ui::button(&mut p, ui, run, "Run", Style::Secondary, hover == Some(Hit::Run(i)), true);
-            ui::button(&mut p, ui, remove, "Remove", Style::Flat, hover == Some(Hit::Remove(i)), true);
-            hits.add(run, Hit::Run(i));
-            hits.add(remove, Hit::Remove(i));
+            Msg::Run(i) => {
+                if let Some(c) = self.commands.get(i) {
+                    let args: Vec<&str> = c.args.iter().map(|a| a.as_str()).collect();
+                    if let Err(e) = hxport::spawn(&c.path, &args) {
+                        self.message = (format!("'{}' failed to start: {}", c.name, e), Tone::Danger);
+                    }
+                }
+            }
+            Msg::Remove(i) => {
+                if let Some(c) = self.commands.get(i).cloned() {
+                    self.message = match unregister(&c) {
+                        Ok(()) => (format!("Removed '{}'", c.name), Tone::Success),
+                        Err(e) => (format!("Cannot remove: {}", e), Tone::Danger),
+                    };
+                    self.commands = registered();
+                }
+            }
+            Msg::Refresh => self.commands = registered(),
         }
-        self.window.present();
+    }
+
+    fn tick(&self) -> Option<(u32, Msg)> {
+        Some((2000, Msg::Refresh))
     }
 }
 
-fn main() -> i32 {
-    let mut ui = Ui::load();
-    ui.preload(&["ui/run"]);
-    let window = match Window::open("Commands", INITIAL_W as u32, INITIAL_H as u32) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("hxcmd: {}", e);
-            return 1;
-        }
-    };
-    let mut app = App { window, ui, fields: [TextField::default(), TextField::default(), TextField::default()], focus: 0, commands: Vec::new(), hits: Hits::new(), hover: None, message: (String::new(), true) };
-    app.window.set_icon("commands");
-    app.window.set_min_size(480, 360);
-    app.refresh();
-    app.draw();
-    loop {
-        let event = app.window.wait_event(2000);
-        match event {
-            Some(Event::Close { .. }) => return 0,
-            Some(Event::Resize { .. }) | Some(Event::Theme { .. }) => app.draw(),
-            Some(Event::Mouse { x, y, kind, .. }) => match kind {
-                MOUSE_MOVE | MOUSE_LEAVE => {
-                    let hover = if kind == MOUSE_LEAVE { None } else { app.hits.at(x, y) };
-                    if hover != app.hover {
-                        app.hover = hover;
-                        app.draw();
-                    }
-                }
-                MOUSE_PRESS => {
-                    match app.hits.at(x, y) {
-                        Some(Hit::Field(i)) => {
-                            app.focus = i;
-                            if let Some(area) = app.hits.area_of(Hit::Field(i)) {
-                                let font = &app.ui.font;
-                                app.fields[i].click(font, x - area.x - 10);
-                            }
-                        }
-                        Some(Hit::Add) => app.add(),
-                        Some(Hit::Run(i)) => {
-                            if let Some(c) = app.commands.get(i) {
-                                let name = c.name.clone();
-                                if sys::cmd_run(&name, &[] as &[&str], sys::SPAWN_DETACH) < 0 {
-                                    app.message = (format!("'{}' failed to start", name), false);
-                                }
-                            }
-                        }
-                        Some(Hit::Remove(i)) => {
-                            if let Some(c) = app.commands.get(i) {
-                                let r = sys::cmd_unregister(&c.name);
-                                app.message = if r < 0 { (format!("Cannot remove: {}", sys::error_name(r)), false) } else { (format!("Removed '{}'", c.name), true) };
-                                app.refresh();
-                            }
-                        }
-                        None => {}
-                    }
-                    app.draw();
-                }
-                _ => {}
-            },
-            Some(Event::Key { code, .. }) => {
-                match app.fields[app.focus].key(code) {
-                    FieldAction::Submit => app.add(),
-                    FieldAction::Next => app.focus = (app.focus + 1) % 3,
-                    _ => {}
-                }
-                app.draw();
-            }
-            None => {
-                let before = app.commands.len();
-                app.refresh();
-                if before != app.commands.len() {
-                    app.draw();
-                }
-            }
-            _ => {}
-        }
-    }
+fn run() -> i32 {
+    let app = Commands { name: String::new(), program: String::new(), args: String::new(), commands: registered(), message: (String::new(), Tone::Dim) };
+    hxtoolkit::run(Settings::new("commands").size(640, 480).min_size(480, 360), app)
 }
 
-entry!(main);
+#[cfg(target_os = "hamix")]
+hxstd::entry!(run);
+
+#[cfg(not(target_os = "hamix"))]
+hxtoolkit::main!(run);

@@ -1,0 +1,18 @@
+pkgname=curl
+pkgver=8.10.1
+pkgdesc="URL transfer tool and library"
+source="https://curl.se/download/curl-$pkgver.tar.xz"
+sha256="73a4b0e99596a09fa5924a4fb7e4b995a85fda0d18a2c02ab9cf134bebce04ee"
+builddir="curl-$pkgver"
+depends="zlib openssl"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --disable-shared --enable-static \
+        --with-openssl="$HX_ROOT/usr" --with-zlib="$HX_ROOT/usr" --without-libpsl --without-brotli --without-zstd \
+        --without-nghttp2 --without-libidn2 --disable-ldap --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

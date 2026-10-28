@@ -1,6 +1,6 @@
 [package]
 name = "hxterm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,10 @@ name = "hxterm"
 path = "src/main.rs"
 
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
-vellum = { path = "../../libs/vellum" }
-hxclient = { path = "../../libs/hxclient" }
-hxvt = { path = "../../libs/hxvt" }
+hxstd = { path = "../../libs/hxstd" }
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["nook"] }
+vellum = { path = "../../../crates/vellum" }
+hxvt = { path = "../../../crates/hxvt" }
+
+[package.metadata.hamix]
+desktop = "nook"

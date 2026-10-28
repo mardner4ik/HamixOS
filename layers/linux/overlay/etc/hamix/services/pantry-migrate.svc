@@ -1,0 +1,5 @@
+description = Move Linux packages from /opt/linux or the shared tree into /linux
+exec = /usr/bin/pantry migrate --quiet
+start = boot
+restart = no
+layer = linux

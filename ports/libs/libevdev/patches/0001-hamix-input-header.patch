@@ -1,0 +1,16 @@
+--- a/include/linux/input.h
++++ b/include/linux/input.h
+@@ -1,4 +1,4 @@
+-#ifdef __linux__
++#if defined(__linux__) || defined(__hamix__)
+ #include "linux/input.h"
+ #elif __FreeBSD__
+ #include "freebsd/input.h"
+--- a/include/linux/uinput.h
++++ b/include/linux/uinput.h
+@@ -1,4 +1,4 @@
+-#ifdef __linux__
++#if defined(__linux__) || defined(__hamix__)
+ #include "linux/uinput.h"
+ #elif __FreeBSD__
+ #include "freebsd/uinput.h"

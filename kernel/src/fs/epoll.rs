@@ -3,8 +3,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use spin::Mutex;
 
-use crate::syscall::{copy_out, install_fd, target, user_slice, Target, EBADF, EINVAL, ENOENT};
-use super::tty;
+use crate::task::fdtable::{install_fd, target, Target};
+use crate::usercopy::{copy_out, user_slice, user_slice_mut};
+use crate::errno::{EBADF, EINVAL, ENOENT};
+use crate::tty;
 use crate::arch::without_interrupts;
 use crate::task::{self, OpenFile};
 
@@ -19,8 +21,8 @@ const EVENT_SIZE: usize = 12;
 const EVENT_SIZE: usize = 16;
 const DATA_AT: usize = EVENT_SIZE - 8;
 const MAX_EVENTS: u64 = 4096;
-const EEXIST: i64 = -17;
-const ELOOP: i64 = -40;
+use crate::errno::EEXIST;
+use crate::errno::ELOOP;
 
 #[derive(Clone, Copy)]
 struct Interest {
@@ -87,7 +89,7 @@ pub fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event: u64) -> i64 {
     }
     match target(fd) {
         Target::Bad => return EBADF,
-        Target::Epoll(_) => return ELOOP,
+        Target::Epoll(inner) if inner == id => return ELOOP,
         _ => {}
     }
     let interest = if op == EPOLL_CTL_DEL {
@@ -175,12 +177,21 @@ fn collect(id: u32, max: usize) -> Vec<(u32, u64)> {
     ready
 }
 
+static NESTING: AtomicU32 = AtomicU32::new(0);
+const MAX_NESTING: u32 = 4;
+
 pub fn ready_count(id: u32) -> usize {
+    if NESTING.fetch_add(1, Ordering::Relaxed) >= MAX_NESTING {
+        NESTING.fetch_sub(1, Ordering::Relaxed);
+        return 0;
+    }
     let items: Vec<(i32, Interest)> = with(|m| m.get(&id).map(|i| i.items.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default());
-    items
+    let count = items
         .into_iter()
-        .filter(|(fd, i)| i.armed && !matches!(target(*fd as u64), Target::Bad | Target::Epoll(_)) && tty::readiness(*fd as u64, (i.events & 0xFFFF) as u16) != 0)
-        .count()
+        .filter(|(fd, i)| i.armed && !matches!(target(*fd as u64), Target::Bad) && !matches!(target(*fd as u64), Target::Epoll(inner) if inner == id) && tty::readiness(*fd as u64, (i.events & 0xFFFF) as u16) != 0)
+        .count();
+    NESTING.fetch_sub(1, Ordering::Relaxed);
+    count
 }
 
 pub fn sys_epoll_wait(epfd: u64, events: u64, max: u64, timeout_ms: i64) -> i64 {
@@ -191,11 +202,12 @@ pub fn sys_epoll_wait(epfd: u64, events: u64, max: u64, timeout_ms: i64) -> i64 
     if max == 0 || max > MAX_EVENTS {
         return EINVAL;
     }
-    if let Err(e) = user_slice(events, max * EVENT_SIZE as u64) {
+    if let Err(e) = user_slice_mut(events, max * EVENT_SIZE as u64) {
         return e;
     }
     let deadline = if timeout_ms < 0 { None } else { Some(task::ticks() + task::ms_to_ticks(timeout_ms as u64)) };
     loop {
+        let seq = task::input_seq();
         let ready = collect(id, max as usize);
         if !ready.is_empty() {
             let mut raw = Vec::with_capacity(ready.len() * EVENT_SIZE);
@@ -211,11 +223,11 @@ pub fn sys_epoll_wait(epfd: u64, events: u64, max: u64, timeout_ms: i64) -> i64 
         if timeout_ms == 0 || deadline.map(|d| now >= d).unwrap_or(false) {
             return 0;
         }
-        if super::signal::pending() {
-            return super::signal::EINTR;
+        if crate::syscall::signal::pending() {
+            return crate::syscall::signal::EINTR;
         }
         let slice = deadline.map(|d| d - now).unwrap_or(task::TICK_HZ / 10).clamp(1, task::TICK_HZ / 10);
-        tty::sleep_for_events(slice);
+        tty::sleep_for_events_since(seq, slice);
     }
 }
 

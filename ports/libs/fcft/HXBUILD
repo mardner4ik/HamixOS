@@ -1,0 +1,17 @@
+pkgname=fcft
+pkgver=3.1.9
+pkgdesc="Font loading and glyph rasterization library for Wayland programs"
+source="fcft-$pkgver.tar.gz::https://codeberg.org/dnkl/fcft/archive/$pkgver.tar.gz"
+sha256="ae6872d42c96e6ca4fa35e4e6ef86e2458e4119fc7393dadd06a36c86bb3def2"
+builddir="fcft"
+depends="tllist freetype fontconfig pixman harfbuzz"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dc_args="-I$HX_ROOT/usr/include" -Dwerror=false -Ddocs=disabled -Dgrapheme-shaping=disabled -Drun-shaping=disabled -Dtest-text-shaping=false
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+}

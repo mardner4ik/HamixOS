@@ -1,0 +1,81 @@
+--- a/subprojects/frigg/include/frg/slab.hpp	2026-09-29 15:56:49.400553584 +0300
++++ b/subprojects/frigg/include/frg/slab.hpp	2026-09-29 15:56:49.444003863 +0300
+@@ -245,7 +245,7 @@
+ 	struct slab_frame : frame {
+ 		slab_frame(uintptr_t address_, size_t length_, int index_)
+ 		: frame{frame_type::slab, address_, length_},
+-				index{index_}, num_reserved{0}, available{nullptr} { }
++				index{index_}, num_reserved{0}, available{nullptr}, fresh{address_} { }
+ 
+ 		slab_frame(const slab_frame &) = delete;
+ 
+@@ -254,6 +254,7 @@
+ 		const int index;
+ 		unsigned int num_reserved;
+ 		freelist *available;
++		uintptr_t fresh;
+ 		rbtree_hook partial_hook;
+ 	};
+ 
+@@ -295,6 +296,24 @@
+ 
+ 	slab_frame *_construct_slab(int index);
+ 
++	void _partition_slab(slab_frame *slb) {
++		size_t item_size = bucket_to_size(slb->index);
++		uintptr_t end = slb->address + slb->length;
++		uintptr_t limit = (slb->fresh + page_size) & ~(page_size - 1);
++		freelist *first = nullptr;
++		freelist **tail = &first;
++		while(slb->fresh < end && (!first || slb->fresh + item_size <= limit)) {
++			if constexpr (has_poisoning)
++				_plcy.unpoison(reinterpret_cast<void *>(slb->fresh), sizeof(freelist));
++			auto object = new (reinterpret_cast<void *>(slb->fresh)) freelist;
++			*tail = object;
++			tail = &object->link;
++			slb->fresh += item_size;
++		}
++		*tail = slb->available;
++		slb->available = first;
++	}
++
+ 	bool reallocate_in_slab_(slab_frame *slb, void *p, size_t new_size) {
+ 		size_t item_size = bucket_to_size(slb->index);
+ 		FRG_ASSERT(slb->contains(p));
+@@ -442,6 +461,8 @@
+ 				FRG_ASSERT(!"slab_pool corruption. Possible write to unallocated object");
+ 			slb->available = object->link;
+ 			slb->num_reserved++;
++			if(!slb->available)
++				_partition_slab(slb);
+ 
+ 			if(!slb->available) {
+ 				bkt->partial_tree.remove(slb);
+@@ -462,6 +483,8 @@
+ 				FRG_ASSERT(!"slab_pool corruption. Possible write to unallocated object");
+ 			slb->available = object->link;
+ 			slb->num_reserved++;
++			if(!slb->available)
++				_partition_slab(slb);
+ 
+ 			unique_lock<Mutex> tree_guard(_tree_mutex);
+ #ifdef FRG_SLAB_TRACK_REGIONS
+@@ -669,17 +692,7 @@
+ 	//if(logAllocations)
+ 	//	std::cout << "frb/slab: New area at " << area << std::endl;
+ 
+-	// Partition the slab into individual objects.
+-	freelist *first = nullptr;
+-	for(size_t off = 0; off < slb->length; off += item_size) {
+-		if constexpr (has_poisoning)
+-			_plcy.unpoison(reinterpret_cast<void *>(slb->address + off), sizeof(freelist));
+-		auto object = new (reinterpret_cast<void *>(slb->address + off)) freelist;
+-		object->link = first;
+-		first = object;
+-		//infoLogger() << "[slab] fill " << chunk << frg::endLog;
+-	}
+-	slb->available = first;
++	_partition_slab(slb);
+ 
+ 	return slb;
+ }

@@ -574,6 +574,16 @@ fn draw_centered(buf: *mut u32, row: usize, text: &[u8], line_attr: u8) {
     }
 }
 
+fn draw_left(buf: *mut u32, row: usize, col: usize, text: &[u8], line_attr: u8) {
+    if row >= ROWS || col >= COLS {
+        return;
+    }
+    for (i, &b) in text.iter().take(COLS - col).enumerate() {
+        let c = if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' };
+        unsafe { *buf.add(row * COLS + col + i) = pack(c, line_attr) };
+    }
+}
+
 pub fn draw_panic_screen(title: &str, reason: &str) {
     let vt = foreground();
     let buf = cells(vt);
@@ -583,7 +593,7 @@ pub fn draw_panic_screen(title: &str, reason: &str) {
         unsafe { *buf.add(i) = blank };
     }
 
-    let title_row = ROWS / 2 - 3;
+    let title_row = 1;
     draw_centered(buf, title_row, title.as_bytes(), attr(YELLOW, RED));
     draw_centered(buf, title_row + 1, b"----------------------------------------", bg_attr);
 
@@ -630,8 +640,24 @@ pub fn draw_panic_screen(title: &str, reason: &str) {
 
     if line_len > 0 && row < ROWS {
         draw_centered(buf, row, &line_buf[..line_len], bg_attr);
+        row += 1;
     }
 
+    let log_top = row + 1;
+    let log_rows = (ROWS - 4).saturating_sub(log_top + 1);
+    if log_rows > 0 {
+        draw_left(buf, log_top, 2, b"Last kernel messages:", attr(YELLOW, RED));
+        let mut line_row = log_top + 1;
+        crate::drivers::klog::tail_without_waiting(log_rows, |line| {
+            if line_row < ROWS - 4 {
+                let bytes = line.as_bytes();
+                draw_left(buf, line_row, 4, &bytes[..bytes.len().min(COLS - 6)], attr(WHITE, RED));
+                line_row += 1;
+            }
+        });
+    }
+
+    draw_centered(buf, ROWS - 3, b"Please take a photo of this screen and send it with the hwreport file", attr(YELLOW, RED));
     draw_centered(buf, ROWS - 2, b"System halted -- power cycle the machine to restart", attr(LIGHT_GRAY, RED));
 
     set_hw_cursor_visible(false);

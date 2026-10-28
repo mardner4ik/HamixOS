@@ -17,6 +17,8 @@ exports! {
     "hamix_kmalloc" => kpi::hamix_kmalloc,
     "hamix_kzalloc" => kpi::hamix_kzalloc,
     "hamix_kfree" => kpi::hamix_kfree,
+    "hamix_firmware_load" => kpi::hamix_firmware_load,
+    "hamix_firmware_release" => kpi::hamix_firmware_release,
     "hamix_dma_alloc" => kpi::hamix_dma_alloc,
     "hamix_dma_free" => kpi::hamix_dma_free,
     "hamix_virt_to_phys" => kpi::hamix_virt_to_phys,

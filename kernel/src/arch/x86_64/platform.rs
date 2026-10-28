@@ -82,7 +82,7 @@ pub fn cpuinfo_text() -> String {
     for cpu in 0..count {
         out.push_str(&format!(
             "processor\t: {}\nvendor_id\t: {}\ncpu family\t: {}\nmodel\t\t: {}\nmodel name\t: {}\nstepping\t: {}\ncpu MHz\t\t: {:.3}\ncache size\t: 4096 KB\nphysical id\t: 0\nsiblings\t: {}\ncore id\t\t: {}\ncpu cores\t: {}\napicid\t\t: {}\ninitial apicid\t: {}\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: {}\nwp\t\t: yes\nflags\t\t: {}\nbogomips\t: {:.2}\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 39 bits physical, 48 bits virtual\npower management:\n\n",
-            cpu, info.vendor, info.family, info.model, name, info.stepping, mhz, count, cpu, count, cpu, cpu, core::arch::x86_64::__cpuid_count(0, 0).eax, flags, mhz * 2.0
+            cpu, info.vendor, info.family, info.model, name, info.stepping, mhz, count, cpu, count, super::smp::apic_id_of(cpu), super::smp::apic_id_of(cpu), core::arch::x86_64::__cpuid_count(0, 0).eax, flags, mhz * 2.0
         ));
     }
     out

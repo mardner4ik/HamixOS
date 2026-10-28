@@ -98,13 +98,42 @@ pub struct BlockAllocator {
     chunks: [(usize, usize); MAX_CHUNKS],
     chunk_count: usize,
     free_bytes: usize,
+    lo: usize,
+    hi: usize,
+}
+
+static CORRUPTIONS: AtomicUsize = AtomicUsize::new(0);
+static LAST_CORRUPTION: AtomicUsize = AtomicUsize::new(0);
+
+pub fn corruptions() -> (usize, usize) {
+    (CORRUPTIONS.load(Ordering::Relaxed), LAST_CORRUPTION.load(Ordering::Relaxed))
+}
+
+fn corrupted(what: &str, address: usize) {
+    let seen = CORRUPTIONS.fetch_add(1, Ordering::Relaxed);
+    LAST_CORRUPTION.store(address, Ordering::Relaxed);
+    if seen < 16 {
+        crate::serial_println!("heap: {} at {:#x}; the block is quarantined (leaked) instead of crashing", what, address);
+    }
 }
 
 unsafe impl Send for BlockAllocator {}
 
 impl BlockAllocator {
     const fn new() -> Self {
-        Self { bins: [0; BINS], bitmap: [0; 2], chunks: [(0, 0); MAX_CHUNKS], chunk_count: 0, free_bytes: 0 }
+        Self { bins: [0; BINS], bitmap: [0; 2], chunks: [(0, 0); MAX_CHUNKS], chunk_count: 0, free_bytes: 0, lo: usize::MAX, hi: 0 }
+    }
+
+    fn plausible(&self, block: usize) -> bool {
+        block % ALIGN == 0 && block >= self.lo && block + MIN_BLOCK <= self.hi
+    }
+
+    unsafe fn sane_free(&self, block: usize) -> bool {
+        if !self.plausible(block) {
+            return false;
+        }
+        let size = unsafe { block_size(block) };
+        size >= MIN_BLOCK && size % ALIGN == 0 && block + size <= self.hi && !unsafe { is_inuse(block) } && unsafe { ptr::read((block + size - 8) as *const usize) } == size
     }
 
     fn mark_bin(&mut self, bin: usize, occupied: bool) {
@@ -133,7 +162,16 @@ impl BlockAllocator {
     unsafe fn unlink_free(&mut self, block: usize, size: usize) {
         let bin = bin_for(size);
         unsafe {
-            let (next, prev) = (next_link(block), prev_link(block));
+            let (mut next, mut prev) = (next_link(block), prev_link(block));
+            if next != 0 && !self.plausible(next) {
+                corrupted("free-list next link overwritten", block);
+                next = 0;
+            }
+            if prev != 0 && !self.plausible(prev) {
+                corrupted("free-list prev link overwritten", block);
+                prev = 0;
+                self.bins[bin] = next;
+            }
             if prev != 0 {
                 set_next(prev, next);
             } else {
@@ -179,16 +217,28 @@ impl BlockAllocator {
         }
     }
 
-    unsafe fn find_fit(&self, need: usize, align: usize) -> Option<(usize, usize, usize)> {
+    unsafe fn find_fit(&mut self, need: usize, align: usize) -> Option<(usize, usize, usize)> {
         let first = bin_for((need + HEADER).max(MIN_BLOCK));
         for bin in first..BINS {
             if self.bitmap[bin / 64] & (1u64 << (bin % 64)) == 0 {
                 continue;
             }
             let mut block = self.bins[bin];
+            let mut previous = 0usize;
             let mut scanned = 0usize;
             while block != 0 && scanned < 64 {
                 scanned += 1;
+                if !unsafe { self.sane_free(block) } {
+                    corrupted("free block header overwritten", block);
+                    if previous == 0 {
+                        self.bins[bin] = 0;
+                        self.mark_bin(bin, false);
+                    } else {
+                        unsafe { set_next(previous, 0) };
+                    }
+                    break;
+                }
+                previous = block;
                 let size = unsafe { block_size(block) };
                 let payload = align_up(block + HEADER, align);
                 if payload + need <= block + size {
@@ -225,8 +275,21 @@ impl BlockAllocator {
     }
 
     unsafe fn dealloc(&mut self, pointer: *mut u8) {
-        let mut block = unsafe { ptr::read((pointer as usize - 8) as *const usize) };
+        let address = pointer as usize;
+        let mut block = unsafe { ptr::read((address - 8) as *const usize) };
+        if !self.plausible(block) || block + HEADER > address || address - block > (1 << 20) {
+            corrupted("free of a pointer whose header is overwritten", address);
+            return;
+        }
+        if !unsafe { is_inuse(block) } {
+            corrupted("double free", address);
+            return;
+        }
         let mut size = unsafe { block_size(block) };
+        if size < MIN_BLOCK || block + size > self.hi || block + size <= address {
+            corrupted("free of a block with a broken size", address);
+            return;
+        }
         let mut prev_flag = unsafe { head(block) & FLAG_PREV_INUSE };
         unsafe {
             let after = block + size;
@@ -253,6 +316,8 @@ impl BlockAllocator {
         }
         self.chunks[self.chunk_count] = (base, size);
         self.chunk_count += 1;
+        self.lo = self.lo.min(base);
+        self.hi = self.hi.max(base + size);
         unsafe { self.insert_region(base, size) };
         true
     }

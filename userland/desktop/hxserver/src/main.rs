@@ -3,27 +3,25 @@
 
 extern crate alloc;
 
+mod proto2;
 mod anim;
+#[allow(dead_code)]
 mod apps;
+mod chrome;
+#[allow(dead_code)]
 mod config;
 mod compositor;
-mod desktop;
-mod dock;
-mod launcher;
-mod panel;
 mod render;
-mod sound;
+#[cfg(feature = "wayland")]
+mod wayland;
 mod wm;
-
-use sound::SoundState;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use hamix_std::net;
-use hamix_std::sys::{self, MouseState, MOUSE_LEFT, MOUSE_RIGHT};
-use hamix_std::{entry, fs, println, users};
+use hxstd::sys::{self, MouseState, MOUSE_LEFT, MOUSE_RIGHT};
+use hxstd::{entry, fs, println};
 use hxclient::ui::{TextField, Ui};
 use hxproto::Event;
 use vellum::{Area, Image, Painter};
@@ -31,10 +29,6 @@ use vellum::{Area, Image, Painter};
 use crate::compositor::window::{edge_cursor, Body, TITLE_H};
 use crate::compositor::{send_event, Compositor, Screen};
 
-pub const TOP_H: i32 = 32;
-pub const DOCK_MARGIN: i32 = 10;
-pub const ICON_CELL_W: i32 = 96;
-pub const ICON_CELL_H: i32 = 92;
 pub const FRAME_MS: u64 = 12;
 pub const DEFAULT_WALLPAPER: &str = "/usr/share/wallpapers/dusk.png";
 
@@ -51,36 +45,9 @@ pub const KEY_SNAP_RIGHT: i32 = -24;
 pub const KEY_SNAP_UP: i32 = -25;
 pub const KEY_SNAP_DOWN: i32 = -26;
 
+
 pub fn app_by_icon(icon: &str) -> Option<usize> {
     apps::by_key(icon)
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum DesktopItem {
-    App(usize),
-    Home,
-}
-
-impl DesktopItem {
-    pub fn key(&self) -> &'static str {
-        match self {
-            DesktopItem::App(i) => apps::get(*i).key.as_str(),
-            DesktopItem::Home => "home",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<DesktopItem> {
-        if key == "home" {
-            return Some(DesktopItem::Home);
-        }
-        app_by_icon(key).map(DesktopItem::App)
-    }
-}
-
-pub struct DesktopIcon {
-    pub item: DesktopItem,
-    pub x: i32,
-    pub y: i32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -90,53 +57,8 @@ pub enum PowerAction {
     Shutdown,
 }
 
-#[derive(Clone, PartialEq)]
-pub enum MenuAction {
-    Launch(usize),
-    LaunchWith(usize, String),
-    PinApp(usize),
-    UnpinApp(usize),
-    CloseApp(usize),
-    CloseWindow(u32),
-    ToggleMaximize(u32),
-    Minimize(u32),
-    AddToDesktop(usize),
-    RemoveFromDesktop(usize),
-    OpenDesktopItem(usize),
-    ArrangeIcons,
-    ToggleAutohide,
-    About,
-    LaunchRole(&'static str, Option<String>),
-}
-
-#[derive(Clone)]
-pub struct MenuItem {
-    pub label: String,
-    pub icon: &'static str,
-    pub action: MenuAction,
-    pub danger: bool,
-}
-
-#[derive(Clone)]
-pub enum Popup {
-    None,
-    Launcher,
-    Power,
-    Network,
-    Calendar,
-    Sound,
-    DockOverflow,
-    Menu { x: i32, y: i32, items: Vec<MenuItem> },
-}
-
-impl Popup {
-    pub fn is_none(&self) -> bool {
-        matches!(self, Popup::None)
-    }
-}
-
 fn write_toolkit_settings() {
-    let Some(home) = hamix_std::env::var("HOME") else {
+    let Some(home) = hxstd::env::var("HOME") else {
         return;
     };
     let dark = !hxclient::ui::theme::is_light();
@@ -173,10 +95,6 @@ pub enum Grab {
     Move { id: u32, dx: i32, dy: i32 },
     Resize { id: u32, edges: u8, start: Area, px: i32, py: i32 },
     Client(u32),
-    DockDrag { index: usize, start_x: i32, moved: bool },
-    LauncherScroll { offset: i32 },
-    IconDrag { index: usize, dx: i32, dy: i32, start_x: i32, start_y: i32, moved: bool },
-    VolumeDrag,
 }
 
 pub struct Toast {
@@ -186,27 +104,20 @@ pub struct Toast {
     pub until: u64,
 }
 
-pub struct NetState {
-    pub status: net::Status,
-    pub networks: Vec<net::WifiNetwork>,
-    pub last_poll: u64,
-    pub last_scan: u64,
-    pub selected: Option<String>,
-    pub password: TextField,
-    pub message: String,
-    pub last_connected: Option<bool>,
-}
-
 pub struct Picker {
     pub token: u32,
     pub client: i64,
     pub request: u32,
     pub pid: i64,
+    pub output: Option<u64>,
+    pub chosen: Vec<u8>,
 }
 
 pub struct Nook {
     pub core: Compositor,
     pub key_mods: u32,
+    pub input: Option<hxstd::input::Input>,
+    pub uevents: Option<hxstd::uevent::Monitor>,
     pub wayland: i64,
     pub background: Vec<u32>,
     pub ui: Ui,
@@ -214,74 +125,38 @@ pub struct Nook {
     pub grab: Grab,
     pub snap_preview: Option<Area>,
     pub hover_client: Option<u32>,
-    pub popup: Popup,
-    pub popup_hover: Option<usize>,
-    pub search: TextField,
-    pub desktop: Vec<DesktopIcon>,
-    pub desktop_removed: Vec<String>,
-    pub desktop_added: Vec<String>,
-    pub desktop_hover: Option<usize>,
-    pub desktop_selected: Option<usize>,
-    pub pinned: Vec<usize>,
-    pub dock_hover: Option<usize>,
-    pub dock_offset: i32,
-    pub dock_size: i32,
-    pub dock_limit: usize,
-    pub popup_dock: bool,
-    pub autohide: bool,
+    pub menu: Option<chrome::WindowMenu>,
     pub toasts: Vec<Toast>,
     pub known_commands: Vec<String>,
     pub running: bool,
-    pub last_minute: i64,
-    pub user: String,
     pub live: bool,
     pub last_click: (u64, i32, i32),
     pub launched: Vec<(i64, usize)>,
-    pub launcher_scroll: usize,
-    pub launcher_focus: Option<usize>,
+    pub closing: Vec<(u32, u64)>,
     pub apps_fingerprint: u64,
     pub last_app_check: u64,
-    pub hot_buttons: Vec<Area>,
-    pub net: NetState,
-    pub calendar_month: (i64, u32),
+    pub hot_buttons: Vec<(u32, Area)>,
+    pub wallpaper: String,
+    pub shell: Shell,
+    pub minimize_targets: Vec<(u32, Area)>,
     pub switcher: Option<usize>,
     pub switcher_until: u64,
     pub pickers: Vec<Picker>,
     pub next_token: u32,
-    pub sound: SoundState,
     pub anim: anim::Prefs,
     pub animations: Vec<anim::Animation>,
     pub pending_open: Vec<(u32, u64)>,
     pub last_compose: u64,
+    pub v2: proto2::State,
 }
 
-pub fn weekday(days: i64) -> &'static str {
-    ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(days.rem_euclid(7)) as usize]
+pub struct Shell {
+    pub pid: i64,
+    pub started: u64,
+    pub restarts: u32,
 }
 
-pub fn civil(epoch: i64) -> (i64, u32, u32, u32, u32) {
-    let days = epoch.div_euclid(86400);
-    let secs = epoch.rem_euclid(86400) as u32;
-    let z = days + 719468;
-    let era = z.div_euclid(146097);
-    let doe = z.rem_euclid(146097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + if m <= 2 { 1 } else { 0 }, m, d, secs / 3600, secs / 60 % 60)
-}
-
-pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = y.div_euclid(400);
-    let yoe = y.rem_euclid(400);
-    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
+pub const SHELL_PROGRAM: &str = "/usr/bin/nook-shell";
 
 impl Nook {
     pub fn ui(&self) -> &'static Ui {
@@ -300,6 +175,7 @@ impl Nook {
     }
 
     pub fn load_wallpaper(&mut self) {
+        self.wallpaper = self.wallpaper_key();
         let path = config::load().wallpaper.unwrap_or_else(|| String::from(DEFAULT_WALLPAPER));
         let (sw, sh) = (self.core.screen.width, self.core.screen.height);
         let mut hash: u32 = 2166136261;
@@ -320,7 +196,7 @@ impl Nook {
             let mut p = Painter::new(&mut self.background, sw, sh);
             p.gradient_v(Area::new(0, 0, sw, sh), 0x1a2238, 0x0b0d14, 255);
         }
-        let Some(image) = fs::read(&path).and_then(|b| Image::from_png(&b)) else {
+        let Some(image) = fs::read(&path).and_then(|b| Image::decode_sized(&b, sw, sh)) else {
             return;
         };
         let (iw, ih) = (image.w as i64, image.h as i64);
@@ -360,44 +236,11 @@ impl Nook {
     }
 
     pub fn toast_region(&self) -> Area {
-        Area::new(self.core.screen.width - 380, TOP_H, 380, 4 * 84 + 24)
+        Area::new(self.core.screen.width - 380, self.core.work.y, 380, 4 * 84 + 24)
     }
 
     pub fn toast_area(&self, index: usize) -> Area {
-        Area::new(self.core.screen.width - 356, TOP_H + 12 + index as i32 * 84, 344, 72)
-    }
-
-    pub fn launch(&mut self, app: usize, args: &[&str]) {
-        if !apps::alive(app) {
-            return;
-        }
-        let entry = apps::get(app);
-        let mut argv: Vec<String> = entry.args.clone();
-        argv.extend(args.iter().map(|a| String::from(*a)));
-        let pid = if entry.terminal {
-            let mut command = apps::shell_quote(&entry.program);
-            for arg in &argv {
-                command.push(' ');
-                command.push_str(&apps::shell_quote(arg));
-            }
-            sys::spawn("/usr/bin/hxterm", &[command], sys::SPAWN_DETACH)
-        } else if entry.linux {
-            let env: Vec<String> = hamix_std::env::vars().iter().filter(|(k, _)| k != "GTK_THEME").map(|(k, v)| format!("{}={}", k, v)).collect();
-            sys::spawn_io_env(&entry.program, &argv, Some(&env), sys::SPAWN_DETACH, None, None, None)
-        } else {
-            sys::spawn(&entry.program, &argv, sys::SPAWN_DETACH)
-        };
-        let icon = format!("apps/{}", entry.key);
-        if pid < 0 {
-            self.toast(&entry.name, "could not be started", &icon);
-            return;
-        }
-        if !entry.terminal {
-            self.launched.push((pid, app));
-        }
-        if entry.linux && !entry.terminal && !sys::proc_alive(self.wayland) {
-            self.wayland = sys::spawn("/usr/bin/hxwayland", &[] as &[&str], sys::SPAWN_DETACH);
-        }
+        Area::new(self.core.screen.width - 356, self.core.work.y + 12 + index as i32 * 84, 344, 72)
     }
 
     pub fn broadcast_theme(&mut self) {
@@ -405,6 +248,9 @@ impl Nook {
         let light = hxclient::ui::theme::is_light();
         let mut pids: Vec<i64> = self.core.windows.iter().filter_map(|w| w.client_pid()).collect();
         pids.extend(self.pickers.iter().map(|p| p.pid));
+        if self.shell.pid > 0 {
+            pids.push(self.shell.pid);
+        }
         pids.sort_unstable();
         pids.dedup();
         for pid in pids {
@@ -413,37 +259,11 @@ impl Nook {
         self.core.damage_all();
     }
 
-    pub fn launch_role(&mut self, role: &str, args: &[&str]) {
-        match apps::by_role(role) {
-            Some(app) => self.launch(app, args),
-            None => self.toast("No application for this task", role, "apps/hello"),
-        }
-    }
-
     pub fn refresh_apps(&mut self) {
         self.apps_fingerprint = apps::fingerprint();
         self.last_app_check = sys::uptime_ms();
-        let before: Vec<usize> = (0..apps::count()).filter(|i| apps::alive(*i)).collect();
         if !apps::scan(&mut self.ui, &mut self.sized_icons) {
             return;
-        }
-        self.pinned.retain(|a| apps::alive(*a));
-        let removed: Vec<usize> = self.desktop.iter().filter_map(|d| match d.item {
-            DesktopItem::App(a) if !apps::alive(a) => Some(a),
-            _ => None,
-        }).collect();
-        self.desktop.retain(|d| !matches!(d.item, DesktopItem::App(a) if removed.contains(&a)));
-        if !before.is_empty() {
-            let fresh: Vec<usize> = (0..apps::count()).filter(|i| apps::alive(*i) && !before.contains(i)).collect();
-            match fresh.len() {
-                0 => {}
-                1 => {
-                    let app = apps::get(fresh[0]);
-                    let icon = format!("apps/{}", app.key);
-                    self.toast("New application", &format!("{} is ready in Applications", app.name), &icon);
-                }
-                n => self.toast("New applications", &format!("{} programs were added to Applications", n), "ui/apps"),
-            }
         }
         for window in 0..self.core.windows.len() {
             let icon = self.core.windows[window].icon.clone();
@@ -451,7 +271,6 @@ impl Nook {
                 self.preload_window_icon(&icon);
             }
         }
-        self.launcher_focus = None;
         self.core.damage_all();
     }
 
@@ -474,6 +293,13 @@ impl Nook {
             sys::power(if action == PowerAction::Reboot { sys::POWER_REBOOT } else { sys::POWER_OFF });
             return;
         }
+        let program = if action == PowerAction::Reboot { "/usr/bin/reboot" } else { "/usr/bin/poweroff" };
+        if sys::access(program, sys::X_OK) {
+            let pid = sys::spawn(program, &[] as &[&str], 0);
+            if pid > 0 && sys::waitpid(pid, false) == 0 {
+                return;
+            }
+        }
         let title = if action == PowerAction::Reboot { "Restart" } else { "Shut down" };
         self.add_internal(title, "settings", 400, TITLE_H + 190, Body::Auth { action, field: TextField::secret(), error: String::new() });
     }
@@ -487,7 +313,7 @@ impl Nook {
             _ => return,
         };
         let command = if action == PowerAction::Reboot { "reboot" } else { "poweroff" };
-        match hxclient::ui::elevated_spawn(Some(&password), "/usr/bin/hsh", &["-c", command], None) {
+        match hxclient::ui::elevated_spawn(Some(&password), "/usr/bin/bash", &["-c", command], None) {
             Ok(_) => {
                 sys::sleep_ms(200);
             }
@@ -500,6 +326,67 @@ impl Nook {
                 self.core.add_damage(area);
             }
         }
+    }
+
+    pub fn reload_config(&mut self) {
+        if self.shell.pid > 0 && sys::proc_alive(self.shell.pid) {
+            sys::send_signal(self.shell.pid, sys::SIGHUP);
+        }
+        if self.core.screen.stale() {
+            self.map_framebuffer();
+        }
+        if hxclient::ui::theme::load() {
+            self.broadcast_theme();
+        }
+        let wallpaper = self.wallpaper_key();
+        if wallpaper != self.wallpaper {
+            self.load_wallpaper();
+            self.core.damage_all();
+        }
+        self.anim = anim::Prefs::load();
+    }
+
+    fn wallpaper_key(&self) -> String {
+        let path = config::load().wallpaper.unwrap_or_else(|| String::from(DEFAULT_WALLPAPER));
+        let size = sys::stat(&path).map(|s| s.size).unwrap_or(0);
+        format!("{} {} {}x{}", path, size, self.core.screen.width, self.core.screen.height)
+    }
+
+    fn ask_wallpaper(&mut self, client: i64, request: u32, path: &str) {
+        let decoded = fs::read(path).and_then(|b| Image::decode_sized(&b, 960, 540));
+        let Some(image) = decoded else {
+            send_event(client, Event::WallpaperResult { request, accepted: false });
+            return;
+        };
+        let (w, h) = (480, 270);
+        let scale = |a: i32, b: i32, c: i32| (a as i64 * b as i64 / c.max(1) as i64) as i32;
+        let (pw, ph) = if image.w as i64 * h as i64 > image.h as i64 * w as i64 { (w, scale(image.h, w, image.w).max(1)) } else { (scale(image.w, h, image.h).max(1), h) };
+        let preview = image.scaled(pw, ph);
+        let window = self.core.windows.iter().find(|w| w.client_pid() == Some(client));
+        let app = window
+            .and_then(|w| app_by_icon(&w.icon).map(|a| apps::get(a).name.clone()).or_else(|| Some(w.title.clone())))
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| String::from("An application"));
+        let over = self.core.windows.iter().rev().find(|w| !w.is_popup() && w.client_pid() == Some(client)).map(|w| w.outer());
+        self.add_dialog(over, "Change wallpaper", "settings", 520, TITLE_H + 410, Body::Wallpaper { client, request, path: String::from(path), app, preview });
+    }
+
+    pub fn answer_wallpaper(&mut self, id: u32, accepted: bool) {
+        let Some(index) = self.core.index_of(id) else {
+            return;
+        };
+        let Body::Wallpaper { client, request, path, .. } = &mut self.core.windows[index].body else {
+            return;
+        };
+        let (pid, request, path) = (*client, *request, path.clone());
+        *client = 0;
+        if accepted {
+            hxclient::ui::write_nook_config("wallpaper", &path);
+            self.load_wallpaper();
+            self.core.damage_all();
+        }
+        send_event(pid, Event::WallpaperResult { request, accepted });
+        self.remove_window(id, false);
     }
 
     pub fn open_picker(&mut self, client: i64, request: u32, mode: u32, title: &str, filters: &str, start: &str) {
@@ -519,24 +406,50 @@ impl Nook {
         ];
         let files = apps::by_role(ROLE_FILES);
         let program = files.map(|f| apps::get(f).program.clone()).unwrap_or_else(|| String::from("/usr/bin/hxfiles"));
-        let pid = sys::spawn(&program, &args, sys::SPAWN_DETACH);
+        let pipe = sys::pipe().ok();
+        let pid = sys::spawn_io(&program, &args, sys::SPAWN_DETACH, None, pipe.map(|p| p.1), None);
+        if let Some((_, write_end)) = pipe {
+            sys::close(write_end);
+        }
         if pid < 0 {
+            if let Some((read_end, _)) = pipe {
+                sys::close(read_end);
+            }
             send_event(client, Event::FileChosen { request, status: hxproto::PICK_FAILED, path: hxproto::Text::new("") });
             return;
+        }
+        if let Some((read_end, _)) = pipe {
+            sys::set_nonblocking(read_end);
         }
         if let Some(files) = files {
             self.launched.push((pid, files));
         }
-        self.pickers.push(Picker { token, client, request, pid });
+        self.pickers.push(Picker { token, client, request, pid, output: pipe.map(|p| p.0), chosen: Vec::new() });
     }
 
-    fn reap_pickers(&mut self) {
+    pub fn reap_pickers(&mut self) {
         let mut index = 0;
         while index < self.pickers.len() {
             let (client, pid) = (self.pickers[index].client, self.pickers[index].pid);
+            if let Some(fd) = self.pickers[index].output {
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = sys::read(fd, &mut buf);
+                    if n <= 0 {
+                        break;
+                    }
+                    self.pickers[index].chosen.extend_from_slice(&buf[..n as usize]);
+                }
+            }
             if !sys::proc_alive(pid) {
                 let picker = self.pickers.remove(index);
-                send_event(picker.client, Event::FileChosen { request: picker.request, status: hxproto::PICK_CANCELLED, path: hxproto::Text::new("") });
+                if let Some(fd) = picker.output {
+                    sys::close(fd);
+                }
+                let text = String::from_utf8_lossy(&picker.chosen);
+                let path = text.lines().next().unwrap_or("").trim_end();
+                let status = if path.starts_with('/') { hxproto::PICK_OK } else { hxproto::PICK_CANCELLED };
+                send_event(picker.client, Event::FileChosen { request: picker.request, status, path: hxproto::Text::new(path) });
                 continue;
             }
             if !sys::proc_alive(client) {
@@ -552,6 +465,10 @@ impl Nook {
         self.reap_pickers();
         let dead: Vec<u32> = self.core.windows.iter().filter(|w| w.client_pid().map(|pid| !sys::proc_alive(pid)).unwrap_or(false)).map(|w| w.id).collect();
         for id in dead {
+            let visible = self.core.index_of(id).map(|i| !self.core.windows[i].is_popup() && !self.core.windows[i].minimized).unwrap_or(false);
+            if visible {
+                self.start_animation(id, anim::Effect::Close, None, anim::Finish::None);
+            }
             self.remove_window(id, false);
         }
         self.launched.retain(|(pid, _)| sys::proc_alive(*pid));
@@ -570,8 +487,52 @@ impl Nook {
 
     pub fn update_work_area(&mut self) {
         let (w, h) = (self.core.screen.width, self.core.screen.height);
-        let reserve = if self.autohide { 0 } else { self.dock_h() + 2 * DOCK_MARGIN };
-        self.core.work = Area::new(0, TOP_H, w, (h - TOP_H - reserve).max(120));
+        let before = self.core.work;
+        self.core.work = Area::new(0, 0, w, h);
+        self.apply_exclusive_zones();
+        if self.core.work != before && !self.toasts.is_empty() {
+            self.core.damage_all();
+        }
+    }
+
+    pub fn is_shell(&self, pid: i64) -> bool {
+        pid > 0 && pid == self.shell.pid
+    }
+
+    pub fn start_shell(&mut self) {
+        let program = hxstd::env::var("NOOK_SHELL").unwrap_or(SHELL_PROGRAM);
+        if program == "none" || !sys::access(program, sys::X_OK) {
+            return;
+        }
+        self.shell.pid = sys::spawn(program, &[] as &[&str], sys::SPAWN_DETACH);
+        self.shell.started = sys::uptime_ms();
+    }
+
+    pub fn watch_shell(&mut self, now: u64) {
+        if self.shell.pid <= 0 || sys::proc_alive(self.shell.pid) {
+            return;
+        }
+        self.shell.pid = -1;
+        if now.saturating_sub(self.shell.started) > 30_000 {
+            self.shell.restarts = 0;
+        }
+        if self.shell.restarts >= 3 {
+            self.toast("The desktop shell stopped", "Panel and dock are unavailable until the next login", "ui/bell");
+            return;
+        }
+        self.shell.restarts += 1;
+        self.start_shell();
+    }
+
+    pub fn shell_key(&mut self, code: i32) -> bool {
+        let me = sys::getpid();
+        let own = self.v2.layers.iter().find(|l| self.shell.pid > 0 && l.pid == self.shell.pid);
+        let wayland = || self.v2.layers.iter().find(|l| l.pid == me && l.layer == hxproto::LAYER_BOTTOM && l.anchor == 15);
+        let Some(layer) = own.or_else(wayland) else {
+            return false;
+        };
+        send_event(layer.pid, Event::Key { window: layer.id, code, mods: self.key_mods });
+        true
     }
 
     fn map_framebuffer(&mut self) -> bool {
@@ -580,11 +541,14 @@ impl Nook {
         };
         if resized {
             let (w, h) = (self.core.screen.width, self.core.screen.height);
+            if let Some(input) = self.input.as_mut() {
+                input.set_bounds(w, h);
+            }
             self.background = alloc::vec![0; (w * h) as usize];
             self.update_work_area();
+            self.relayout_layers();
             self.load_wallpaper();
             self.core.fit_to_screen();
-            self.clamp_desktop_icons();
             self.broadcast_screen();
         }
         true
@@ -598,6 +562,9 @@ impl Nook {
         if wayland > 0 {
             pids.push(wayland);
         }
+        if self.shell.pid > 0 {
+            pids.push(self.shell.pid);
+        }
         pids.sort_unstable();
         pids.dedup();
         for pid in pids {
@@ -605,9 +572,31 @@ impl Nook {
         }
     }
 
+    fn read_mouse(&mut self, state: &mut MouseState) {
+        match self.input.as_mut() {
+            Some(input) => {
+                input.pump();
+                input.mouse(state);
+            }
+            None => {
+                sys::mouse(state);
+            }
+        }
+    }
+
+    fn next_key(&mut self) -> Option<i64> {
+        match self.input.as_mut() {
+            Some(input) => {
+                input.pump();
+                input.next_key()
+            }
+            None => sys::poll_key_code(),
+        }
+    }
+
     fn handle_mouse(&mut self) {
         let mut current = MouseState::default();
-        sys::mouse(&mut current);
+        self.read_mouse(&mut current);
         let (nx, ny) = (current.x.clamp(0, self.core.screen.width - 1), current.y.clamp(0, self.core.screen.height - 1));
         let counts = [(current.buttons >> 8) & 15, (current.buttons >> 12) & 15, (current.buttons >> 16) & 15];
         let now_buttons = current.buttons & 7;
@@ -649,6 +638,13 @@ impl Nook {
         if self.switcher.is_some() {
             self.finish_switcher();
         }
+        if self.menu.is_some() {
+            self.menu_press(x, y);
+            return;
+        }
+        if self.overlay_grab_press(x, y, button) {
+            return;
+        }
         if self.core.windows.iter().any(|w| w.is_popup() && w.parent != Some(0)) {
             let inside = self.core.window_at(x, y).map(|i| self.core.windows[i].is_popup()).unwrap_or(false);
             if !inside {
@@ -659,7 +655,7 @@ impl Nook {
         if let Some(index) = self.core.windows.iter().rposition(|w| w.parent == Some(0)) {
             let owner = self.core.windows[index].client_pid();
             let hit = self.core.window_at(x, y).and_then(|i| self.core.windows[i].client_pid());
-            if hit != owner || y < TOP_H {
+            if hit != owner {
                 let id = self.core.windows[index].id;
                 let content = self.core.windows[index].content();
                 if let Some(pid) = owner {
@@ -669,13 +665,8 @@ impl Nook {
                 return;
             }
         }
-        if !self.popup.is_none() {
-            if self.popup_press(x, y, button) {
-                return;
-            }
-        }
-        if y < TOP_H {
-            self.top_bar_press(x, button);
+        self.v2.keyboard_layer = None;
+        if self.layer_press(x, y, button, true) {
             return;
         }
         for i in 0..self.toasts.len() {
@@ -686,17 +677,19 @@ impl Nook {
                 return;
             }
         }
-        if self.dock_visible() && self.dock_area().contains(x, y) {
-            self.dock_press(x, y, button);
-            return;
-        }
         if self.window_press(x, y, button) {
             return;
         }
-        self.desktop_press(x, y, button);
+        self.layer_press(x, y, button, false);
     }
 
     pub fn on_release(&mut self, x: i32, y: i32, button: u32) {
+        if self.v2.drag.is_some() {
+            self.finish_drag(x, y);
+        }
+        if self.layer_release(x, y, button) {
+            return;
+        }
         match self.grab {
             Grab::Move { id, .. } => {
                 self.grab = Grab::None;
@@ -707,32 +700,6 @@ impl Nook {
                 self.grab = Grab::None;
                 self.core.request_client_size(id, true);
                 self.core.set_cursor(0);
-            }
-            Grab::DockDrag { index, moved, .. } => {
-                self.grab = Grab::None;
-                if moved {
-                    self.save_pinned();
-                } else {
-                    self.activate_dock(index);
-                }
-                let region = self.dock_region();
-                self.core.add_damage(region);
-            }
-            Grab::LauncherScroll { .. } => {
-                self.grab = Grab::None;
-            }
-            Grab::IconDrag { index, moved, .. } => {
-                self.grab = Grab::None;
-                if moved {
-                    self.snap_icon(index);
-                    self.save_desktop();
-                }
-            }
-            Grab::VolumeDrag => {
-                self.grab = Grab::None;
-                if let Some(area) = self.popup_area() {
-                    self.core.add_damage(area.expand(32));
-                }
             }
             Grab::Client(id) => {
                 if self.core.buttons == 0 {
@@ -759,40 +726,21 @@ impl Nook {
                 self.drag_resize(id, edges, start, x - px, y - py);
                 return;
             }
-            Grab::DockDrag { index, start_x, moved } => {
-                self.drag_dock(index, start_x, moved, x);
-                return;
-            }
-            Grab::LauncherScroll { offset } => {
-                self.drag_launcher_scroll(y, offset);
-                return;
-            }
-            Grab::IconDrag { index, dx, dy, start_x, start_y, moved } => {
-                self.drag_icon(index, dx, dy, start_x, start_y, moved, x, y);
-                return;
-            }
-            Grab::VolumeDrag => {
-                self.set_volume_from_x(x);
-                return;
-            }
             _ => {}
         }
-
-        if !self.popup.is_none() {
-            let hover = self.popup_hover_index(x, y);
-            if hover != self.popup_hover {
-                self.popup_hover = hover;
-                if let Some(area) = self.popup_area() {
-                    self.core.add_damage(area);
-                }
-            }
+        if self.menu.is_some() {
+            self.menu_motion(x, y);
+            self.core.set_cursor(0);
+            return;
         }
 
+        if !matches!(self.grab, Grab::Client(_)) && self.layer_motion(x, y) {
+            return;
+        }
         let target = if let Grab::Client(id) = self.grab {
             Some(id)
         } else {
-            let over_dock = self.dock_visible() && self.dock_area().contains(x, y);
-            self.core.window_at(x, y).filter(|_| !over_dock).map(|i| self.core.windows[i].id).filter(|id| {
+            self.core.window_at(x, y).map(|i| self.core.windows[i].id).filter(|id| {
                 let index = self.core.index_of(*id).unwrap();
                 self.core.windows[index].content().contains(x, y) && self.core.windows[index].client_pid().is_some()
             })
@@ -816,51 +764,66 @@ impl Nook {
                     send_event(pid, Event::Mouse { window: id, x: x - content.x, y: y - content.y, buttons: self.core.buttons, kind: hxproto::MOUSE_MOVE, wheel: 0 });
                 }
             }
-        } else if self.popup.is_none() {
-            if let Some((_, edges)) = self.core.resize_edge_at(x, y) {
-                cursor = edge_cursor(edges);
+        } else if let Some((_, edges)) = self.core.resize_edge_at(x, y) {
+            cursor = edge_cursor(edges);
+        } else if let Some(index) = self.core.window_at(x, y) {
+            if matches!(self.core.windows[index].body, Body::Auth { .. }) {
+                let content = self.core.windows[index].content();
+                if Area::new(content.x + 20, content.y + 70, content.w - 40, 38).contains(x, y) {
+                    cursor = hxproto::CURSOR_TEXT as usize;
+                }
             }
         }
         self.core.set_cursor(cursor);
+        self.hover_title_buttons(x, y);
+    }
 
+    fn hover_title_buttons(&mut self, x: i32, y: i32) {
         let (px, py) = self.core.pointer;
-        let hot = self.hot_buttons.clone();
+        let hot: Vec<Area> = self.hot_buttons.iter().map(|(_, a)| *a).collect();
         for area in hot {
             if area.contains(px, py) != area.contains(x, y) {
                 self.core.add_damage(area.expand(2));
             }
         }
+    }
 
-        let dock = self.dock_hit(x, y);
-        if dock != self.dock_hover {
-            self.dock_hover = dock;
-            let region = self.dock_region();
-            self.core.add_damage(region);
-        }
-        let over_window = self.core.window_at(x, y).is_some();
-        let icon = if !over_window && self.popup.is_none() && y >= TOP_H { self.desktop_icon_at(x, y) } else { None };
-        if icon != self.desktop_hover {
-            for i in [self.desktop_hover, icon].into_iter().flatten() {
-                if i < self.desktop.len() {
-                    let a = self.desktop_area(i);
-                    self.core.add_damage(a);
+    pub fn shell_request(&mut self, request: &hxproto::Request) -> bool {
+        match *request {
+            hxproto::Request::ShellAction { action } => match action {
+                hxproto::SHELL_LOGOUT => self.start_power(PowerAction::Logout),
+                hxproto::SHELL_REBOOT => self.start_power(PowerAction::Reboot),
+                hxproto::SHELL_SHUTDOWN => self.start_power(PowerAction::Shutdown),
+                hxproto::SHELL_ABOUT => self.open_about(),
+                _ => {}
+            },
+            hxproto::Request::Toast { title, body, icon } => {
+                let icon = String::from(icon.as_str());
+                self.toast(title.as_str(), body.as_str(), &icon);
+            }
+            hxproto::Request::ToplevelRectangle { toplevel, x, y, width, height } => {
+                self.minimize_targets.retain(|(id, _)| *id != toplevel);
+                if width > 0 && height > 0 {
+                    self.minimize_targets.push((toplevel, Area::new(x, y, width, height)));
                 }
             }
-            self.desktop_hover = icon;
+            hxproto::Request::SetAppId { window: 0, pid, app_id } => {
+                if let Some(app) = app_by_icon(app_id.as_str()) {
+                    self.launched.retain(|(p, _)| *p != pid as i64);
+                    self.launched.push((pid as i64, app));
+                }
+            }
+            _ => return false,
         }
+        true
     }
 
     pub fn on_wheel(&mut self, wheel: i32) {
         let (x, y) = self.core.pointer;
-        if matches!(self.popup, Popup::Launcher) && self.launcher_area().contains(x, y) {
-            self.launcher_wheel(wheel);
+        if self.menu.is_some() {
             return;
         }
-        if (y < TOP_H && self.volume_button().contains(x, y)) || (matches!(self.popup, Popup::Sound) && self.sound_area().contains(x, y)) {
-            self.volume_wheel(wheel);
-            return;
-        }
-        if self.dock_visible() && self.dock_area().contains(x, y) {
+        if self.layer_wheel(x, y, wheel) {
             return;
         }
         if let Some(index) = self.core.window_at(x, y) {
@@ -879,11 +842,7 @@ impl Nook {
                 return;
             }
             KEY_SUPER => {
-                if matches!(self.popup, Popup::Launcher) {
-                    self.set_popup(Popup::None);
-                } else {
-                    self.set_popup(Popup::Launcher);
-                }
+                self.shell_key(code);
                 return;
             }
             KEY_ALT_F4 => {
@@ -901,7 +860,22 @@ impl Nook {
         if self.switcher.is_some() {
             self.finish_switcher();
         }
-        if self.popup_key(code) {
+        if self.menu.is_some() {
+            if code == 27 {
+                self.close_menu();
+            }
+            return;
+        }
+        let ctrl_alt = sys::MOD_CTRL as u32 | sys::MOD_ALT as u32;
+        if self.key_mods & ctrl_alt == ctrl_alt && (code == -3 || code == -4) {
+            let current = self.core.workspace;
+            let next = if code == -3 { current.checked_sub(1) } else { Some(current + 1) };
+            if let Some(next) = next {
+                self.switch_workspace(next);
+            }
+            return;
+        }
+        if self.layer_key(code) {
             return;
         }
         match self.core.focused().and_then(|id| self.core.index_of(id)) {
@@ -915,6 +889,11 @@ impl Nook {
                             self.remove_window(id, false);
                         }
                     }
+                    Body::Wallpaper { .. } => match code {
+                        27 => self.answer_wallpaper(id, false),
+                        10 => self.answer_wallpaper(id, true),
+                        _ => {}
+                    },
                     Body::Auth { field, .. } => match code {
                         27 => self.remove_window(id, false),
                         10 => self.submit_auth(id),
@@ -927,7 +906,7 @@ impl Nook {
             }
             None => {
                 if code == 32 || code == 10 {
-                    self.set_popup(Popup::Launcher);
+                    self.shell_key(code);
                 }
             }
         }
@@ -937,24 +916,12 @@ impl Nook {
         let Some(request) = hxproto::Request::decode(bytes) else {
             return;
         };
-        if let hxproto::Request::DisplayChanged = request {
-            self.map_framebuffer();
-            return;
-        }
-        if let hxproto::Request::Reload = request {
-            if hxclient::ui::theme::load() {
-                self.broadcast_theme();
-            }
-            self.load_wallpaper();
-            let cfg = config::load();
-            self.autohide = cfg.autohide;
-            let before = self.dock_region();
-            self.dock_size = cfg.dock_size;
-            self.dock_limit = cfg.dock_limit;
-            self.core.add_damage(before);
-            self.update_work_area();
-            self.anim = anim::Prefs::load();
-            self.core.damage_all();
+        self.handle_request(sender, request);
+    }
+
+    pub fn handle_request(&mut self, sender: i64, request: hxproto::Request) {
+        if let hxproto::Request::SetWallpaper { request: id, path } = request {
+            self.ask_wallpaper(sender, id, path.as_str());
             return;
         }
         match request {
@@ -965,6 +932,9 @@ impl Nook {
             hxproto::Request::PickerResult { token, status, path } => {
                 if let Some(index) = self.pickers.iter().position(|p| p.token == token && p.pid == sender) {
                     let picker = self.pickers.remove(index);
+                    if let Some(fd) = picker.output {
+                        sys::close(fd);
+                    }
                     send_event(picker.client, Event::FileChosen { request: picker.request, status, path });
                 }
                 return;
@@ -976,12 +946,24 @@ impl Nook {
             self.toast(title.as_str(), body.as_str(), &icon);
             return;
         }
+        if self.is_shell(sender) && self.shell_request(&request) {
+            return;
+        }
+        if self.v2_request(sender, &request) {
+            return;
+        }
         self.client_request(sender, request);
     }
 }
 
 fn main() -> i32 {
-    let Some(mut screen) = Screen::take() else {
+    let mut taken = Screen::take();
+    let deadline = sys::uptime_ms() + 5000;
+    while taken.is_none() && sys::uptime_ms() < deadline {
+        sys::sleep_ms(100);
+        taken = Screen::take();
+    }
+    let Some(mut screen) = taken else {
         println!("hxserver: cannot take the framebuffer");
         return 1;
     };
@@ -992,25 +974,32 @@ fn main() -> i32 {
         return 1;
     }
     let (width, height) = (screen.width, screen.height);
+    let mut input = if screen.drm.is_some() { hxstd::input::Input::open(width, height) } else { None };
+    println!(
+        "hxserver: {}x{} via {}, input via {}",
+        width,
+        height,
+        if screen.drm.is_some() { "/dev/dri/card0" } else { "the framebuffer" },
+        if input.is_some() { "/dev/input/event*" } else { "the console" }
+    );
     let mut state = MouseState::default();
-    sys::mouse(&mut state);
+    match input.as_mut() {
+        Some(i) => i.mouse(&mut state),
+        None => {
+            sys::mouse(&mut state);
+        }
+    }
 
     let live = fs::read_to_string("/proc/mounts").and_then(|t| t.lines().next().map(|l| l.starts_with("live"))).unwrap_or(false);
-    let cfg = config::load();
     let mut ui = Ui::load();
     let mut scan_cache = BTreeMap::new();
     apps::scan(&mut ui, &mut scan_cache);
-    let mut pinned: Vec<usize> = match &cfg.dock {
-        Some(names) => names.iter().filter_map(|n| app_by_icon(n)).collect(),
-        None => apps::default_dock(),
-    };
-    pinned.dedup();
-    let now = sys::realtime().sec;
-    let (year, month, _, _, _) = civil(now);
 
     let mut nook = Nook {
-        core: Compositor::new(screen, (state.x.clamp(0, width - 1), state.y.clamp(0, height - 1)), state.buttons & 7, Area::new(0, TOP_H, width, height - TOP_H)),
+        core: Compositor::new(screen, (state.x.clamp(0, width - 1), state.y.clamp(0, height - 1)), state.buttons & 7, Area::new(0, 0, width, height)),
         key_mods: 0,
+        input,
+        uevents: hxstd::uevent::Monitor::open(),
         wayland: -1,
         background: alloc::vec![0; (width * height) as usize],
         ui,
@@ -1018,63 +1007,37 @@ fn main() -> i32 {
         grab: Grab::None,
         snap_preview: None,
         hover_client: None,
-        popup: Popup::None,
-        popup_hover: None,
-        search: TextField::default(),
-        desktop: Vec::new(),
-        desktop_removed: cfg.desktop_removed.clone(),
-        desktop_added: cfg.desktop_added.clone(),
-        desktop_hover: None,
-        desktop_selected: None,
-        pinned,
-        dock_hover: None,
-        dock_offset: 0,
-        dock_size: cfg.dock_size,
-        dock_limit: cfg.dock_limit,
-        popup_dock: false,
-        autohide: cfg.autohide,
+        menu: None,
         toasts: Vec::new(),
         known_commands: Vec::new(),
         running: true,
-        last_minute: -1,
-        user: users::name_of(sys::getuid() as u32),
         live,
         last_click: (0, -1, -1),
         launched: Vec::new(),
+        closing: Vec::new(),
         hot_buttons: Vec::new(),
-        net: NetState {
-            status: net::Status::default(),
-            networks: Vec::new(),
-            last_poll: 0,
-            last_scan: 0,
-            selected: None,
-            password: TextField::secret(),
-            message: String::new(),
-            last_connected: None,
-        },
-        calendar_month: (year, month),
+        wallpaper: String::new(),
+        shell: Shell { pid: -1, started: 0, restarts: 0 },
+        minimize_targets: Vec::new(),
         switcher: None,
         switcher_until: 0,
         pickers: Vec::new(),
         next_token: 1,
-        sound: SoundState::new(),
         anim: anim::Prefs::load(),
         animations: Vec::new(),
         pending_open: Vec::new(),
         last_compose: 0,
-        launcher_scroll: 0,
-        launcher_focus: None,
+        v2: proto2::State::new(),
         apps_fingerprint: apps::fingerprint(),
         last_app_check: sys::uptime_ms(),
     };
     nook.update_work_area();
-    nook.build_desktop(&cfg);
-    let mut icons: Vec<String> = alloc::vec![String::from("logo"), String::from("logo-20"), String::from("about-logo-dark"), String::from("about-logo-light"), String::from("apps/folder-home"), String::from("apps/hello")];
+    let mut icons: Vec<String> = alloc::vec![String::from("logo"), String::from("about-logo-dark"), String::from("about-logo-light"), String::from("apps/hello")];
     for i in 0..apps::count() {
         icons.push(format!("apps/{}", apps::get(i).key));
         icons.push(format!("apps/{}-24", apps::get(i).key));
     }
-    for name in ["power", "user", "minimize", "maximize", "restore", "close", "search", "logout", "reboot", "run", "bell", "pin", "unpin", "wifi-0", "wifi-1", "wifi-2", "wifi-3", "wifi-off", "ethernet", "network-off", "lock", "check", "chevron-left", "chevron-right", "display", "trash", "open", "info", "plus", "folder", "wallpaper", "apps", "network", "volume-off", "volume-mute", "volume-1", "volume-2", "volume-3"] {
+    for name in ["minimize", "maximize", "restore", "close", "bell", "info"] {
         icons.push(format!("ui/{}", name));
     }
     for name in &icons {
@@ -1088,68 +1051,141 @@ fn main() -> i32 {
     write_toolkit_settings();
     nook.load_wallpaper();
     nook.watch_registry(true);
-    nook.poll_network(true);
-    nook.init_sound();
-    nook.wayland = sys::spawn("/usr/bin/hxwayland", &[] as &[&str], sys::SPAWN_DETACH);
+    let me = sys::getpid();
+    #[cfg(feature = "wayland")]
+    let mut bridge = if hxstd::env::var("NOOK_WAYLAND").as_deref() == Some("external") {
+        None
+    } else {
+        let link = wayland::Embedded { nook: &mut nook as *mut Nook, me, mailbox: sys::mailbox_fd().max(0) as u64 };
+        match hxwayland::Bridge::start(link) {
+            Ok(b) => {
+                sys::service_register("hxwayland");
+                Some(b)
+            }
+            Err(e) => {
+                println!("hxserver: no built-in Wayland: {}", e);
+                None
+            }
+        }
+    };
+    #[cfg(feature = "wayland")]
+    let external = bridge.is_none();
+    #[cfg(not(feature = "wayland"))]
+    let external = true;
+    if external {
+        nook.wayland = sys::spawn("/usr/libexec/hamix/hxwayland", &[] as &[&str], sys::SPAWN_DETACH);
+    }
+    nook.start_shell();
     nook.core.damage_all();
     nook.compose();
     if live {
         nook.toast("Welcome to HamixOS", "Double-click Install HamixOS to put it on a disk", "logo");
     }
 
+    sys::catch_hangup();
     let mut message = [0u8; 4096];
     let mut last_housekeeping = sys::uptime_ms();
+    let mut last_sweep = last_housekeeping;
 
     while nook.running {
         let dragging = matches!(nook.grab, Grab::Move { .. } | Grab::Resize { .. });
-        let animating = nook.dock_animating() || dragging || nook.switcher.is_some() || nook.animations_active();
-        let timeout = if dragging && !nook.core.damage.is_empty() { 4 } else if animating { 16 } else if nook.toasts.is_empty() && !nook.sound.osd_shown && nook.sound.save_at == 0 { 500 } else { 100 };
-        let ready = sys::wait_event(sys::EVENT_INPUT | sys::EVENT_MESSAGE, timeout);
+        let animating = dragging || nook.switcher.is_some() || nook.animations_active();
+        #[allow(unused_mut)]
+        let mut timeout: u64 = if dragging && !nook.core.damage.is_empty() { 4 } else if animating { 16 } else if nook.toasts.is_empty() { 500 } else { 100 };
+        let mut entries = alloc::vec![sys::WaitEntry::mailbox()];
+        #[cfg(feature = "wayland")]
+        if let Some(b) = bridge.as_mut() {
+            for (fd, pending) in b.fds() {
+                if fd >= 0 {
+                    entries.push(sys::WaitEntry::fd(fd as u64));
+                }
+                if pending {
+                    timeout = timeout.min(16);
+                }
+            }
+            if let Some(t) = b.timeout_ms() {
+                timeout = timeout.min(t);
+            }
+        }
+        if let Some(input) = nook.input.as_ref() {
+            entries.extend(input.fds().into_iter().map(sys::WaitEntry::fd));
+        }
+        if let Some(monitor) = nook.uevents.as_ref() {
+            entries.push(sys::WaitEntry::fd(monitor.fd()));
+        }
+        if nook.input.is_none() {
+            entries.push(sys::WaitEntry::fd(0));
+        }
+        sys::wait_any(&mut entries, Some(timeout as u64));
         let now = sys::uptime_ms();
+        if sys::take_hangup() {
+            nook.reload_config();
+        }
+        if !nook.pickers.is_empty() {
+            nook.reap_pickers();
+        }
 
-        if ready & sys::EVENT_MESSAGE != 0 {
+        if entries[0].ready != 0 {
             while let Some((sender, len)) = sys::msg_recv(&mut message, 0) {
+                if sender == me {
+                    #[cfg(feature = "wayland")]
+                    if let (Some(b), Some(event)) = (bridge.as_mut(), hxproto::Event::decode(&message[..len])) {
+                        b.deliver(event);
+                    }
+                    continue;
+                }
                 let bytes = message[..len].to_vec();
                 nook.on_message(sender, &bytes);
             }
         }
+        let mut hotplug = false;
+        if let Some(monitor) = nook.uevents.as_mut() {
+            while let Some(event) = monitor.next() {
+                hotplug |= event.subsystem() == "drm" && event.get("HOTPLUG") == Some("1");
+            }
+        }
+        if hotplug {
+            nook.map_framebuffer();
+        }
 
         nook.handle_mouse();
-        while let Some(raw) = sys::poll_key_code() {
+        #[cfg(feature = "wayland")]
+        if let Some(b) = bridge.as_mut() {
+            b.service(0);
+        }
+        while let Some(raw) = nook.next_key() {
             nook.key_mods = sys::key_modifiers(raw) as u32;
             nook.on_key(sys::key_base(raw) as i32);
         }
 
-        let minute = sys::realtime().sec / 60;
-        if minute != nook.last_minute {
-            nook.last_minute = minute;
-            let bar = nook.top_bar();
-            nook.core.add_damage(bar);
-        }
         if now.saturating_sub(last_housekeeping) >= 1000 {
             last_housekeeping = now;
             if !animating {
-                hamix_std::heap::release_cached();
+                hxstd::heap::release_cached();
             }
             nook.reap_clients();
+            nook.reap_layers();
+            nook.watch_shell(now);
+            if now.saturating_sub(last_sweep) >= 10_000 {
+                last_sweep = now;
+                sys::shm_sweep();
+            }
             nook.watch_registry(false);
             nook.watch_apps(now);
             if nook.core.screen.stale() {
                 nook.map_framebuffer();
             }
         }
-        nook.poll_network(false);
-        nook.poll_sound(now);
         nook.flush_resize(now, false);
         nook.tick_animations(now);
         nook.tick_switcher(now);
-        nook.update_dock_visibility();
         let before = nook.toasts.len();
         nook.toasts.retain(|t| t.until > now);
         if nook.toasts.len() != before {
             let area = nook.toast_region();
             nook.core.add_damage(area);
         }
+        nook.sync_toplevels();
         let paced = dragging && now.saturating_sub(nook.last_compose) < FRAME_MS;
         if !nook.core.damage.is_empty() && !paced {
             nook.compose();
@@ -1159,6 +1195,13 @@ fn main() -> i32 {
     let ids: Vec<u32> = nook.core.windows.iter().map(|w| w.id).collect();
     for id in ids {
         nook.remove_window(id, true);
+    }
+    if nook.shell.pid > 0 {
+        sys::send_signal(nook.shell.pid, sys::SIGTERM);
+    }
+    #[cfg(feature = "wayland")]
+    if let Some(b) = bridge.as_mut() {
+        b.shutdown();
     }
     nook.core.release_cursor();
     sys::release_framebuffer();

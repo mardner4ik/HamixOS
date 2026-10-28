@@ -24,6 +24,14 @@ pub fn apic_id_of(cpu: usize) -> u8 {
 
 pub fn kick_idle(_except: usize) {}
 
+pub fn shootdown(_root: u64) -> bool {
+    false
+}
+
+pub fn shootdown_timeouts() -> u64 {
+    0
+}
+
 pub fn start_aps(_hz: u64) -> usize {
     1
 }

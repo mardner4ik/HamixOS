@@ -1,0 +1,26 @@
+pkgname=xorg-server
+pkgver=21.1.14
+pkgdesc="X.Org X server with the modesetting driver (KMS/DRM dumb buffers)"
+source="https://www.x.org/releases/individual/xserver/xorg-server-$pkgver.tar.xz"
+sha256="8f2102cebdc4747d1656c1099ef610f5063c7422c24a177e300de569b354ee35"
+builddir="xorg-server-$pkgver"
+depends="libxshmfence xorgproto xtrans libxkbfile libXfont2 libxcvt pixman libXau openssl xkbcomp xkeyboard-config libdrm libudev-zero libpciaccess"
+
+build() {
+    unset PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+    meson setup build $HX_MESON -Dxorg=true -Dxephyr=false -Dxnest=false -Dxvfb=false -Dxwin=false -Dxquartz=false \
+        -Dglamor=false -Dglx=false -Ddri1=false -Ddri2=false -Ddri3=false -Dlibunwind=false -Dxdmcp=false -Dxdm-auth-1=false \
+        -Dsecure-rpc=false -Dudev=true -Dudev_kms=true -Dhal=false -Dsystemd_logind=false -Dsuid_wrapper=false -Dpciaccess=true \
+        -Dint10=false -Dxvmc=false -Ddrm=true -Dxkb_default_layout=us -Dfallback_input_driver=libinput -Dvgahw=false -Dlinux_apm=false -Dlinux_acpi=false -Dagp=false -Ddga=false -Dxf86-input-inputtest=false \
+        -Dsha1=libcrypto -Dlisten_tcp=false -Dlisten_unix=true -Dlisten_local=false -Dipv6=false -Ddtrace=false -Dxcsecurity=false \
+        -Dxselinux=false -Ddocs=false -Ddevel-docs=false -Dinput_thread=false -Dxkb_bin_dir=/usr/bin -Dxkb_dir=/usr/share/X11/xkb \
+        -Dxkb_output_dir=/var/lib/xkb -Ddefault_font_path=built-ins -Dlog_dir=/var/log -Dmodule_dir=/usr/lib/xorg/modules \
+        -Dc_args="-I$HX_ROOT/usr/include -D_GNU_SOURCE -D__linux__=1 -Dlinux=1"
+    meson compile -C build -j "$JOBS"
+}
+
+package() {
+    DESTDIR="$pkgdir" meson install -C build --no-rebuild
+    rm -rf "$pkgdir/usr/share/man" "$pkgdir/var"
+    rm -f "$pkgdir/usr/lib/xorg/protocol.txt"
+}

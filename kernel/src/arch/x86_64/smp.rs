@@ -31,6 +31,7 @@ unsafe extern "C" {
     static ap_trampoline: u8;
     static ap_trampoline_end: u8;
     static ap_slot_cr3: u8;
+    static ap_slot_efer: u8;
     static ap_slot_stack: u8;
     static ap_slot_entry: u8;
 }
@@ -63,6 +64,7 @@ fn install_percpu(cpu: usize) {
 pub fn early_init() {
     install_percpu(0);
     ONLINE[0].store(true, Ordering::Relaxed);
+    PERCPU_READY.store(true, Ordering::SeqCst);
 }
 
 pub fn percpu_ptr(cpu: usize) -> *mut PerCpu {
@@ -90,10 +92,73 @@ pub fn kick_idle(except: usize) {
         return;
     }
     for cpu in 0..count() {
-        if cpu != except && online(cpu) && crate::task::cpu_is_idle(cpu) {
+        if cpu != except && online(cpu) && crate::task::cpu_is_idle(cpu) && !crate::task::cpu_is_polling(cpu) {
             lapic::send_ipi(apic_id_of(cpu), lapic::WAKE_VECTOR);
         }
     }
+}
+
+static PERCPU_READY: AtomicBool = AtomicBool::new(false);
+static ACTIVE_ROOT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static FLUSH_REQUESTED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static FLUSH_DONE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static SHOOTDOWN_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+const SHOOTDOWN_SPINS: u64 = 20_000_000;
+
+pub fn note_root(root: u64) {
+    if PERCPU_READY.load(Ordering::Relaxed) {
+        ACTIVE_ROOT[cpu_id()].store(root, Ordering::SeqCst);
+    }
+}
+
+pub fn service_flush() {
+    if !PERCPU_READY.load(Ordering::Relaxed) {
+        return;
+    }
+    let cpu = cpu_id();
+    let requested = FLUSH_REQUESTED[cpu].load(Ordering::Acquire);
+    if FLUSH_DONE[cpu].load(Ordering::Relaxed) < requested {
+        super::paging::flush_tlb();
+        FLUSH_DONE[cpu].store(requested, Ordering::Release);
+    }
+}
+
+pub fn shootdown(root: u64) -> bool {
+    if count() < 2 || !PERCPU_READY.load(Ordering::Relaxed) || root == super::paging::kernel_root() {
+        return false;
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
+    let me = cpu_id();
+    let mut wait = [0u64; MAX_CPUS];
+    let mut any = false;
+    for cpu in 0..count() {
+        if cpu != me && online(cpu) && ACTIVE_ROOT[cpu].load(Ordering::SeqCst) == root {
+            wait[cpu] = FLUSH_REQUESTED[cpu].fetch_add(1, Ordering::AcqRel) + 1;
+            lapic::send_ipi(apic_id_of(cpu), lapic::FLUSH_VECTOR);
+            any = true;
+        }
+    }
+    if !any {
+        return false;
+    }
+    let mut spins = 0u64;
+    for cpu in 0..count() {
+        while wait[cpu] != 0 && FLUSH_DONE[cpu].load(Ordering::Acquire) < wait[cpu] {
+            service_flush();
+            core::hint::spin_loop();
+            spins += 1;
+            if spins > SHOOTDOWN_SPINS {
+                SHOOTDOWN_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                crate::serial_println!("tlb: cpu {} did not answer a shootdown from cpu {}", cpu, me);
+                return true;
+            }
+        }
+    }
+    true
+}
+
+pub fn shootdown_timeouts() -> u64 {
+    SHOOTDOWN_TIMEOUTS.load(Ordering::Relaxed)
 }
 
 fn prepare_trampoline(stack_top: u64) {
@@ -103,6 +168,8 @@ fn prepare_trampoline(stack_top: u64) {
         core::ptr::copy_nonoverlapping(start as *const u8, TRAMPOLINE_BASE as *mut u8, end - start);
         let slot = |sym: *const u8| TRAMPOLINE_BASE + (sym as u64 - start as u64);
         core::ptr::write_unaligned(slot(&raw const ap_slot_cr3) as *mut u32, super::paging::kernel_cr3() as u32);
+        let efer = if super::paging::no_execute() { 0x901u32 } else { 0x101 };
+        core::ptr::write_unaligned(slot(&raw const ap_slot_efer) as *mut u32, efer);
         core::ptr::write_unaligned(slot(&raw const ap_slot_stack) as *mut u64, stack_top);
         core::ptr::write_unaligned(slot(&raw const ap_slot_entry) as *mut u64, ap_entry as *const () as u64);
     }
@@ -113,7 +180,20 @@ fn alloc_stack(size: usize) -> Option<u64> {
     if ptr.is_null() { None } else { Some((ptr as u64 + size as u64) & !0xF) }
 }
 
+pub fn trampoline() -> core::ops::Range<u64> {
+    TRAMPOLINE_BASE..TRAMPOLINE_BASE + 0x1000
+}
+
 pub fn start_aps(hz: u64) -> usize {
+    let cpus = boot_aps(hz);
+    if super::paging::kernel_wx() {
+        super::paging::protect_kernel_range(TRAMPOLINE_BASE, 0x1000, true, false);
+        crate::drivers::klog::log(&alloc::format!("smp: kernel W^X, {} writable and executable pages", super::paging::kernel_rwx_pages()));
+    }
+    cpus
+}
+
+fn boot_aps(hz: u64) -> usize {
     if !lapic::present() {
         return 1;
     }
@@ -176,6 +256,7 @@ extern "C" fn ap_entry() -> ! {
     super::gdt::init_ap(cpu, df_top, 0);
     super::idt::load();
     super::paging::init_ap();
+    super::protect::enable();
     crate::syscall::init_cpu();
     lapic::enable(false, 0);
     ONLINE[cpu].store(true, Ordering::SeqCst);

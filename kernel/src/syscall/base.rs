@@ -2,14 +2,14 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use super::procfs::{self, Node};
-use crate::syscall::{
-    absolute, copy_out, euid, install_fd, is_tty, node_stat, open_path, sys_fstat, sys_read, target, term_size, user_cstr, user_slice, write_data, write_stat, LinuxStat, Target,
-    EACCES, EAGAIN, EBADF, EEXIST, EINVAL, EISDIR, EMFILE, ENODEV, ENOENT, ENOMEM, ENOTDIR, ENOTTY, EPERM, O_ACCMODE,
-};
+use crate::fs::procfs::{self, Node};
+use crate::linux::paths::{guest_path, guest_path_with, is_linux, view_of};
+use crate::syscall::{absolute, euid, install_fd, is_tty, node_stat, open_path, sys_fstat, sys_read, target, term_size, write_data, write_stat, LinuxStat, Target, O_ACCMODE};
+use crate::usercopy::{copy_out, user_cstr, user_slice, user_slice_mut};
+use crate::errno::{EACCES, EAGAIN, EBADF, EEXIST, EINVAL, EISDIR, EMFILE, ENODEV, ENOENT, ENOMEM, ENOTDIR, ENOTTY, EPERM};
 use crate::arch::paging::{self, AddressSpace, PAGE_SIZE};
 use crate::fs::{self, Vfs};
-use crate::task::{self, linux_loader, pipe, Abi, DirEntry, OpenFile};
+use crate::task::{self, pipe, DirEntry, OpenFile};
 
 pub const AT_FDCWD: u64 = -100i64 as u64;
 pub const AT_EMPTY_PATH: u64 = 0x1000;
@@ -18,12 +18,12 @@ const AT_REMOVEDIR: u64 = 0x200;
 const O_CLOEXEC_FLAG: u64 = 0o2000000;
 const MAX_FDS: usize = 256;
 const MAX_LINKS: usize = 8;
-const ENOTEMPTY: i64 = -39;
+use crate::errno::ENOTEMPTY;
 
-const EINTR: i64 = -4;
-const EDEADLK: i64 = -35;
-const ESPIPE: i64 = -29;
-const ETIMEDOUT: i64 = -110;
+use crate::errno::EINTR;
+use crate::errno::EDEADLK;
+use crate::errno::ESPIPE;
+use crate::errno::ETIMEDOUT;
 
 const MAP_SHARED: u64 = 0x01;
 const MAP_FIXED: u64 = 0x10;
@@ -86,23 +86,6 @@ const FUTEX_TID_MASK: u32 = 0x3FFF_FFFF;
 const FUTEX_WAITERS: u32 = 0x8000_0000;
 const FUTEX_OWNER_DIED: u32 = 0x4000_0000;
 
-fn is_linux() -> bool {
-    task::with_current(|t| t.abi) == Abi::Linux
-}
-
-pub fn guest_path(path: &str) -> String {
-    guest_path_with(path, true)
-}
-
-fn guest_path_with(path: &str, follow_last: bool) -> String {
-    if is_linux() {
-        let mapped = linux_loader::resolve(path);
-        linux_loader::follow(&mapped, follow_last)
-    } else {
-        String::from(path)
-    }
-}
-
 fn raw_at_path(dirfd: u64, ptr: u64) -> Result<String, i64> {
     let path = user_cstr(ptr)?;
     if path.is_empty() {
@@ -112,9 +95,21 @@ fn raw_at_path(dirfd: u64, ptr: u64) -> Result<String, i64> {
         return Ok(absolute(&path));
     }
     match target(dirfd) {
-        Target::Dir(base) => Ok(fs::absolute(&base, &path)),
+        Target::Dir(base) => Ok(fs::absolute(&view_of(&base), &path)),
         Target::Bad => Err(EBADF),
         _ => Err(ENOTDIR),
+    }
+}
+
+pub fn resolve_at(dirfd: u64, ptr: u64) -> Result<String, i64> {
+    at_path(dirfd, ptr)
+}
+
+pub fn fd_path(fd: u64) -> Result<String, i64> {
+    match target(fd) {
+        Target::File(node, _, _) => fs::VFS.lock().as_ref().map(|v| v.path_of(node)).ok_or(ENODEV),
+        Target::Bad => Err(EBADF),
+        _ => Err(EACCES),
     }
 }
 
@@ -149,7 +144,7 @@ fn find(path: &str, follow: bool) -> Result<(String, Found), i64> {
             if let Some(found) = procfs::lookup(&path) {
                 match &found.node {
                     Node::Link(target) if follow => {
-                        path = guest_path(target);
+                        path = guest_path(&view_of(target));
                         continue;
                     }
                     _ => return Ok((path, Found::Proc(found))),
@@ -209,7 +204,7 @@ pub fn merge_proc_entries(path: &str, mut entries: Vec<DirEntry>) -> Vec<DirEntr
 static SHM_NAMES: spin::Mutex<alloc::collections::BTreeMap<String, u32>> = spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 fn shm_name(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/opt/linux").unwrap_or(path).strip_prefix("/dev/shm/")?;
+    let rest = path.strip_prefix("/dev/shm/")?;
     (!rest.is_empty() && !rest.contains('/')).then_some(rest)
 }
 
@@ -233,7 +228,7 @@ fn open_shm(name: &str, flags: u64) -> i64 {
     }
     crate::task::ipc::retain(id);
     let access = (flags & 3).min(2) as u8;
-    let r = crate::syscall::install_fd(OpenFile::Memfd { id, pos: 0, name: alloc::format!("/dev/shm/{}", name), access });
+    let r = crate::syscall::install_fd(OpenFile::Memfd { id, pos: task::Offset::new(0), name: alloc::format!("/dev/shm/{}", name), access });
     if r < 0 {
         crate::task::ipc::release(id);
     }
@@ -270,13 +265,13 @@ pub fn open_special(path: &str, flags: u64) -> Option<i64> {
                 DirEntry { name: String::from(".."), ino: 1, kind: procfs::DT_DIR },
             ];
             all.extend(entries);
-            install_fd(OpenFile::Dir { path: real, entries: Arc::new(all), pos: 0 })
+            install_fd(OpenFile::Dir { path: real, entries: Arc::new(all), pos: task::Offset::new(0) })
         }
         Node::File(data) => {
             if flags & crate::syscall::O_DIRECTORY != 0 {
                 ENOTDIR
             } else {
-                install_fd(OpenFile::Mem { path: real, data: Arc::new(data), pos: 0 })
+                install_fd(OpenFile::Mem { path: real, data: Arc::new(data), pos: task::Offset::new(0) })
             }
         }
         Node::Link(_) => -40,
@@ -307,7 +302,7 @@ pub fn sys_faccessat(dirfd: u64, path_ptr: u64, mode: u64) -> i64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let uid = euid();
+    let cred = crate::task::real_cred();
     let path = match find(&path, true) {
         Ok((real, Found::Vfs(_))) => real,
         Ok((_, Found::Proc(found))) => {
@@ -322,8 +317,8 @@ pub fn sys_faccessat(dirfd: u64, path_ptr: u64, mode: u64) -> i64 {
     let Some(id) = vfs.resolve(vfs.root_id(), &path) else {
         return ENOENT;
     };
-    let exec_ok = uid == 0 || vfs.is_dir(id) || vfs.stat(id).mode & 0o111 != 0;
-    if (mode & 4 != 0 && !vfs.can_read(id, uid)) || (mode & 2 != 0 && !vfs.can_write(id, uid)) || (mode & 1 != 0 && !exec_ok) {
+    let exec_ok = vfs.can_exec(id, cred);
+    if (mode & 4 != 0 && !vfs.can_read(id, cred)) || (mode & 2 != 0 && !vfs.can_write(id, cred)) || (mode & 1 != 0 && !exec_ok) {
         return EACCES;
     }
     0
@@ -339,6 +334,7 @@ pub fn sys_readlinkat(dirfd: u64, path_ptr: u64, buf: u64, len: u64) -> i64 {
     }
     if raw.starts_with("/proc/") {
         if let Some(procfs::Lookup { node: Node::Link(target), .. }) = procfs::lookup(&raw) {
+            let target = view_of(&target);
             let n = copy_out(buf, len.min(target.len() as u64), target.as_bytes());
             return if n < 0 { n } else { n.min(len as i64) };
         }
@@ -371,17 +367,28 @@ pub fn sys_pread(fd: u64, buf: u64, count: u64, offset: u64) -> i64 {
             return copy_out(buf, count, &data[start..]).min(count as i64);
         }
         Target::Memfd(id, _) => {
-            let mut tmp = alloc::vec![0u8; count.min(64 << 20) as usize];
+            let mut tmp = match crate::memory::try_zeroed(count.min(64 << 20) as usize) {
+                Ok(tmp) => tmp,
+                Err(e) => return e,
+            };
             return match crate::task::ipc::shm_io(id, offset, &mut tmp, false) {
                 Ok(n) => copy_out(buf, n as u64, &tmp[..n]).min(n as i64),
                 Err(e) => e,
             };
         }
+        Target::Special(id) if crate::syscall::special::is_block(id) => {
+            let mut tmp = match crate::memory::try_zeroed(count.min(16 << 20) as usize) {
+                Ok(tmp) => tmp,
+                Err(e) => return e,
+            };
+            let n = crate::drivers::block_node::read_at(id, offset, &mut tmp);
+            return if n <= 0 { n } else { copy_out(buf, n as u64, &tmp[..n as usize]).min(n) };
+        }
         Target::Dir(_) => return EISDIR,
         Target::Bad => return EBADF,
         _ => return ESPIPE,
     };
-    let out = match user_slice(buf, count.min(64 << 20)) {
+    let out = match user_slice_mut(buf, count.min(64 << 20)) {
         Ok(o) => o,
         Err(e) => return e,
     };
@@ -419,17 +426,20 @@ pub fn sys_readv(fd: u64, iov: u64, count: u64) -> i64 {
     total
 }
 
-pub fn sys_mprotect(addr: u64, len: u64) -> i64 {
-    if addr & (PAGE_SIZE - 1) != 0 || !paging::is_user_range(addr, len) {
+pub fn sys_mprotect(addr: u64, len: u64, prot: u64) -> i64 {
+    if addr & (PAGE_SIZE - 1) != 0 || !paging::is_user_range(addr, len) || prot & !0x7 & !0x0300_0000 != 0 {
         return EINVAL;
     }
+    let size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    task::with_current(|t| t.aspace.as_mut().map(|a| a.protect_range(addr, size, prot as u8 & 7)));
+    crate::memory::tlb::sync();
     0
 }
 
-pub(super) fn open_file_for(t: &task::Task, fd: u64) -> Option<OpenFile> {
+pub(crate) fn open_file_for(t: &task::Task, fd: u64) -> Option<OpenFile> {
     match t.fds.get(fd as usize) {
         Some(Some(file)) => Some(file.duplicate()),
-        _ if fd < 3 && !t.kernel_thread => Some(OpenFile::Console),
+        _ if fd < 3 && !t.kernel_thread && !t.abi.posix() => Some(OpenFile::Console),
         _ => None,
     }
 }
@@ -462,7 +472,8 @@ fn dup_from(fd: u64, min: u64) -> i64 {
 }
 
 pub fn sys_dup(fd: u64) -> i64 {
-    let r = dup_from(fd, 3);
+    let first = if task::with_current(|t| t.abi.posix()) { 0 } else { 3 };
+    let r = dup_from(fd, first);
     if r >= 0 {
         crate::syscall::set_fd_access(r as u64, crate::syscall::fd_access(fd));
     }
@@ -555,7 +566,7 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
             r
         }
         F_GETLK => {
-            if let Ok(b) = user_slice(arg, 2) {
+            if let Ok(b) = user_slice_mut(arg, 2) {
                 b.copy_from_slice(&2u16.to_le_bytes());
             }
             0
@@ -567,32 +578,96 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> i64 {
     }
 }
 
-pub(super) fn gid_for(uid: u32) -> u32 {
-    gid_of(uid)
-}
-
-fn gid_of(uid: u32) -> u32 {
-    crate::users::name_of(uid).and_then(|n| crate::users::find_by_name(&n)).map(|u| u.gid).unwrap_or(uid)
-}
-
 pub fn sys_getgid() -> i64 {
-    gid_of(task::with_current(|t| t.ruid)) as i64
+    task::with_current(|t| t.rgid) as i64
 }
 
 pub fn sys_getegid() -> i64 {
-    gid_of(euid()) as i64
+    task::with_current(|t| t.egid) as i64
 }
 
 pub fn sys_getgroups(size: u64, list: u64) -> i64 {
+    let groups = task::with_current(|t| t.groups.clone());
     if size == 0 {
-        return 1;
+        return groups.len() as i64;
     }
-    let r = copy_out(list, 4, &gid_of(euid()).to_le_bytes());
-    if r < 0 { r } else { 1 }
+    if (size as usize) < groups.len() {
+        return EINVAL;
+    }
+    let mut raw = Vec::with_capacity(groups.len() * 4);
+    for g in &groups {
+        raw.extend_from_slice(&g.to_le_bytes());
+    }
+    if !raw.is_empty() && copy_out(list, raw.len() as u64, &raw) < 0 {
+        return crate::syscall::EFAULT;
+    }
+    groups.len() as i64
+}
+
+pub fn sys_setgroups(size: u64, list: u64) -> i64 {
+    if task::with_current(|t| t.uid) != 0 {
+        return -1;
+    }
+    if size as usize > task::MAX_GROUPS {
+        return EINVAL;
+    }
+    let raw = match user_slice(list, size * 4) {
+        Ok(b) => b.to_vec(),
+        Err(e) if size > 0 => return e,
+        Err(_) => Vec::new(),
+    };
+    let mut groups: Vec<u32> = raw.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+    groups.sort_unstable();
+    groups.dedup();
+    task::with_current(|t| t.groups = groups);
+    0
 }
 
 fn read_u64(ptr: u64) -> Result<u64, i64> {
     user_slice(ptr, 8).map(|b| u64::from_le_bytes((&*b).try_into().unwrap()))
+}
+
+pub fn futex_block(addr: u64, deadline: Option<u64>) -> i64 {
+    task::with_current_thread(|t| t.futex = addr);
+    loop {
+        let still = task::with_current_thread(|t| t.futex == addr);
+        if !still {
+            return 0;
+        }
+        if crate::syscall::signal::pending() {
+            task::with_current_thread(|t| t.futex = 0);
+            return EINTR;
+        }
+        let now = task::ticks();
+        if let Some(d) = deadline {
+            if now >= d {
+                task::with_current_thread(|t| t.futex = 0);
+                return ETIMEDOUT;
+            }
+        }
+        let slice = deadline.map(|d| d - now).unwrap_or(task::TICK_HZ).clamp(1, task::TICK_HZ);
+        task::block(task::WAIT_FUTEX, Some(slice), task::input_seq());
+        task::check_killed();
+    }
+}
+
+pub fn futex_wait(addr: u64, val: u32, timeout_ns: u64) -> i64 {
+    let current = match user_slice(addr, 4) {
+        Ok(b) => u32::from_le_bytes((&*b).try_into().unwrap()),
+        Err(e) => return e,
+    };
+    if current != val {
+        return EAGAIN;
+    }
+    let deadline = if timeout_ns == u64::MAX { None } else { Some(task::ticks() + task::ms_to_ticks(timeout_ns.div_ceil(1_000_000))) };
+    futex_block(addr, deadline)
+}
+
+pub fn futex_wake(addr: u64, count: u64) -> i64 {
+    if addr & 3 != 0 {
+        return EINVAL;
+    }
+    task::wake_futex(task::current_pid(), addr, (count as u32).min(i32::MAX as u32) as usize) as i64
 }
 
 pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u64) -> i64 {
@@ -652,27 +727,7 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
                 }
                 Some(task::ticks() + task::ms_to_ticks(ms))
             };
-            task::with_current_thread(|t| t.futex = addr);
-            loop {
-                let still = task::with_current_thread(|t| t.futex == addr);
-                if !still {
-                    return 0;
-                }
-                if super::signal::pending() {
-                    task::with_current_thread(|t| t.futex = 0);
-                    return EINTR;
-                }
-                let now = task::ticks();
-                if let Some(d) = deadline {
-                    if now >= d {
-                        task::with_current_thread(|t| t.futex = 0);
-                        return ETIMEDOUT;
-                    }
-                }
-                let slice = deadline.map(|d| d - now).unwrap_or(task::TICK_HZ).clamp(1, task::TICK_HZ);
-                task::block(task::WAIT_FUTEX, Some(slice), task::input_seq());
-                task::check_killed();
-            }
+            futex_block(addr, deadline)
         }
         FUTEX_LOCK_PI | FUTEX_LOCK_PI2 | FUTEX_TRYLOCK_PI => {
             let tid = task::current_tid() as u32 & FUTEX_TID_MASK;
@@ -686,7 +741,7 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
                 None
             };
             loop {
-                let outcome = match user_slice(addr, 4) {
+                let outcome = match user_slice_mut(addr, 4) {
                     Ok(cell) => {
                         let current = u32::from_le_bytes((&*cell).try_into().unwrap());
                         let owner = current & FUTEX_TID_MASK;
@@ -709,7 +764,7 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
                     Err(e) => return e,
                     Ok(false) => {}
                 }
-                if super::signal::pending() {
+                if crate::syscall::signal::pending() {
                     task::with_current_thread(|t| t.futex = 0);
                     return EINTR;
                 }
@@ -729,7 +784,7 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
         }
         FUTEX_UNLOCK_PI => {
             let tid = task::current_tid() as u32 & FUTEX_TID_MASK;
-            let waiters = match user_slice(addr, 4) {
+            let waiters = match user_slice_mut(addr, 4) {
                 Ok(cell) => {
                     let current = u32::from_le_bytes((&*cell).try_into().unwrap());
                     if current & FUTEX_TID_MASK != tid {
@@ -754,7 +809,7 @@ pub fn sys_getrandom(buf: u64, len: u64) -> i64 {
     let mut done = 0u64;
     while done < len {
         let n = (len - done).min(PAGE_SIZE * 16);
-        match user_slice(buf + done, n) {
+        match user_slice_mut(buf + done, n) {
             Ok(out) => crate::random::fill(out),
             Err(e) => return if done > 0 { done as i64 } else { e },
         }
@@ -799,14 +854,62 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
         }
         _ => {}
     }
+    if let Target::Special(id) = kind {
+        if crate::syscall::special::is_drm(id) {
+            return crate::drivers::video::drm::ioctl(id, request, arg);
+        }
+        if crate::syscall::special::is_evdev(id) {
+            return crate::drivers::input::evdev::ioctl(id, request, arg);
+        }
+        if crate::syscall::special::is_oss(id) {
+            return crate::drivers::audio::oss::ioctl(id, request, arg);
+        }
+        if crate::syscall::special::is_block(id) {
+            return crate::drivers::block_node::ioctl(id, request, arg);
+        }
+        if let Some(vt) = crate::syscall::special::vt_of(id) {
+            if let Some(result) = crate::tty::vt::ioctl(vt, request, arg) {
+                return result;
+            }
+            return match request {
+                TCGETS => crate::tty::get(arg),
+                TCSETS | TCSETSW | TCSETSF => 0,
+                TIOCGWINSZ => {
+                    let mut raw = [0u8; 8];
+                    raw[0..2].copy_from_slice(&25u16.to_le_bytes());
+                    raw[2..4].copy_from_slice(&80u16.to_le_bytes());
+                    copy_out(arg, 8, &raw).min(0)
+                }
+                0x540E | 0x5422 | 0x540B | 0x540A | 0x5409 => 0,
+                _ => ENOTTY,
+            };
+        }
+    }
     if !is_tty(fd) {
         return ENOTTY;
     }
+    if matches!(kind, Target::Console) {
+        if let Some(result) = crate::tty::vt::ioctl(task::current_vt(), request, arg) {
+            return result;
+        }
+    }
     match request {
-        TCGETS => super::tty::get(arg),
-        TCSETS | TCSETSW => super::tty::set(arg, false),
-        TCSETSF => super::tty::set(arg, true),
-        TIOCSPGRP => 0,
+        TCGETS => crate::tty::get(arg),
+        TCSETS | TCSETSW => crate::tty::set(arg, false),
+        TCSETSF => crate::tty::set(arg, true),
+        TIOCSPGRP => {
+            let raw = match user_slice(arg, 4) {
+                Ok(b) => b.to_vec(),
+                Err(e) => return e,
+            };
+            let group = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            match kind {
+                Target::Console => crate::tty::vt::set_foreground_group(task::current_vt(), group),
+                Target::Pty(input, _) | Target::PipeRead(input) => pipe::set_foreground_group(input, group),
+                _ => {}
+            }
+            0
+        }
         TIOCSWINSZ => {
             let raw = match user_slice(arg, 8) {
                 Ok(b) => b.to_vec(),
@@ -837,7 +940,15 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
             raw[2..4].copy_from_slice(&cols.to_le_bytes());
             copy_out(arg, 8, &raw).min(0)
         }
-        TIOCGPGRP => copy_out(arg, 4, &task::current_pid().to_le_bytes()).min(0),
+        TIOCGPGRP => {
+            let own = task::with_current(|t| if t.pgid != 0 { t.pgid } else { t.pid });
+            let group = match kind {
+                Target::Console => crate::tty::vt::foreground_group(task::current_vt()).unwrap_or(own),
+                Target::Pty(input, _) | Target::PipeRead(input) => pipe::foreground_group(input).unwrap_or(own),
+                _ => own,
+            };
+            copy_out(arg, 4, &group.to_le_bytes()).min(0)
+        }
         0x8004_5430 => {
             let index = task::with_current(|t| match t.fds.get(fd as usize) {
                 Some(Some(OpenFile::PtyMaster { index, .. })) => Some(*index),
@@ -853,7 +964,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
                 Some(Some(OpenFile::PtyMaster { index, .. })) => Some(*index),
                 _ => None,
             });
-            match index.and_then(|i| task::pty::open_slave(i).map(|(input, output)| (i, input, output))) {
+            match index.and_then(|i| crate::tty::pty::open_slave(i).map(|(input, output)| (i, input, output))) {
                 Some((index, input, output)) => crate::syscall::install_fd(OpenFile::PtySlave { index, input, output }),
                 None => ENOTTY,
             }
@@ -871,7 +982,7 @@ pub fn sys_ioctl(fd: u64, request: u64, arg: u64) -> i64 {
                 Err(e) => return e,
             };
             match index {
-                Some(i) if task::pty::set_packet(i, on) => 0,
+                Some(i) if crate::tty::pty::set_packet(i, on) => 0,
                 _ => ENOTTY,
             }
         }
@@ -964,7 +1075,7 @@ fn read_file(node: usize, offset: u64, len: u64) -> Result<Vec<u8>, i64> {
     if offset >= size {
         return Ok(Vec::new());
     }
-    let mut data = alloc::vec![0u8; (size - offset).min(len) as usize];
+    let mut data = crate::memory::try_zeroed((size - offset).min(len) as usize)?;
     let n = vfs.read_node_at(node, offset as usize, &mut data).map_err(|_| ENODEV)?;
     data.truncate(n);
     Ok(data)
@@ -976,7 +1087,7 @@ const ANON_FAULT_AROUND: u64 = 4;
 pub fn lazy_fault(addr: u64) -> bool {
     let page = addr & !(PAGE_SIZE - 1);
     let Some((index, region)) = task::with_current(|t| t.aspace.as_ref().and_then(|a| a.lazy_at(page))) else {
-        return false;
+        return task::with_current(|t| t.aspace.as_ref().map(|a| a.translate(page).is_some()).unwrap_or(false));
     };
     let limit = if region.node == paging::ANON_NODE { ANON_FAULT_AROUND } else { FAULT_AROUND };
     let mut count = 1u64;
@@ -996,6 +1107,7 @@ pub fn lazy_fault(addr: u64) -> bool {
             let offset = file_offset + i * PAGE_SIZE;
             let lazy = task::with_current(|t| t.aspace.as_ref().and_then(|a| a.lazy_at(virt)));
             let Some((index, _)) = lazy else {
+                any |= task::with_current(|t| t.aspace.as_ref().map(|a| a.translate(virt).is_some()).unwrap_or(false));
                 continue;
             };
             if offset >= region.file_len {
@@ -1029,13 +1141,16 @@ pub fn lazy_fault(addr: u64) -> bool {
         paging::flush_tlb();
         return any || task::with_current(|t| t.aspace.as_ref().map(|a| a.translate(page).is_some()).unwrap_or(false));
     }
+    let data = Vec::new();
     let filled = task::with_current(|t| {
         let Some(aspace) = t.aspace.as_mut() else {
             return false;
         };
         let mut any = false;
         for i in 0..count {
-            any |= aspace.fill_lazy(page + i * PAGE_SIZE, index, &[]);
+            let from = ((i * PAGE_SIZE) as usize).min(data.len());
+            let to = (((i + 1) * PAGE_SIZE) as usize).min(data.len());
+            any |= aspace.fill_lazy(page + i * PAGE_SIZE, index, &data[from..to]);
         }
         any || aspace.translate(page).is_some()
     });
@@ -1057,6 +1172,16 @@ pub fn fault_in_range(addr: u64, len: u64) -> bool {
 }
 
 pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> i64 {
+    let result = mmap_unprotected(addr, len, prot, flags, fd, offset);
+    if result > 0 && prot & 7 != 7 {
+        let size = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        task::with_current(|t| t.aspace.as_mut().map(|a| a.protect_range(result as u64, size, prot as u8 & 7)));
+        crate::memory::tlb::sync();
+    }
+    result
+}
+
+fn mmap_unprotected(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> i64 {
     if len == 0 || len > 1 << 36 || offset & (PAGE_SIZE - 1) != 0 {
         return EINVAL;
     }
@@ -1068,6 +1193,15 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
     }
     if fixed && (addr < paging::USER_BASE || addr.saturating_add(size) > paging::USER_SHM_BASE) {
         return if noreplace { EEXIST } else { ENOMEM };
+    }
+    if flags & MAP_ANONYMOUS != 0 && flags & MAP_SHARED != 0 {
+        let id = crate::task::ipc::memfd_create(task::current_pid());
+        let result = match crate::task::ipc::shm_set_len(id, size) {
+            0 => map_memfd(id, fixed.then_some(addr), noreplace, 0, size),
+            e => e,
+        };
+        crate::task::ipc::release(id);
+        return result;
     }
     let mut lazy_file: Option<(usize, u64)> = None;
     let contents = if flags & MAP_ANONYMOUS != 0 {
@@ -1086,8 +1220,18 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
                 Vec::new()
             }
             Target::Memfd(id, _) if flags & MAP_SHARED != 0 => return map_memfd(id, fixed.then_some(addr), noreplace, offset, size),
+            Target::Special(id) if crate::syscall::special::is_drm(id) => {
+                return match crate::drivers::video::drm::map_target(id, offset) {
+                    Some((segment, within)) => map_memfd(segment, fixed.then_some(addr), noreplace, within, size),
+                    None => EINVAL,
+                };
+            }
             Target::Memfd(id, _) => {
-                let mut data = alloc::vec![0u8; size as usize];
+                let available = crate::task::ipc::shm_len(id).unwrap_or(0).saturating_sub(offset);
+                let mut data = match crate::memory::try_zeroed(size.min(available) as usize) {
+                    Ok(data) => data,
+                    Err(e) => return e,
+                };
                 match crate::task::ipc::shm_io(id, offset, &mut data, false) {
                     Ok(n) => data.truncate(n),
                     Err(e) => return e,
@@ -1121,13 +1265,13 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
         }
         Ok(base)
     });
-    paging::flush_tlb();
+    crate::memory::tlb::sync();
     let base = match placed {
         Ok(base) => base,
         Err(e) => return e,
     };
     if !contents.is_empty() {
-        match user_slice(base, contents.len() as u64) {
+        match user_slice_mut(base, contents.len() as u64) {
             Ok(out) => out.copy_from_slice(&contents),
             Err(e) => return e,
         }
@@ -1137,7 +1281,7 @@ pub fn sys_mmap(addr: u64, len: u64, prot: u64, flags: u64, fd: u64, offset: u64
 
 pub fn sys_getdents64(fd: u64, buf: u64, count: u64) -> i64 {
     let taken = task::with_current(|t| match t.fds.get(fd as usize) {
-        Some(Some(OpenFile::Dir { entries, pos, .. })) => Ok((entries.clone(), *pos)),
+        Some(Some(OpenFile::Dir { entries, pos, .. })) => Ok((entries.clone(), pos.get())),
         Some(Some(_)) => Err(ENOTDIR),
         _ => Err(EBADF),
     });
@@ -1145,7 +1289,7 @@ pub fn sys_getdents64(fd: u64, buf: u64, count: u64) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let out = match user_slice(buf, count.min(1 << 20)) {
+    let out = match user_slice_mut(buf, count.min(1 << 20)) {
         Ok(o) => o,
         Err(e) => return e,
     };
@@ -1171,7 +1315,7 @@ pub fn sys_getdents64(fd: u64, buf: u64, count: u64) -> i64 {
     }
     task::with_current(|t| {
         if let Some(Some(OpenFile::Dir { pos, .. })) = t.fds.get_mut(fd as usize) {
-            *pos = index;
+            pos.set(index);
         }
     });
     used as i64
@@ -1248,7 +1392,7 @@ pub fn sys_unlinkat(dirfd: u64, path_ptr: u64, flags: u64) -> i64 {
         v.remove(0, &path, uid).map_err(crate::syscall::fs_error)
     });
     if matches!(outcome, Some(Ok(()))) {
-        super::socket::unlink_hook(&path);
+        crate::net::socket::unlink_hook(&path);
     }
     match outcome {
         Some(Ok(())) => {
@@ -1374,23 +1518,33 @@ pub fn sys_fchmod(fd: u64, mode: u64) -> i64 {
     }
 }
 
-fn chown_path(path: &str, owner: u64) -> i64 {
-    if owner as u32 == u32::MAX {
-        return if fs::VFS.lock().as_ref().map(|v| v.exists(0, path)).unwrap_or(false) { 0 } else { ENOENT };
+fn chown_path(path: &str, owner: u64, group: u64) -> i64 {
+    let owner = (owner as u32 != u32::MAX).then_some(owner as u32);
+    let group = (group as u32 != u32::MAX).then_some(group as u32);
+    let cred = task::current_cred();
+    match fs::VFS.lock().as_mut() {
+        Some(v) if owner.is_none() && group.is_none() => {
+            if v.exists(0, path) {
+                0
+            } else {
+                ENOENT
+            }
+        }
+        Some(v) => vfs_result(Some(v.chown(0, path, cred, owner, group))),
+        None => ENODEV,
     }
-    vfs_result(with_vfs(|v, uid| v.chown(0, path, uid, owner as u32)))
 }
 
-pub fn sys_fchownat(dirfd: u64, path_ptr: u64, owner: u64) -> i64 {
+pub fn sys_fchownat(dirfd: u64, path_ptr: u64, owner: u64, group: u64) -> i64 {
     match at_path(dirfd, path_ptr) {
-        Ok(path) => chown_path(&path, owner),
+        Ok(path) => chown_path(&path, owner, group),
         Err(e) => e,
     }
 }
 
-pub fn sys_fchown(fd: u64, owner: u64) -> i64 {
+pub fn sys_fchown(fd: u64, owner: u64, group: u64) -> i64 {
     match node_path(fd) {
-        Ok(path) => chown_path(&path, owner),
+        Ok(path) => chown_path(&path, owner, group),
         Err(e) => e,
     }
 }
@@ -1455,7 +1609,8 @@ pub fn sys_fallocate(fd: u64, mode: u64, offset: u64, len: u64) -> i64 {
 
 pub fn sys_ftruncate(fd: u64, len: u64) -> i64 {
     match target(fd) {
-        Target::File(node, _, _) => vfs_result(with_vfs(|v, uid| v.set_len(node, len as usize, uid))),
+        Target::File(_, _, _) if crate::syscall::fd_access(fd) == 0 => EINVAL,
+        Target::File(node, _, _) => vfs_result(with_vfs(|v, _| v.set_len(node, len as usize, 0))),
         Target::Memfd(id, _) => crate::task::ipc::shm_set_len(id, len),
         Target::Bad => EBADF,
         _ => EINVAL,
@@ -1534,7 +1689,7 @@ pub fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: u64, count: u64) -> i64
         copy_out(offset_ptr, 8, &(pos as u64).to_le_bytes());
     } else {
         task::with_current(|t| match t.fds.get_mut(in_fd as usize) {
-            Some(Some(OpenFile::File { pos: p, .. })) | Some(Some(OpenFile::Mem { pos: p, .. })) => *p = pos,
+            Some(Some(OpenFile::File { pos: p, .. })) | Some(Some(OpenFile::Mem { pos: p, .. })) => p.set(pos),
             _ => {}
         });
     }
@@ -1582,7 +1737,7 @@ pub fn sys_nanosleep(req: u64, rem: u64) -> i64 {
 }
 
 fn clock_now_ms(clock: u64) -> u64 {
-    let up = task::uptime_ms();
+    let up = task::clock_ms();
     if clock == 0 { crate::drivers::rtc::boot_epoch() * 1000 + up } else { up }
 }
 
@@ -1697,7 +1852,7 @@ pub fn sys_memfd_create(name_ptr: u64, flags: u64) -> i64 {
         Err(e) => return e,
     };
     let id = crate::task::ipc::memfd_create(task::current_pid());
-    crate::syscall::install_fd(OpenFile::Memfd { id, pos: 0, name, access: 2 })
+    crate::syscall::install_fd(OpenFile::Memfd { id, pos: task::Offset::new(0), name, access: 2 })
 }
 
 pub fn sys_pwrite(fd: u64, buf: u64, count: u64, offset: u64) -> i64 {
@@ -1707,7 +1862,10 @@ pub fn sys_pwrite(fd: u64, buf: u64, count: u64, offset: u64) -> i64 {
     };
     match target(fd) {
         Target::File(node, _, _) => {
-            let outcome = with_vfs(|v, uid| v.write_node_at(node, offset as usize, &data, uid));
+            if crate::syscall::fd_access(fd) == 0 {
+                return EBADF;
+            }
+            let outcome = with_vfs(|v, _| v.write_node_at(node, offset as usize, &data, 0));
             match outcome {
                 Some(Ok(())) => {
                     fs::request_sync();
@@ -1728,6 +1886,7 @@ pub fn sys_pwrite(fd: u64, buf: u64, count: u64, offset: u64) -> i64 {
             let mut copy = data;
             crate::task::ipc::shm_io(id, offset, &mut copy, true).map(|n| n as i64).unwrap_or_else(|e| e)
         }
+        Target::Special(id) if crate::syscall::special::is_block(id) => crate::drivers::block_node::write_at(id, offset, &data),
         Target::Bad => EBADF,
         Target::Dir(_) => EISDIR,
         _ => ESPIPE,

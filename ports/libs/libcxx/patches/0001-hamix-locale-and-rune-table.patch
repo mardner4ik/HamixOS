@@ -1,0 +1,22 @@
+--- a/libcxx/include/__config
++++ b/libcxx/include/__config
+@@ -706,7 +706,7 @@
+ #  endif
+ 
+ #  if defined(__BIONIC__) || defined(__NuttX__) || defined(__Fuchsia__) || defined(__wasi__) ||                        \
+-      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__)
++      _LIBCPP_HAS_MUSL_LIBC || defined(__OpenBSD__) || defined(__LLVM_LIBC__) || defined(__hamix__)
+ #    define _LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE
+ #  endif
+ 
+--- a/libcxx/include/__locale_dir/locale_base_api.h
++++ b/libcxx/include/__locale_dir/locale_base_api.h
+@@ -116,7 +116,7 @@
+ #    include <__locale_dir/support/windows.h>
+ #  elif defined(__Fuchsia__)
+ #    include <__locale_dir/support/fuchsia.h>
+-#  elif defined(__linux__)
++#  elif defined(__linux__) || defined(__hamix__)
+ #    include <__locale_dir/support/linux.h>
+ #  elif _LIBCPP_LIBC_NEWLIB
+ #    include <__locale_dir/support/newlib.h>

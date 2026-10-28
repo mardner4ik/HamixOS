@@ -1,0 +1,19 @@
+pkgname=dbus
+pkgver=1.14.10
+pkgdesc="Message bus system"
+source="https://dbus.freedesktop.org/releases/dbus/dbus-$pkgver.tar.xz"
+sha256="ba1f21d2bd9d339da2d4aa8780c09df32fea87998b73da24f49ab9df1e36a50f"
+builddir="dbus-$pkgver"
+depends="expat"
+
+build() {
+    ./configure --host="$HX_HOST" --build="$HX_BUILD" --prefix=/usr --sysconfdir=/etc --localstatedir=/var --runstatedir=/run \
+        --enable-shared --disable-static --disable-systemd --disable-selinux --disable-apparmor --disable-libaudit --disable-inotify \
+        --disable-doxygen-docs --disable-xml-docs --disable-ducktype-docs --disable-tests --without-x --with-session-socket-dir=/tmp \
+        --with-system-socket=/run/dbus/system_bus_socket --with-system-pid-file=/run/dbus/dbus.pid --with-dbus-user=messagebus
+    make -j"$JOBS"
+}
+
+package() {
+    make DESTDIR="$pkgdir" install
+}

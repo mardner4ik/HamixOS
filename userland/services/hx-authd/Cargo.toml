@@ -1,0 +1,14 @@
+[package]
+name = "hx-authd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "hx-authd"
+path = "src/main.rs"
+
+[dependencies]
+hxstd = { path = "../../libs/hxstd" }
+
+[package.metadata.hamix]
+install = "libexec"

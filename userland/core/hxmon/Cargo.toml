@@ -1,13 +1,24 @@
 [package]
 name = "hxmon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
 name = "hxmon"
 path = "src/main.rs"
 
+[target.'cfg(target_os = "hamix")'.dependencies]
+hxstd = { path = "../../libs/hxstd" }
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["nook"] }
+
 [dependencies]
-hamix_std = { path = "../../sdk/hamix_std" }
-vellum = { path = "../../libs/vellum" }
-hxclient = { path = "../../libs/hxclient" }
+hxport = { path = "../../libs/hxport" }
+
+[target.'cfg(not(target_os = "hamix"))'.dependencies]
+hxtoolkit = { path = "../../../crates/hxtoolkit", features = ["gtk"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("hamix"))'] }
+
+[package.metadata.hamix]
+desktop = "nook"
