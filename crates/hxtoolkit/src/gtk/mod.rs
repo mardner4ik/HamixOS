@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -15,6 +16,51 @@ use crate::style::{Align, Axis, ButtonKind, Length, TextSize, Tone};
 
 pub fn available() -> bool {
     ["WAYLAND_DISPLAY", "DISPLAY"].iter().any(|v| std::env::var(v).map(|s| !s.is_empty()).unwrap_or(false))
+}
+
+fn system_prefers_dark() -> bool {
+    if gtk::Settings::default()
+        .map(|settings| {
+            settings.is_gtk_application_prefer_dark_theme()
+                || settings.gtk_theme_name().map(|name| name.to_lowercase().contains("dark")).unwrap_or(false)
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    if std::env::var("GTK_THEME").map(|theme| theme.to_lowercase().contains("dark")).unwrap_or(false) {
+        return true;
+    }
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let home = std::path::PathBuf::from(home);
+    for path in [home.join(".config/gtk-4.0/settings.ini"), home.join(".config/gtk-3.0/settings.ini")] {
+        if let Ok(settings) = std::fs::read_to_string(path) {
+            if settings.lines().any(|line| {
+                let Some((key, value)) = line.split_once('=') else {
+                    return false;
+                };
+                let value = value.trim().trim_matches('"').to_lowercase();
+                (key.trim() == "gtk-application-prefer-dark-theme" && matches!(value.as_str(), "1" | "true"))
+                    || (key.trim() == "gtk-theme-name" && value.contains("dark"))
+            }) {
+                return true;
+            }
+        }
+    }
+
+    std::fs::read_to_string(home.join(".config/kdeglobals"))
+        .map(|settings| {
+            settings.lines().any(|line| {
+                line.split_once('=')
+                    .map(|(key, value)| key.trim() == "ColorScheme" && value.to_lowercase().contains("dark"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
 }
 
 type Slot<T> = Rc<RefCell<Option<T>>>;
@@ -85,6 +131,54 @@ struct Node<M> {
     children: Vec<Node<M>>,
     handlers: Handlers<M>,
     options: Vec<String>,
+    custom_class: Option<String>,
+}
+
+struct DynamicCss {
+    provider: gtk::CssProvider,
+    rules: String,
+    classes: HashSet<String>,
+    installed: bool,
+}
+
+thread_local! {
+    static DYNAMIC_CSS: RefCell<Option<DynamicCss>> = const { RefCell::new(None) };
+}
+
+fn apply_dynamic_style(widget: &gtk::Widget, current: &mut Option<String>, declarations: &str) {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    declarations.hash(&mut hasher);
+    let class = format!("hxtk-{:016x}", hasher.finish());
+    if current.as_deref() == Some(class.as_str()) {
+        widget.add_css_class(&class);
+        return;
+    }
+    if let Some(old) = current.take() {
+        widget.remove_css_class(&old);
+    }
+    DYNAMIC_CSS.with(|dynamic| {
+        let mut dynamic = dynamic.borrow_mut();
+        let css = dynamic.get_or_insert_with(|| DynamicCss {
+            provider: gtk::CssProvider::new(),
+            rules: String::from("popover.menu, popover.menu label, popover.menu * { font-weight: normal; }\n"),
+            classes: HashSet::new(),
+            installed: false,
+        });
+        if css.classes.insert(class.clone()) {
+            css.rules.push_str(&format!(".{} {{ {} }}\n", class, declarations));
+            css.provider.load_from_data(&css.rules);
+        }
+        if !css.installed {
+            gtk::style_context_add_provider_for_display(
+                &widget.display(),
+                &css.provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+            css.installed = true;
+        }
+    });
+    widget.add_css_class(&class);
+    *current = Some(class);
 }
 
 fn icon_name(name: &str) -> String {
@@ -145,8 +239,9 @@ fn text_classes(size: TextSize, tone: Tone) -> Vec<&'static str> {
     match size {
         TextSize::Small => out.push("caption"),
         TextSize::Strong => out.push("heading"),
-        TextSize::Title => out.push("title-2"),
-        TextSize::Display => out.push("title-1"),
+        TextSize::Title | TextSize::Heading2 => out.push("title-2"),
+        TextSize::Display | TextSize::Heading1 => out.push("title-1"),
+        TextSize::Heading3 => out.push("heading"),
         TextSize::Mono => out.push("monospace"),
         TextSize::Body => {}
     }
@@ -172,6 +267,16 @@ fn apply_size(widget: &gtk::Widget, width: Length, height: Length) {
     }
     if height.fills() {
         widget.set_valign(gtk::Align::Fill);
+    }
+}
+
+fn reset_scrolls<M>(node: &Node<M>) {
+    if let Some(scroll) = node.widget.downcast_ref::<gtk::ScrolledWindow>() {
+        scroll.hadjustment().set_value(0.0);
+        scroll.vadjustment().set_value(0.0);
+    }
+    for child in &node.children {
+        reset_scrolls(child);
     }
 }
 
@@ -415,7 +520,7 @@ impl<M: Clone + 'static> Builder<M> {
             "canvas" => self.canvas(&handlers),
             _ => gtk::Box::new(gtk::Orientation::Vertical, 0).upcast(),
         };
-        Node { kind, widget, inner, children: Vec::new(), handlers, options: Vec::new() }
+        Node { kind, widget, inner, children: Vec::new(), handlers, options: Vec::new(), custom_class: None }
     }
 
     fn canvas(&self, handlers: &Handlers<M>) -> gtk::Widget {
@@ -501,6 +606,24 @@ impl<M: Clone + 'static> Builder<M> {
                     _ => 0.0,
                 });
                 label.set_css_classes(&text_classes(t.size, t.tone));
+                let mut declarations = String::new();
+                if let Some(color) = t.color {
+                    declarations.push_str(&format!("color: #{:06x};", color & 0xffffff));
+                }
+                if let Some(font) = t.font_family.as_deref() {
+                    let font = font.replace('"', "").replace('\\', "");
+                    declarations.push_str(&format!("font-family: \"{}\";", font));
+                }
+                if let Some(bg) = t.bg {
+                    declarations.push_str(&format!("background-color: #{:06x};", bg & 0xffffff));
+                }
+                if declarations.is_empty() {
+                    if let Some(class) = node.custom_class.take() {
+                        node.widget.remove_css_class(&class);
+                    }
+                } else {
+                    apply_dynamic_style(&node.widget, &mut node.custom_class, &declarations);
+                }
             }
             Element::Button(b) => {
                 let button = node.widget.downcast_ref::<gtk::Button>().unwrap();
@@ -523,7 +646,10 @@ impl<M: Clone + 'static> Builder<M> {
                     ButtonKind::Primary => classes.push("suggested-action"),
                     ButtonKind::Danger => classes.push("destructive-action"),
                     ButtonKind::Flat => classes.push("flat"),
-                    ButtonKind::Link => classes.push("link"),
+                    ButtonKind::Link => {
+                        classes.push("link");
+                        classes.push("flat");
+                    }
                     ButtonKind::Secondary => {}
                 }
                 match b.size {
@@ -532,6 +658,11 @@ impl<M: Clone + 'static> Builder<M> {
                     _ => {}
                 }
                 button.set_css_classes(&classes);
+                if let Some(color) = b.text_color {
+                    apply_dynamic_style(&node.widget, &mut node.custom_class, &format!("color: #{:06x};", color & 0xffffff));
+                } else if let Some(class) = node.custom_class.take() {
+                    node.widget.remove_css_class(&class);
+                }
                 button.set_tooltip_text(b.tooltip.as_deref());
                 button.set_sensitive(b.on_press.is_some());
                 *node.handlers.press.borrow_mut() = b.on_press;
@@ -677,6 +808,23 @@ impl<M: Clone + 'static> Builder<M> {
                 bx.set_margin_bottom(s.padding.bottom as i32);
                 bx.set_margin_start(s.padding.left as i32);
                 bx.set_margin_end(s.padding.right as i32);
+                let mut declarations = String::new();
+                if let Some(bg) = s.bg {
+                    declarations.push_str(&format!("background-color: #{:06x};", bg & 0xffffff));
+                }
+                if let Some((color, width)) = s.border {
+                    declarations.push_str(&format!("border: {}px solid #{:06x};", width, color & 0xffffff));
+                }
+                if s.radius > 0 {
+                    declarations.push_str(&format!("border-radius: {}px;", s.radius));
+                }
+                if declarations.is_empty() {
+                    if let Some(class) = node.custom_class.take() {
+                        node.widget.remove_css_class(&class);
+                    }
+                } else {
+                    apply_dynamic_style(&node.widget, &mut node.custom_class, &declarations);
+                }
                 if s.card {
                     bx.add_css_class("card");
                 } else {
@@ -1129,6 +1277,11 @@ impl<A: App> Runtime<A> {
                     });
                     popover.popup();
                 }
+                Command::ResetScroll => {
+                    if let Some(root) = self.root.borrow().as_ref() {
+                        reset_scrolls(root);
+                    }
+                }
                 Command::SetWallpaper { path, reply } => {
                     let uri = format!("file://{}", path);
                     let ok = ["picture-uri", "picture-uri-dark"].iter().all(|key| {
@@ -1150,7 +1303,10 @@ pub fn run<A: App>(settings: Settings, app: A) -> i32 {
         let Some(mut app) = holder.borrow_mut().take() else {
             return;
         };
-        let dark = gtk::Settings::default().map(|s| s.is_gtk_application_prefer_dark_theme() || s.gtk_theme_name().map(|n| n.to_lowercase().contains("dark")).unwrap_or(false)).unwrap_or(false);
+        let dark = system_prefers_dark();
+        if let Some(gtk_settings) = gtk::Settings::default() {
+            gtk_settings.set_gtk_application_prefer_dark_theme(dark);
+        }
         app.appearance(dark);
         let (w, h) = settings.size;
         let window = gtk::ApplicationWindow::builder().application(application).default_width(w as i32).default_height(h as i32).resizable(settings.resizable).build();

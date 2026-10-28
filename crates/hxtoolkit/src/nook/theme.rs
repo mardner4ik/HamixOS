@@ -77,11 +77,47 @@ pub const LIGHT: Palette = Palette {
 };
 
 pub fn configured_dark() -> bool {
-    let Some(home) = posix::env("HOME") else {
-        return false;
-    };
-    posix::read_text(&alloc::format!("{}/.config/nook.conf", home))
-        .map(|t| t.lines().filter_map(|l| l.split_once('=')).any(|(k, v)| k.trim() == "theme" && v.trim() == "dark"))
+    if let Some(home) = posix::env("HOME") {
+        if let Some(theme) = posix::read_text(&alloc::format!("{}/.config/nook.conf", home)).and_then(|text| {
+            text.lines()
+                .filter_map(|line| line.split_once('='))
+                .find(|(key, _)| key.trim() == "theme")
+                .map(|(_, value)| value.trim().to_ascii_lowercase())
+        }) {
+            return theme == "dark";
+        }
+
+        for path in [
+            alloc::format!("{}/.config/gtk-4.0/settings.ini", home),
+            alloc::format!("{}/.config/gtk-3.0/settings.ini", home),
+        ] {
+            if let Some(settings) = posix::read_text(&path) {
+                if settings.lines().any(|line| {
+                    let Some((key, value)) = line.split_once('=') else {
+                        return false;
+                    };
+                    let value = value.trim().trim_matches('"').to_ascii_lowercase();
+                    (key.trim() == "gtk-application-prefer-dark-theme" && matches!(value.as_str(), "1" | "true"))
+                        || (key.trim() == "gtk-theme-name" && value.contains("dark"))
+                }) {
+                    return true;
+                }
+            }
+        }
+
+        if let Some(settings) = posix::read_text(&alloc::format!("{}/.config/kdeglobals", home)) {
+            if settings.lines().any(|line| {
+                line.split_once('=')
+                    .map(|(key, value)| key.trim() == "ColorScheme" && value.to_ascii_lowercase().contains("dark"))
+                    .unwrap_or(false)
+            }) {
+                return true;
+            }
+        }
+    }
+
+    posix::env("GTK_THEME")
+        .map(|theme| theme.to_ascii_lowercase().contains("dark"))
         .unwrap_or(false)
 }
 

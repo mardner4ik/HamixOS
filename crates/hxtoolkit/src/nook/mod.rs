@@ -5,7 +5,7 @@ mod transport;
 mod wayland;
 
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use hxproto::client::{posix, Surface};
@@ -90,6 +90,7 @@ fn area(r: Rect) -> Area {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Hit {
     Button,
+    Text,
     Input,
     Editor,
     Check,
@@ -178,6 +179,8 @@ struct Interaction {
     scrolls: BTreeMap<Path, i32>,
     drag: Option<Path>,
     select_drag: Option<Path>,
+    text_drag: Option<(Path, usize)>,
+    text_selection: Option<(Path, usize, usize)>,
     canvas_sizes: BTreeMap<Path, (u32, u32)>,
     last_click: (u64, Option<(Path, usize)>),
     button: Option<MouseButton>,
@@ -261,6 +264,7 @@ fn hit<M>(e: &Element<M>, n: &Node, path: &mut Path, x: i32, y: i32, dy: i32, ui
             l.on_context.as_ref().map(|_| (path.clone(), Hit::ListBlank))
         }
         Element::Button(b) if b.on_press.is_some() => Some((path.clone(), Hit::Button)),
+        Element::Text(t) if t.selectable => Some((path.clone(), Hit::Text)),
         Element::Input(_) => Some((path.clone(), Hit::Input)),
         Element::Editor(_) => Some((path.clone(), Hit::Editor)),
         Element::Checkbox(c) if c.on_toggle.is_some() => Some((path.clone(), Hit::Check)),
@@ -399,6 +403,8 @@ impl Painting<'_, '_> {
                 let lh = font.height() + 2;
                 let lines: Vec<&str> = if t.wrap { layout::wrap_lines(&t.content, r.w, |s| font.measure(s)) } else { t.content.split('\n').collect() };
                 let mut y = r.y + 1;
+                let mut source_offset = 0;
+                let selection = self.ui.text_selection.as_ref().filter(|(selected_path, _, _)| selected_path == path).map(|(_, start, end)| (*start, *end));
                 for line in lines {
                     let shown = if t.wrap { String::from(line) } else { ellipsize(font, line, r.w) };
                     let w = font.measure(&shown);
@@ -410,7 +416,26 @@ impl Painting<'_, '_> {
                     if let Some(bg) = t.bg {
                         self.p.fill(Area::new(x - 2, y - 1, w + 4, lh), bg);
                     }
-                    self.p.text(font, x, y, &shown, color);
+                    let line_start = source_offset + t.content[source_offset..].find(line).unwrap_or(0);
+                    let line_char_start = t.content[..line_start].chars().count();
+                    let line_char_count = shown.chars().count();
+                    let selected_start = selection.map(|(start, _)| start.saturating_sub(line_char_start).min(line_char_count)).unwrap_or(line_char_count);
+                    let selected_end = selection.map(|(_, end)| end.saturating_sub(line_char_start).min(line_char_count)).unwrap_or(0);
+                    if selected_end > selected_start {
+                        let chars: Vec<char> = shown.chars().collect();
+                        let prefix: String = chars.iter().take(selected_start).collect();
+                        let selected: String = chars.iter().take(selected_end).skip(selected_start).collect();
+                        let suffix: String = chars.iter().skip(selected_end).collect();
+                        let prefix_width = font.measure(&prefix);
+                        let selected_width = font.measure(&selected);
+                        self.p.text(font, x, y, &prefix, color);
+                        self.p.fill(Area::new(x + prefix_width, y - 1, selected_width.max(1), lh), self.th.p.selection);
+                        self.p.text(font, x + prefix_width, y, &selected, self.th.p.on_selection);
+                        self.p.text(font, x + prefix_width + selected_width, y, &suffix, color);
+                    } else {
+                        self.p.text(font, x, y, &shown, color);
+                    }
+                    source_offset = line_start + line.len();
                     y += lh;
                 }
             }
@@ -634,6 +659,58 @@ impl<A: App> Runtime<A> {
         Measure { th: &self.th, sizes: &self.sizes }
     }
 
+    fn text_index_at(&self, path: &Path, x: i32, y: i32) -> Option<usize> {
+        let (Element::Text(text), node, dy) = locate(&self.view, &self.tree, path, &self.ui)? else {
+            return None;
+        };
+        let rect = node.rect.offset(0, -dy);
+        let font = text.font_family.as_deref().and_then(|name| self.th.fonts.get_by_name(name)).unwrap_or_else(|| self.th.fonts.get(text.size));
+        let line_height = font.height() + 2;
+        let lines = if text.wrap {
+            layout::wrap_lines(&text.content, rect.w, |line| font.measure(line))
+        } else {
+            text.content.split('\n').collect()
+        };
+        if lines.is_empty() {
+            return Some(0);
+        }
+        let line_index = ((y - rect.y - 1).max(0) / line_height.max(1)) as usize;
+        let line_index = line_index.min(lines.len() - 1);
+        let mut source_offset = 0;
+        for (index, line) in lines.iter().enumerate().take(line_index + 1) {
+            let remaining = &text.content[source_offset..];
+            let line_start = source_offset + remaining.find(line).unwrap_or(0);
+            if index == line_index {
+                let line_chars: Vec<char> = line.chars().collect();
+                let line_x = match text.align {
+                    Align::Center => rect.x + (rect.w - font.measure(line)) / 2,
+                    Align::End => rect.right() - font.measure(line),
+                    _ => rect.x,
+                };
+                let local_x = x - line_x;
+                let mut prefix = String::new();
+                for (char_index, ch) in line_chars.iter().enumerate() {
+                    let midpoint = font.measure(&prefix) + font.measure(&ch.to_string()) / 2;
+                    if local_x < midpoint {
+                        return Some(text.content[..line_start].chars().count() + char_index);
+                    }
+                    prefix.push(*ch);
+                }
+                return Some(text.content[..line_start].chars().count() + line_chars.len());
+            }
+            source_offset = line_start + line.len();
+        }
+        None
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let (path, start, end) = self.ui.text_selection.as_ref()?;
+        let (Element::Text(text), _, _) = locate(&self.view, &self.tree, path, &self.ui)? else {
+            return None;
+        };
+        Some(text.content.chars().skip(*start).take(end.saturating_sub(*start)).collect())
+    }
+
     fn content_rect(&self) -> Rect {
         Rect::new(0, self.header, self.win.width() as i32, self.win.height() as i32 - self.header)
     }
@@ -685,6 +762,10 @@ impl<A: App> Runtime<A> {
                 Command::ShowMenu(items) => {
                     let (x, y) = self.pointer;
                     self.open_popup(PopupKind::Context(items), x + 2, y + 2, 0);
+                }
+                Command::ResetScroll => {
+                    self.ui.scrolls.clear();
+                    self.repaint = true;
                 }
             }
         }
@@ -1271,6 +1352,12 @@ impl<A: App> Runtime<A> {
                     self.slider_value(&path, x);
                     return;
                 }
+                if let Some((path, anchor)) = self.ui.text_drag.clone() {
+                    let end = self.text_index_at(&path, x, y).unwrap_or(anchor);
+                    self.ui.text_selection = Some((path, anchor.min(end), anchor.max(end)));
+                    self.repaint = true;
+                    return;
+                }
                 if let Some(path) = self.ui.select_drag.clone() {
                     self.with_editor(&path, |state, text, look, rect| {
                         state.drag(text, look, area(rect), x, y);
@@ -1280,7 +1367,7 @@ impl<A: App> Runtime<A> {
                 }
                 let target = if kind == MOUSE_LEAVE { None } else { hit(&self.view, &self.tree, &mut Vec::new(), x, y, 0, &self.ui) };
                 let cursor = match target.as_ref().map(|t| t.1) {
-                    Some(Hit::Input) | Some(Hit::Editor) => CURSOR_TEXT,
+                    Some(Hit::Input) | Some(Hit::Editor) | Some(Hit::Text) => CURSOR_TEXT,
                     _ => CURSOR_ARROW,
                 };
                 self.win.set_cursor(cursor);
@@ -1337,6 +1424,14 @@ impl<A: App> Runtime<A> {
                         }
                         self.ui.focus = Some(path);
                     }
+                    Hit::Text if button == MouseButton::Left => {
+                        if let Some(index) = self.text_index_at(&path, x, y) {
+                            self.ui.text_drag = Some((path.clone(), index));
+                            self.ui.text_selection = Some((path.clone(), index, index));
+                            self.ui.focus = Some(path);
+                        }
+                    }
+                    Hit::Text => {}
                     Hit::Editor => {
                         self.with_editor(&path, |state, text, look, rect| {
                             state.press(text, look, area(rect), x, y, false);
@@ -1378,6 +1473,12 @@ impl<A: App> Runtime<A> {
             MOUSE_RELEASE => {
                 self.ui.drag = None;
                 self.ui.select_drag = None;
+                if self.ui.text_drag.take().is_some() {
+                    if let Some(selected) = self.selected_text().filter(|text| !text.is_empty()) {
+                        self.win.set_selection(&selected);
+                    }
+                    self.repaint = true;
+                }
                 if let Some(path) = self.ui.pressed.take() {
                     let target = hit(&self.view, &self.tree, &mut Vec::new(), x, y, 0, &self.ui);
                     if target.as_ref().map(|t| &t.0) == Some(&path) {
@@ -1457,6 +1558,24 @@ impl<A: App> Runtime<A> {
         let Some(press) = press else {
             return;
         };
+        if press.ctrl('c') {
+            if self.ui.text_selection.as_ref().map(|(path, _, _)| Some(path) == self.ui.focus.as_ref()).unwrap_or(false) {
+                if let Some(selected) = self.selected_text().filter(|text| !text.is_empty()) {
+                    self.win.set_selection(&selected);
+                }
+                return;
+            }
+        }
+        if press.ctrl('a') {
+            if let Some(path) = self.ui.focus.clone() {
+                if let Some((Element::Text(text), _, _)) = locate(&self.view, &self.tree, &path, &self.ui) {
+                    let count = text.content.chars().count();
+                    self.ui.text_selection = Some((path, 0, count));
+                    self.repaint = true;
+                    return;
+                }
+            }
+        }
         if press.mods.ctrl || press.mods.alt || matches!(press.key, Key::F(_)) {
             if let Some(m) = shortcut_message(&self.menu, &press) {
                 self.queue.push_back(m);

@@ -14,7 +14,7 @@ path = "src/lib.rs"
 default = []
 std = []
 nook = ["dep:hxproto", "dep:vellum", "dep:wlclient"]
-gtk = ["std", "dep:gtk4"]
+gtk = ["std", "dep:gtk4", "dep:vellum"]
 
 [dependencies]
 hxproto = { path = "../hxproto", version = "0.1", optional = true, features = ["client"] }

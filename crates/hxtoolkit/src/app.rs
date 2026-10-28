@@ -189,6 +189,7 @@ pub enum Command<M> {
     Resize { width: u32, height: u32 },
     SetWallpaper { path: String, reply: Reply<bool, M> },
     ShowMenu(Vec<MenuItem<M>>),
+    ResetScroll,
 }
 
 pub struct Context<M> {
@@ -228,6 +229,10 @@ impl<M> Context<M> {
 
     pub fn copy(&mut self, text: impl Into<String>) {
         self.commands.push(Command::Copy(text.into()));
+    }
+
+    pub fn reset_scroll(&mut self) {
+        self.commands.push(Command::ResetScroll);
     }
 
     pub fn paste(&mut self, reply: impl FnOnce(Option<String>) -> M + 'static) {
