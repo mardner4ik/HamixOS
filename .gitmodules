@@ -1,0 +1,3 @@
+[submodule "userland/apps/hxsurf"]
+	path = userland/apps/hxsurf
+	url = git@github.com:Hamix-Foundation/hxsurf.git
