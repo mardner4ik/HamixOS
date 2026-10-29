@@ -6,6 +6,7 @@ mod wayland;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 
 use hxproto::client::{posix, Surface};
@@ -107,6 +108,7 @@ enum PopupKind<M> {
     Menu(Option<usize>),
     Context(Vec<MenuItem<M>>),
     Edit(Path, bool),
+    TextEdit(Path),
 }
 
 struct Popup<M> {
@@ -936,6 +938,13 @@ impl<A: App> Runtime<A> {
                     })
                     .collect()
             }
+            PopupKind::TextEdit(path) => {
+                let selected = self.ui.text_selection.as_ref().map(|(p, start, end)| p == path && end > start).unwrap_or(false);
+                vec![
+                    Entry { label: String::from("Copy"), detail: String::from("Ctrl+C"), enabled: selected, checked: None, separator: false },
+                    Entry { label: String::from("Select all"), detail: String::from("Ctrl+A"), enabled: true, checked: None, separator: false },
+                ]
+            }
         }
     }
 
@@ -1186,6 +1195,16 @@ impl<A: App> Runtime<A> {
                 }
             }
             PopupKind::Edit(path, editor) => self.edit_entry(&path, editor, index),
+            PopupKind::TextEdit(path) => match index {
+                0 => if let Some(selected) = self.selected_text() { self.win.set_selection(&selected); },
+                1 => if let Some((Element::Text(text), _, _)) = locate(&self.view, &self.tree, &path, &self.ui) {
+                    let count = text.content.chars().count();
+                    self.ui.text_selection = Some((path.clone(), 0, count));
+                    self.win.set_selection(&text.content);
+                    self.repaint = true;
+                },
+                _ => {}
+            },
         }
     }
 
@@ -1389,6 +1408,14 @@ impl<A: App> Runtime<A> {
                     self.ui.focus = None;
                     return;
                 };
+                if button == MouseButton::Right && what == Hit::Text {
+                    let selected = self.ui.text_selection.as_ref().map(|(p, start, end)| p == &path && end > start).unwrap_or(false);
+                    if selected {
+                        self.open_popup(PopupKind::TextEdit(path.clone()), x + 2, y + 2, 0);
+                        self.ui.focus = Some(path);
+                        return;
+                    }
+                }
                 if button == MouseButton::Right && matches!(what, Hit::Input | Hit::Editor | Hit::Row(_) | Hit::ListBlank) {
                     match what {
                         Hit::Row(i) => {
