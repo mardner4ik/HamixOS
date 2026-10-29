@@ -1,3 +1,4 @@
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -7,22 +8,20 @@ const PAGE_SIZE: usize = 4096;
 const MAX_PAGES: usize = 1024;
 
 struct Entry {
-    node: usize,
-    offset: u64,
     frame: usize,
     age: u64,
     generation: u64,
 }
 
 struct Cache {
-    entries: Vec<Entry>,
+    entries: BTreeMap<(usize, u64), Entry>,
     generations: Vec<u64>,
     age: u64,
 }
 
 impl Cache {
     const fn new() -> Self {
-        Self { entries: Vec::new(), generations: Vec::new(), age: 0 }
+        Self { entries: BTreeMap::new(), generations: Vec::new(), age: 0 }
     }
 
     fn generation(&mut self, node: usize) -> u64 {
@@ -46,7 +45,10 @@ impl Cache {
 
     fn find(&mut self, node: usize, offset: u64, generation: u64) -> Option<usize> {
         let age = self.tick();
-        let entry = self.entries.iter_mut().find(|entry| entry.node == node && entry.offset == offset && entry.generation == generation)?;
+        let entry = self.entries.get_mut(&(node, offset))?;
+        if entry.generation != generation {
+            return None;
+        }
         entry.age = age;
         Some(entry.frame)
     }
@@ -96,15 +98,17 @@ where
     }
 
     if cache.entries.len() >= MAX_PAGES {
-        if let Some((index, _)) = cache.entries.iter().enumerate().filter(|(_, entry)| !frame::is_shared(entry.frame)).min_by_key(|(_, entry)| entry.age) {
-            let stale = cache.entries.swap_remove(index);
-            frame::free_frame(stale.frame);
+        let victim = cache.entries.iter().filter(|(_, entry)| !frame::is_shared(entry.frame)).min_by_key(|(_, entry)| entry.age).map(|(key, _)| *key);
+        if let Some(key) = victim {
+            if let Some(stale) = cache.entries.remove(&key) {
+                frame::free_frame(stale.frame);
+            }
         } else {
             return Some(phys);
         }
     }
     let age = cache.tick();
-    cache.entries.push(Entry { node, offset, frame: phys, age, generation });
+    cache.entries.insert((node, offset), Entry { frame: phys, age, generation });
     if frame::share(phys) {
         Some(phys)
     } else {
@@ -117,13 +121,10 @@ where
 pub fn invalidate(node: usize) {
     let mut cache = CACHE.lock();
     cache.invalidate(node);
-    let mut index = 0;
-    while index < cache.entries.len() {
-        if cache.entries[index].node == node {
-            let stale = cache.entries.swap_remove(index);
+    let keys: Vec<(usize, u64)> = cache.entries.range((node, 0)..=(node, u64::MAX)).map(|(key, _)| *key).collect();
+    for key in keys {
+        if let Some(stale) = cache.entries.remove(&key) {
             frame::free_frame(stale.frame);
-        } else {
-            index += 1;
         }
     }
 }

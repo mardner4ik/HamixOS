@@ -1,4 +1,4 @@
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -38,6 +38,7 @@ pub const WAIT_TIMER: u32 = 8;
 pub const WAIT_PIPE: u32 = 16;
 pub const WAIT_SIGNAL: u32 = 32;
 pub const WAIT_FUTEX: u32 = 64;
+const WAIT_KINDS: usize = 7;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Abi {
@@ -334,13 +335,36 @@ struct Sched {
     tasks: BTreeMap<Pid, alloc::boxed::Box<Task>>,
     ready: [VecDeque<Pid>; LEVELS],
     mask: u32,
-    scanned_gen: u64,
+    scanned_input: u64,
     boosted_at: u64,
+    timers: BTreeSet<(u64, Pid)>,
+    waiting: [BTreeSet<Pid>; WAIT_KINDS],
+    futex_waiters: BTreeMap<(Pid, u64), BTreeSet<Pid>>,
+    members: BTreeMap<Pid, BTreeSet<Pid>>,
 }
 
 impl Sched {
     const fn new() -> Sched {
-        Sched { tasks: BTreeMap::new(), ready: [const { VecDeque::new() }; LEVELS], mask: 0, scanned_gen: 0, boosted_at: 0 }
+        Sched { tasks: BTreeMap::new(), ready: [const { VecDeque::new() }; LEVELS], mask: 0, scanned_input: 0, boosted_at: 0, timers: BTreeSet::new(), waiting: [const { BTreeSet::new() }; WAIT_KINDS], futex_waiters: BTreeMap::new(), members: BTreeMap::new() }
+    }
+
+    fn insert_task(&mut self, task: Task) {
+        let pid = task.pid;
+        let leader = task.leader;
+        self.tasks.insert(pid, alloc::boxed::Box::new(task));
+        self.members.entry(leader).or_default().insert(pid);
+        self.enqueue(pid);
+    }
+
+    fn remove_task(&mut self, pid: Pid) -> Option<alloc::boxed::Box<Task>> {
+        let task = self.tasks.remove(&pid)?;
+        if let Some(members) = self.members.get_mut(&task.leader) {
+            members.remove(&pid);
+            if members.is_empty() {
+                self.members.remove(&task.leader);
+            }
+        }
+        Some(task)
     }
 
     fn enqueue(&mut self, pid: Pid) {
@@ -360,14 +384,63 @@ impl Sched {
         SCHED_GEN.fetch_add(1, Ordering::SeqCst);
     }
 
+    fn index_blocked(&mut self, pid: Pid, wait: u32, wake_at: u64) {
+        for bit in 0..WAIT_KINDS {
+            if wait & (1 << bit) != 0 {
+                self.waiting[bit].insert(pid);
+            }
+        }
+        if wait & WAIT_TIMER != 0 {
+            self.timers.insert((wake_at, pid));
+        }
+    }
+
+    fn unindex_blocked(&mut self, pid: Pid, wait: u32, wake_at: u64, futex: (Pid, u64)) {
+        for bit in 0..WAIT_KINDS {
+            if wait & (1 << bit) != 0 {
+                self.waiting[bit].remove(&pid);
+            }
+        }
+        if wait & WAIT_TIMER != 0 {
+            self.timers.remove(&(wake_at, pid));
+        }
+        if futex.1 != 0 {
+            if let Some(waiters) = self.futex_waiters.get_mut(&futex) {
+                waiters.remove(&pid);
+                if waiters.is_empty() {
+                    self.futex_waiters.remove(&futex);
+                }
+            }
+        }
+    }
+
+    fn waiters(&self, flag: u32) -> Vec<Pid> {
+        let mut pids: Vec<Pid> = Vec::new();
+        for bit in 0..WAIT_KINDS {
+            if flag & (1 << bit) != 0 {
+                pids.extend(self.waiting[bit].iter().copied());
+            }
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
     fn make_runnable(&mut self, pid: Pid) {
+        let mut indexed = None;
         if let Some(task) = self.tasks.get_mut(&pid) {
             if task.state == State::Zombie {
                 return;
             }
+            if task.state == State::Blocked {
+                indexed = Some((task.wait, task.wake_at, (task.leader, task.futex)));
+            }
             task.state = State::Runnable;
             task.wait = 0;
             task.wake_pending = false;
+        }
+        if let Some((wait, wake_at, futex)) = indexed {
+            self.unindex_blocked(pid, wait, wake_at, futex);
         }
         self.enqueue(pid);
     }
@@ -376,25 +449,31 @@ impl Sched {
         let now = ticks();
         let seq = input_seq();
         let mut woken: Vec<Pid> = Vec::new();
-        let mut next_timer = u64::MAX;
-        for (&pid, task) in self.tasks.iter() {
-            if task.state != State::Blocked {
-                continue;
+        while let Some(&(at, pid)) = self.timers.first() {
+            if at > now {
+                break;
             }
-            let ready = task.wake_pending
-                || task.killed.is_some()
-                || (task.wait & WAIT_TIMER != 0 && now >= task.wake_at)
-                || (task.wait & WAIT_INPUT != 0 && seq != task.input_seq);
-            if ready {
-                woken.push(pid);
-            } else if task.wait & WAIT_TIMER != 0 {
-                next_timer = next_timer.min(task.wake_at);
+            self.timers.pop_first();
+            if let Some(task) = self.tasks.get(&pid) {
+                if task.state == State::Blocked && task.wait & WAIT_TIMER != 0 && task.wake_at == at {
+                    woken.push(pid);
+                }
+            }
+        }
+        if seq != self.scanned_input {
+            self.scanned_input = seq;
+            for &pid in self.waiting[0].iter() {
+                if let Some(task) = self.tasks.get(&pid) {
+                    if task.state == State::Blocked && task.wait & WAIT_INPUT != 0 && task.input_seq != seq {
+                        woken.push(pid);
+                    }
+                }
             }
         }
         for pid in woken {
             self.make_runnable(pid);
         }
-        NEXT_TIMER.store(next_timer, Ordering::Relaxed);
+        NEXT_TIMER.store(self.timers.first().map(|t| t.0).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
     fn boost(&mut self) {
@@ -418,9 +497,8 @@ impl Sched {
     }
 
     fn pick(&mut self, cpu: usize) -> Pid {
-        if self.scanned_gen != SCHED_GEN.load(Ordering::Relaxed) || ticks() >= NEXT_TIMER.load(Ordering::Relaxed) {
+        if ticks() >= NEXT_TIMER.load(Ordering::Relaxed) || input_seq() != self.scanned_input {
             self.rescan_blocked();
-            self.scanned_gen = SCHED_GEN.load(Ordering::Relaxed);
         }
         self.boost();
         let mut deferred: Vec<Pid> = Vec::new();
@@ -488,7 +566,7 @@ pub fn init() {
     idle.fds = Vec::new();
     idle.mmap_next = 0;
     idle.shm_next = 0;
-    without_interrupts(|| SCHED.lock().tasks.insert(0, alloc::boxed::Box::new(idle)));
+    without_interrupts(|| SCHED.lock().insert_task(idle));
 }
 
 pub fn ticks() -> u64 {
@@ -633,7 +711,12 @@ pub fn with_current_thread<R>(f: impl FnOnce(&mut Task) -> R) -> R {
 }
 
 pub fn group_of(pid: Pid) -> Vec<Pid> {
-    with_tasks(|tasks| tasks.values().filter(|t| t.leader == pid && t.state != State::Zombie).map(|t| t.pid).collect())
+    without_interrupts(|| {
+        let sched = SCHED.lock();
+        sched.members.get(&pid).into_iter().flat_map(|members| members.iter()).filter_map(|tid| {
+            sched.tasks.get(tid).filter(|task| task.state != State::Zombie).map(|task| task.pid)
+        }).collect()
+    })
 }
 
 pub fn with_task<R>(pid: Pid, f: impl FnOnce(&mut Task) -> R) -> Option<R> {
@@ -742,8 +825,7 @@ fn admit(task: Task) -> Pid {
     let pid = task.pid;
     without_interrupts(|| {
         let mut sched = SCHED.lock();
-        sched.tasks.insert(pid, alloc::boxed::Box::new(task));
-        sched.enqueue(pid);
+        sched.insert_task(task);
     });
     notify_runnable();
     pid
@@ -945,7 +1027,7 @@ pub fn finish_switch() {
             _ => (false, false),
         };
         if finished {
-            let dead = sched.tasks.remove(&previous);
+            let dead = sched.remove_task(previous);
             drop(sched);
             drop(dead);
         } else if still_ready {
@@ -1077,15 +1159,29 @@ pub fn block(flags: u32, timeout_ticks: Option<u64>, seq: u64) {
     without_interrupts(|| {
         let mut sched = SCHED.lock();
         let pid = current_tid();
+        let mut indexed = None;
         if let Some(task) = sched.tasks.get_mut(&pid) {
-            task.state = State::Blocked;
-            task.wait = flags;
-            task.input_seq = seq;
-            task.wake_pending = task.sig_pending & !task.sig_mask != 0;
-            if let Some(t) = timeout_ticks {
-                task.wait |= WAIT_TIMER;
-                task.wake_at = ticks() + t;
-                NEXT_TIMER.fetch_min(task.wake_at, Ordering::Relaxed);
+            let pending = task.sig_pending & !task.sig_mask != 0;
+            let stale_input = flags & WAIT_INPUT != 0 && seq != input_seq();
+            let stale_futex = flags & WAIT_FUTEX != 0 && task.futex == 0;
+            if pending || stale_input || stale_futex || task.killed.is_some() {
+                task.wake_pending = false;
+            } else {
+                task.state = State::Blocked;
+                task.wait = flags;
+                task.input_seq = seq;
+                task.wake_pending = false;
+                if let Some(t) = timeout_ticks {
+                    task.wait |= WAIT_TIMER;
+                    task.wake_at = ticks() + t;
+                }
+                indexed = Some((task.wait, task.wake_at));
+            }
+        }
+        if let Some((wait, wake_at)) = indexed {
+            sched.index_blocked(pid, wait, wake_at);
+            if wait & WAIT_TIMER != 0 {
+                NEXT_TIMER.fetch_min(wake_at, Ordering::Relaxed);
             }
         }
     });
@@ -1100,18 +1196,28 @@ pub fn wake(pid: Pid, flag: u32) {
     let woke = without_interrupts(|| {
         let mut sched = SCHED.lock();
         let targets: Vec<Pid> = sched
-            .tasks
-            .values_mut()
-            .filter(|t| (t.pid == pid || t.leader == pid) && t.state == State::Blocked && t.wait & flag != 0)
-            .map(|t| {
-                t.wake_pending = true;
-                t.pid
-            })
+            .waiters(flag)
+            .into_iter()
+            .filter(|tid| sched.tasks.get(tid).map(|t| (t.pid == pid || t.leader == pid) && t.state == State::Blocked && t.wait & flag != 0).unwrap_or(false))
             .collect();
         for tid in targets.iter() {
             sched.make_runnable(*tid);
         }
         !targets.is_empty()
+    });
+    if woke {
+        notify_runnable();
+    }
+}
+
+pub fn wake_task(tid: Pid, flag: u32) {
+    let woke = without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        let ready = sched.tasks.get(&tid).map(|t| t.state == State::Blocked && t.wait & flag != 0).unwrap_or(false);
+        if ready {
+            sched.make_runnable(tid);
+        }
+        ready
     });
     if woke {
         notify_runnable();
@@ -1144,21 +1250,25 @@ pub fn interrupt(tid: Pid) {
 pub fn wake_futex(leader: Pid, addr: u64, count: usize) -> usize {
     let woken = without_interrupts(|| {
         let mut sched = SCHED.lock();
-        let targets: Vec<Pid> = sched
-            .tasks
-            .values_mut()
-            .filter(|t| t.leader == leader && t.futex == addr && t.state != State::Zombie)
-            .take(count)
-            .map(|t| {
-                t.futex = 0;
-                t.wake_pending = true;
-                t.pid
-            })
-            .collect();
+        let key = (leader, addr);
+        let targets: Vec<Pid> = sched.futex_waiters.get(&key).map(|waiters| waiters.iter().take(count).copied().collect()).unwrap_or_default();
         for tid in targets.iter() {
-            if sched.tasks.get(tid).map(|t| t.state == State::Blocked).unwrap_or(false) {
+            if let Some(waiters) = sched.futex_waiters.get_mut(&key) {
+                waiters.remove(tid);
+            }
+            let blocked = if let Some(task) = sched.tasks.get_mut(tid) {
+                task.futex = 0;
+                task.wake_pending = true;
+                task.state == State::Blocked
+            } else {
+                false
+            };
+            if blocked {
                 sched.make_runnable(*tid);
             }
+        }
+        if sched.futex_waiters.get(&key).map(BTreeSet::is_empty).unwrap_or(false) {
+            sched.futex_waiters.remove(&key);
         }
         targets.len()
     });
@@ -1168,11 +1278,63 @@ pub fn wake_futex(leader: Pid, addr: u64, count: usize) -> usize {
     woken
 }
 
+pub fn set_current_futex(addr: u64) {
+    without_interrupts(|| {
+        let tid = current_tid();
+        let mut sched = SCHED.lock();
+        let Some(task) = sched.tasks.get_mut(&tid) else {
+            return;
+        };
+        let key = (task.leader, task.futex);
+        let leader = task.leader;
+        task.futex = addr;
+        if key.1 != 0 {
+            if let Some(waiters) = sched.futex_waiters.get_mut(&key) {
+                waiters.remove(&tid);
+                if waiters.is_empty() {
+                    sched.futex_waiters.remove(&key);
+                }
+            }
+        }
+        if addr != 0 {
+            sched.futex_waiters.entry((leader, addr)).or_default().insert(tid);
+        }
+    });
+}
+
+pub fn requeue_futex(leader: Pid, from: u64, to: u64, count: usize) -> usize {
+    if from == to || count == 0 {
+        return 0;
+    }
+    without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        let source = (leader, from);
+        let targets: Vec<Pid> = sched.futex_waiters.get(&source).map(|waiters| waiters.iter().take(count).copied().collect()).unwrap_or_default();
+        let mut moved = 0;
+        for tid in targets.iter() {
+            if let Some(waiters) = sched.futex_waiters.get_mut(&source) {
+                waiters.remove(tid);
+            }
+            if let Some(task) = sched.tasks.get_mut(tid) {
+                if task.leader == leader && task.futex == from && task.state != State::Zombie {
+                    task.futex = to;
+                    sched.futex_waiters.entry((leader, to)).or_default().insert(*tid);
+                    moved += 1;
+                }
+            }
+        }
+        if sched.futex_waiters.get(&source).map(BTreeSet::is_empty).unwrap_or(false) {
+            sched.futex_waiters.remove(&source);
+        }
+        moved
+    })
+}
+
 pub fn wake_all(flag: u32) {
     INPUT_SEQ.fetch_add(1, Ordering::Relaxed);
     let woke = without_interrupts(|| {
         let mut sched = SCHED.lock();
-        let pids: Vec<Pid> = sched.tasks.iter().filter(|(_, t)| t.state == State::Blocked && t.wait & flag != 0).map(|(pid, _)| *pid).collect();
+        let pids: Vec<Pid> = sched.waiters(flag).into_iter().filter(|pid| sched.tasks.get(pid).map(|t| t.state == State::Blocked && t.wait & flag != 0).unwrap_or(false)).collect();
         let any = !pids.is_empty();
         for pid in pids {
             sched.make_runnable(pid);
@@ -1191,7 +1353,7 @@ pub fn kill(pid: Pid, code: i32) -> bool {
             Some(task) if !task.kernel_thread && task.state != State::Zombie => task.leader,
             _ => return false,
         };
-        let members: Vec<Pid> = sched.tasks.values().filter(|t| (t.leader == leader || t.pid == pid) && t.state != State::Zombie).map(|t| t.pid).collect();
+        let members: Vec<Pid> = sched.members.get(&leader).into_iter().flat_map(|members| members.iter()).filter(|tid| sched.tasks.get(tid).map(|task| task.state != State::Zombie).unwrap_or(false)).copied().collect();
         for member in members {
             if let Some(task) = sched.tasks.get_mut(&member) {
                 if task.killed.is_none() {
@@ -1248,17 +1410,19 @@ pub fn exit_thread() -> ! {
 
 pub fn stop_other_threads(pid: Pid) {
     loop {
-        let others: Vec<Pid> = with_tasks(|tasks| {
-            tasks
-                .values_mut()
-                .filter(|t| t.leader == pid && t.pid != pid && (t.state != State::Zombie || t.on_cpu.is_some()))
-                .map(|t| {
-                    if t.killed.is_none() {
-                        t.killed = Some(0);
-                    }
-                    t.pid
-                })
-                .collect()
+        let others: Vec<Pid> = without_interrupts(|| {
+            let mut sched = SCHED.lock();
+            let members: Vec<Pid> = sched.members.get(&pid).into_iter().flat_map(|members| members.iter()).copied().collect();
+            members.into_iter().filter_map(|tid| {
+                let task = sched.tasks.get_mut(&tid)?;
+                if task.pid == pid || task.state == State::Zombie && task.on_cpu.is_none() {
+                    return None;
+                }
+                if task.killed.is_none() {
+                    task.killed = Some(0);
+                }
+                Some(tid)
+            }).collect()
         });
         if others.is_empty() {
             return;
@@ -1334,13 +1498,14 @@ pub enum WaitResult {
 }
 
 pub fn try_reap(parent: Pid, child: Pid) -> WaitResult {
-    with_tasks(|tasks| {
-        let (state, running) = match tasks.get(&child) {
+    without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        let (state, running) = match sched.tasks.get(&child) {
             Some(task) if task.parent == parent => (task.state, task.on_cpu.is_some()),
             _ => return WaitResult::NoChild,
         };
         if state == State::Zombie && !running {
-            let task = tasks.remove(&child).unwrap();
+            let task = sched.remove_task(child).unwrap();
             WaitResult::Exited(task.exit_code)
         } else {
             WaitResult::Running
@@ -1355,10 +1520,11 @@ pub enum ReapResult {
 }
 
 pub fn reap_matching(parent: Pid, matches: impl Fn(&Task) -> bool, consume: bool) -> ReapResult {
-    with_tasks(|tasks| {
+    without_interrupts(|| {
+        let mut sched = SCHED.lock();
         let mut any = false;
         let mut found = None;
-        for (pid, task) in tasks.iter() {
+        for (pid, task) in sched.tasks.iter() {
             if task.parent != parent || task.leader != task.pid || task.kernel_thread || !matches(task) {
                 continue;
             }
@@ -1371,11 +1537,11 @@ pub fn reap_matching(parent: Pid, matches: impl Fn(&Task) -> bool, consume: bool
         match found {
             Some(pid) => {
                 let (code, signal) = {
-                    let t = tasks.get(&pid).unwrap();
+                    let t = sched.tasks.get(&pid).unwrap();
                     (t.exit_code, t.exit_signal)
                 };
                 if consume {
-                    tasks.remove(&pid);
+                    sched.remove_task(pid);
                 }
                 ReapResult::Exited(pid, code, signal)
             }
@@ -1406,14 +1572,15 @@ pub fn detach(pid: Pid) {
 
 fn reap_orphans() {
     let current = current_tid();
-    with_tasks(|tasks| {
-        let dead: Vec<Pid> = tasks
+    without_interrupts(|| {
+        let mut sched = SCHED.lock();
+        let dead: Vec<Pid> = sched.tasks
             .iter()
             .filter(|(pid, t)| t.state == State::Zombie && t.parent == 0 && **pid != current && t.on_cpu.is_none())
             .map(|(pid, _)| *pid)
             .collect();
         for pid in dead {
-            tasks.remove(&pid);
+            sched.remove_task(pid);
         }
     });
 }

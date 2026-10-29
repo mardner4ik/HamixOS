@@ -50,7 +50,6 @@ pub fn send(from: Pid, to: Pid, data: &[u8]) -> i64 {
             }
             task.mailbox.push_back(message);
             if task.state == State::Blocked && task.wait & WAIT_MSG != 0 {
-                task.wake_pending = true;
                 woke = true;
             }
             0
@@ -58,7 +57,7 @@ pub fn send(from: Pid, to: Pid, data: &[u8]) -> i64 {
         _ => ESRCH,
     });
     if woke {
-        super::notify_runnable();
+        super::wake_task(to, WAIT_MSG);
     }
     result
 }

@@ -628,20 +628,20 @@ fn read_u64(ptr: u64) -> Result<u64, i64> {
 }
 
 pub fn futex_block(addr: u64, deadline: Option<u64>) -> i64 {
-    task::with_current_thread(|t| t.futex = addr);
+    task::set_current_futex(addr);
     loop {
         let still = task::with_current_thread(|t| t.futex == addr);
         if !still {
             return 0;
         }
         if crate::syscall::signal::pending() {
-            task::with_current_thread(|t| t.futex = 0);
+            task::set_current_futex(0);
             return EINTR;
         }
         let now = task::ticks();
         if let Some(d) = deadline {
             if now >= d {
-                task::with_current_thread(|t| t.futex = 0);
+                task::set_current_futex(0);
                 return ETIMEDOUT;
             }
         }
@@ -667,6 +667,10 @@ pub fn futex_wake(addr: u64, count: u64) -> i64 {
     if addr & 3 != 0 {
         return EINVAL;
     }
+    futex_wake_raw(addr, count)
+}
+
+pub fn futex_wake_raw(addr: u64, count: u64) -> i64 {
     task::wake_futex(task::current_pid(), addr, (count as u32).min(i32::MAX as u32) as usize) as i64
 }
 
@@ -686,19 +690,7 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
                 }
             }
             let woken = task::wake_futex(leader, addr, val as usize);
-            let moved = task::with_tasks(|tasks| {
-                let mut moved = 0usize;
-                for t in tasks.values_mut() {
-                    if moved >= timeout as usize {
-                        break;
-                    }
-                    if t.leader == leader && t.futex == addr {
-                        t.futex = addr2;
-                        moved += 1;
-                    }
-                }
-                moved
-            });
+            let moved = task::requeue_futex(leader, addr, addr2, timeout as usize);
             (woken + moved) as i64
         }
         FUTEX_WAKE_OP => {
@@ -765,20 +757,20 @@ pub fn sys_futex(addr: u64, op: u64, val: u64, timeout: u64, addr2: u64, val3: u
                     Ok(false) => {}
                 }
                 if crate::syscall::signal::pending() {
-                    task::with_current_thread(|t| t.futex = 0);
+                    task::set_current_futex(0);
                     return EINTR;
                 }
                 let now = task::ticks();
                 if let Some(d) = deadline {
                     if now >= d {
-                        task::with_current_thread(|t| t.futex = 0);
+                        task::set_current_futex(0);
                         return ETIMEDOUT;
                     }
                 }
-                task::with_current_thread(|t| t.futex = addr);
+                task::set_current_futex(addr);
                 let slice = deadline.map(|d| d - now).unwrap_or(task::TICK_HZ).clamp(1, task::TICK_HZ);
                 task::block(task::WAIT_FUTEX, Some(slice), task::input_seq());
-                task::with_current_thread(|t| t.futex = 0);
+                task::set_current_futex(0);
                 task::check_killed();
             }
         }

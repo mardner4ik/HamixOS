@@ -295,6 +295,8 @@ fn lockless(number: u64, a1: u64, a2: u64, a3: u64) -> Option<i64> {
         table::SYS_TIME => crate::syscall::misc::sys_time(a1),
         table::SYS_CLOCK_GETRES => crate::syscall::misc::sys_clock_getres(a1, a2),
         table::SYS_GETCPU => crate::syscall::misc::sys_getcpu(a1, a2),
+        table::SYS_FUTEX if matches!(a2 & 0x7F, 1 | 10) => crate::syscall::base::futex_wake_raw(a1, a3),
+        ext::SYS_HAMIX_FUTEX_WAKE => crate::syscall::base::futex_wake(a1, a2),
         ext::SYS_HAMIX_REALTIME => crate::drivers::rtc::now() as i64,
         ext::SYS_FB_GENERATION => crate::drivers::video::modes::generation() as i64,
         ext::SYS_HAMIX_PROC_ALIVE => task::exists(a1 as Pid) as i64,
