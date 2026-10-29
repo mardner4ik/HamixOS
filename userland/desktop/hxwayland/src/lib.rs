@@ -948,15 +948,16 @@ impl<L: Link> Bridge<L> {
             (Kind::CursorShapeDevice, 1) => {
                 let serial = r.u32();
                 let shape = r.u32();
-                let valid = self.clients.get(&cid).map(|client| client.pointer_enter_serial == serial && serial != 0).unwrap_or(false);
-                if valid {
+                let cursor = cursor_shape(shape);
+                let pointer_valid = self.clients.get(&cid).and_then(|client| client.objects.get(&extra)).map(|entry| entry.0 == Kind::Pointer).unwrap_or(false);
+                if cursor.is_none() || !pointer_valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                } else if self.clients.get(&cid).map(|client| client.pointer_enter_serial == serial && serial != 0).unwrap_or(false) {
                     if let Some((focus_cid, sid)) = self.pointer_focus.filter(|(focus_cid, _)| *focus_cid == cid) {
-                        let pointer = self.clients.get(&cid).and_then(|c| c.objects.get(&extra)).filter(|entry| entry.0 == Kind::Pointer).map(|_| extra);
-                        if pointer.is_some() {
-                            let cursor = cursor_shape(shape);
-                            if let Some(window) = self.clients.get(&focus_cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.window.as_ref()).map(|w| w.id) {
-                                self.request(Request::SetCursor { window, cursor });
-                            }
+                        if let Some(window) = self.clients.get(&focus_cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.window.as_ref()).map(|w| w.id) {
+                            self.request(Request::SetCursor { window, cursor: cursor.unwrap() });
                         }
                     }
                 }
@@ -2728,18 +2729,18 @@ fn release_shm(shm: u32) {
     }
 }
 
-fn cursor_shape(shape: u32) -> u32 {
+fn cursor_shape(shape: u32) -> Option<u32> {
     match shape {
-        0 | 4 | 5 => 0,
-        1 | 2 | 3 | 9..=16 | 28 | 29 => 2,
-        6 | 7 => 7,
-        8 => 1,
-        17 | 18 | 25 => 5,
-        19 | 20 | 26 => 4,
-        21 | 22 => 6,
-        23 | 24 => 7,
-        27 => 3,
-        _ => 0,
+        1 | 5 | 6 => Some(0),
+        2..=4 | 11..=12 | 14..=17 | 33..=34 => Some(2),
+        7..=8 => Some(7),
+        9..=10 => Some(1),
+        13 | 32 => Some(3),
+        18 | 25..=26 | 30 => Some(5),
+        19 | 22 | 27 | 31 => Some(4),
+        20 | 24 | 28 => Some(7),
+        21 | 23 | 29 => Some(6),
+        _ => None,
     }
 }
 
