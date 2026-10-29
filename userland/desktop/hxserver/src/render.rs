@@ -23,7 +23,7 @@ impl Nook {
                 p.shadow(outer, 8, SHADOW_SIZE, 150, SHADOW_OFFSET);
             }
             let (width, height) = (self.core.screen.width, self.core.screen.height);
-            if let Body::Client { pixels, width: bw, height: bh, stride, opaque, .. } = &self.core.windows[index].body {
+            if let Body::Client { pixels, width: bw, height: bh, stride, opaque, .. } | Body::Wayland { pixels, width: bw, height: bh, stride, opaque, .. } = &self.core.windows[index].body {
                 let (w, h, stride, opaque) = (*bw, *bh, *stride, *opaque);
                 let Some(source) = client_pixels(*pixels, w, h, stride) else {
                     return;
@@ -138,7 +138,7 @@ impl Nook {
         let (width, height) = (self.core.screen.width, self.core.screen.height);
         let stretch_ok = self.stretch_allowed(index, hxstd::sys::uptime_ms());
         match &mut self.core.windows[index].body {
-            Body::Client { pixels, width: bw, height: bh, stride, .. } => {
+            Body::Client { pixels, width: bw, height: bh, stride, .. } | Body::Wayland { pixels, width: bw, height: bh, stride, .. } => {
                 let (w, h, stride) = (*bw, *bh, *stride);
                 let area = clip.intersect(&content);
                 match client_pixels(*pixels, w, h, stride) {

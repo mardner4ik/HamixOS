@@ -99,7 +99,7 @@ impl Nook {
         let Some(index) = self.core.index_of(id) else {
             return;
         };
-        if let Body::Client { pid, .. } = self.core.windows[index].body {
+        if let Body::Client { pid, .. } | Body::Wayland { pid, .. } = self.core.windows[index].body {
             let now = sys::uptime_ms();
             self.closing.retain(|(w, _)| self.core.index_of(*w).is_some());
             let asked = self.closing.iter().find(|(w, _)| *w == id).map(|(_, t)| *t);
@@ -324,7 +324,7 @@ impl Nook {
         }
         let area = self.core.windows[index].outer();
         match &mut self.core.windows[index].body {
-            Body::Client { pid, .. } => {
+            Body::Client { pid, .. } | Body::Wayland { pid, .. } => {
                 if content.contains(x, y) {
                     let pid = *pid;
                     self.grab = Grab::Client(id);
@@ -549,7 +549,12 @@ impl Nook {
                 let outer_h = (h + TITLE_H).min(work.h);
                 let owner = self.pickers.iter().find(|p| p.pid == sender).map(|p| p.client).unwrap_or(sender);
                 let parent = self.core.windows.iter().rev().find(|w| !w.is_popup() && !w.minimized && w.client_pid() == Some(owner)).map(|w| w.outer());
-                let id = self.new_window(title.as_str(), &icon, outer_w, outer_h, Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false });
+                let body = if shm == 0 {
+                    Body::Wayland { pid: sender, pixels, width: w, height: h, stride: w, opaque: false }
+                } else {
+                    Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false }
+                };
+                let id = self.new_window(title.as_str(), &icon, outer_w, outer_h, body);
                 if let Some(index) = self.core.index_of(id) {
                     self.core.windows[index].requested = (w, h);
                     if let Some(parent) = parent {
@@ -588,7 +593,12 @@ impl Nook {
                     }
                 };
                 let area = self.core.popup_area(parent, x, y, w, h);
-                let id = self.core.new_popup(parent, area, Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false });
+                let body = if shm == 0 {
+                    Body::Wayland { pid: sender, pixels, width: w, height: h, stride: w, opaque: false }
+                } else {
+                    Body::Client { pid: sender, shm, pixels, width: w, height: h, stride: w, opaque: false }
+                };
+                let id = self.core.new_popup(parent, area, body);
                 send_event(sender, Event::Created { window: id });
             }
             Request::MovePopup { window, x, y } => {
@@ -674,8 +684,9 @@ impl Nook {
                     return;
                 }
                 let (w, h) = (width as i32, height as i32);
-                let Body::Client { width: old_w, height: old_h, .. } = self.core.windows[index].body else {
-                    return;
+                let (old_w, old_h) = match self.core.windows[index].body {
+                    Body::Client { width, height, .. } | Body::Wayland { width, height, .. } => (width, height),
+                    _ => return,
                 };
                 let resizing = matches!(self.grab, Grab::Resize { id, .. } if id == window);
                 let settle = if (old_w, old_h) != (w, h) && !resizing && !self.animating(window) && !self.core.windows[index].minimized { self.capture(index) } else { None };

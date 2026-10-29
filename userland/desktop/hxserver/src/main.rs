@@ -706,7 +706,7 @@ impl Nook {
                     self.grab = Grab::None;
                 }
                 if let Some(index) = self.core.index_of(id) {
-                    if let Body::Client { pid, .. } = self.core.windows[index].body {
+                    if let Body::Client { pid, .. } | Body::Wayland { pid, .. } = self.core.windows[index].body {
                         let content = self.core.windows[index].content();
                         send_event(pid, Event::Mouse { window: id, x: x - content.x, y: y - content.y, buttons: self.core.buttons, kind: hxproto::MOUSE_RELEASE, wheel: button as i32 });
                     }
@@ -828,7 +828,7 @@ impl Nook {
         }
         if let Some(index) = self.core.window_at(x, y) {
             let window = &self.core.windows[index];
-            if let Body::Client { pid, .. } = window.body {
+            if let Body::Client { pid, .. } | Body::Wayland { pid, .. } = window.body {
                 let content = window.content();
                 send_event(pid, Event::Mouse { window: window.id, x: x - content.x, y: y - content.y, buttons: self.core.buttons, kind: hxproto::MOUSE_WHEEL, wheel });
             }
@@ -883,7 +883,7 @@ impl Nook {
                 let id = self.core.windows[index].id;
                 let area = self.core.windows[index].outer();
                 match &mut self.core.windows[index].body {
-                    Body::Client { pid, .. } => send_event(*pid, Event::Key { window: id, code, mods: self.key_mods }),
+                    Body::Client { pid, .. } | Body::Wayland { pid, .. } => send_event(*pid, Event::Key { window: id, code, mods: self.key_mods }),
                     Body::About => {
                         if code == 27 || code == 10 {
                             self.remove_window(id, false);

@@ -283,7 +283,7 @@ impl Compositor {
         let (x, y) = self.place(w, h);
         let id = self.next_id;
         self.next_id += 1;
-        let fixed = !matches!(body, Body::Client { .. });
+        let fixed = !matches!(body, Body::Client { .. } | Body::Wayland { .. });
         self.windows.push(Window {
             id,
             x,
@@ -350,13 +350,17 @@ impl Compositor {
     pub fn take_window(&mut self, id: u32, notify: bool) -> Option<Window> {
         let index = self.index_of(id)?;
         let window = self.windows.remove(index);
-        if let Body::Client { pid, shm, .. } = window.body {
-            if notify {
-                send_event(pid, Event::Close { window: id });
+        match window.body {
+            Body::Client { pid, shm, .. } => {
+                if notify {
+                    send_event(pid, Event::Close { window: id });
+                }
+                if shm != 0 {
+                    sys::shm_release(shm);
+                }
             }
-            if shm != 0 {
-                sys::shm_release(shm);
-            }
+            Body::Wayland { pid, .. } if notify => send_event(pid, Event::Close { window: id }),
+            _ => {}
         }
         self.add_damage(window.with_shadow());
         Some(window)
@@ -410,7 +414,7 @@ impl Compositor {
                 continue;
             }
             w.placed = (content.x, content.y);
-            if let Body::Client { pid, .. } = w.body {
+            if let Body::Client { pid, .. } | Body::Wayland { pid, .. } = w.body {
                 send_event(pid, Event::Placed { window: w.id, x: content.x, y: content.y });
             }
         }
@@ -455,6 +459,14 @@ impl Compositor {
     }
 
     pub fn swap_buffer(&mut self, index: usize, shm: u32, w: i32, h: i32) -> bool {
+        if let Body::Wayland { width, height, .. } = &mut self.windows[index].body {
+            if shm != 0 {
+                return false;
+            }
+            *width = w;
+            *height = h;
+            return true;
+        }
         let Body::Client { shm: old_shm, .. } = self.windows[index].body else {
             return false;
         };

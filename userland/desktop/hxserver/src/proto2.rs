@@ -472,7 +472,7 @@ impl Nook {
             return;
         };
         let content = self.core.windows[index].content();
-        if let (Body::Client { pid, .. }, true) = (&self.core.windows[index].body, content.contains(x, y)) {
+        if let (Body::Client { pid, .. } | Body::Wayland { pid, .. }, true) = (&self.core.windows[index].body, content.contains(x, y)) {
             send_event(*pid, Event::Drop { window: self.core.windows[index].id, x: x - content.x, y: y - content.y, mime: Title::new(&mime), data: Text::new(&data) });
         }
     }

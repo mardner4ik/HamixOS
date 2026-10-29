@@ -975,7 +975,7 @@ hxboot має працювати з ним краще, ніж GRUB:
       (16 384 px / 128 МіБ), захист від усічення (`F_SEAL_SHRINK`), автоматичне звільнення локального SHM-відображення та обмежені
       вхідний буфер і черга подій; нативний frontend hxserver ще попереду
 - [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені
-- [ ] `Source::Wayland` у вікнах сцени; композиція прямо з пулу клієнта; release при заміні
+- [~] `Body::Wayland` у сцені hxserver компонує кадри без копіювання з відображеного SHM bridge; нативні protocol state і `wl_buffer.release` ще треба перенести у frontend
 - [ ] Рамка Nook через `zxdg_decoration_manager_v1`; CSD-клієнти без рамки
 - [~] Frame-колбеки: відкладення до позиціювання і фільтр поверхонь поза виходом; повне врахування оклюзії ще потрібне
 - Ворота: foot, GTK3-Wayland, hxtoolkit-Wayland у Nook без `hxwayland`; `native-wayland-zero-copy`

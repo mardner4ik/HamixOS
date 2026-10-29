@@ -389,7 +389,7 @@ impl Nook {
     fn buffer_matches(&self, index: usize) -> bool {
         let content = self.core.windows[index].content();
         match self.core.windows[index].body {
-            crate::Body::Client { width, height, .. } => width == content.w && height == content.h,
+            crate::Body::Client { width, height, .. } | crate::Body::Wayland { width, height, .. } => width == content.w && height == content.h,
             _ => true,
         }
     }

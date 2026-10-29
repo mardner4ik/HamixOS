@@ -54,7 +54,7 @@ impl Nook {
         }
         let (w, h) = (a.width as i32, a.height as i32);
         let resized = match &mut self.core.windows[index].body {
-            Body::Client { shm: 0, pixels, width, height, stride, opaque, .. } => {
+            Body::Wayland { pixels, width, height, stride, opaque, .. } => {
                 *pixels = a.pixels;
                 *stride = a.stride as i32;
                 *opaque = a.opaque;

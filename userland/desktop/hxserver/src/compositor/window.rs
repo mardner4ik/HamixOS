@@ -34,6 +34,7 @@ pub enum Body {
     Auth { action: crate::PowerAction, field: hxclient::ui::TextField, error: String },
     Wallpaper { client: i64, request: u32, path: String, app: String, preview: Image },
     Client { pid: i64, shm: u32, pixels: *const u32, width: i32, height: i32, stride: i32, opaque: bool },
+    Wayland { pid: i64, pixels: *const u32, width: i32, height: i32, stride: i32, opaque: bool },
 }
 
 pub struct Cursor {
@@ -125,7 +126,7 @@ impl Window {
             return false;
         }
         match self.body {
-            Body::Client { .. } => self.max_w == 0 || self.max_h == 0 || self.max_w > self.min_w || self.max_h > self.min_h,
+            Body::Client { .. } | Body::Wayland { .. } => self.max_w == 0 || self.max_h == 0 || self.max_w > self.min_w || self.max_h > self.min_h,
             _ => false,
         }
     }
@@ -138,7 +139,7 @@ impl Window {
 
     pub fn client_pid(&self) -> Option<i64> {
         match self.body {
-            Body::Client { pid, .. } => Some(pid),
+            Body::Client { pid, .. } | Body::Wayland { pid, .. } => Some(pid),
             _ => None,
         }
     }
@@ -146,6 +147,7 @@ impl Window {
     pub fn client_shm(&self) -> Option<u32> {
         match self.body {
             Body::Client { shm, .. } => Some(shm),
+            Body::Wayland { .. } => Some(0),
             _ => None,
         }
     }
