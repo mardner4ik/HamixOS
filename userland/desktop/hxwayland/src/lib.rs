@@ -291,6 +291,7 @@ struct Client {
     decoration_manager: bool,
     pid: u32,
     trusted: bool,
+    last_input_serial: u32,
     next_server_id: u32,
     toplevel_managers: Vec<u32>,
     handles: Vec<(u32, u32)>,
@@ -448,6 +449,7 @@ impl<L: Link> Bridge<L> {
                     decoration_manager: false,
                     pid,
                     trusted,
+                    last_input_serial: 0,
                     next_server_id: SERVER_ID_BASE,
                     toplevel_managers: Vec::new(),
                     handles: Vec::new(),
@@ -1018,7 +1020,10 @@ impl<L: Link> Bridge<L> {
             }
             (Kind::DataDevice, 1) => {
                 let source = r.u32();
-                self.take_selection(cid, source);
+                let serial = r.u32();
+                if self.clients.get(&cid).map(|client| client.last_input_serial == serial && serial != 0).unwrap_or(false) {
+                    self.take_selection(cid, source);
+                }
             }
             (Kind::DataDevice, 2) => {
                 if let Some(client) = self.clients.get_mut(&cid) {
@@ -2349,6 +2354,11 @@ impl<L: Link> Bridge<L> {
                         _ => 0x110,
                     };
                     let serial = self.next_serial();
+                    if kind == hxproto::MOUSE_PRESS {
+                        if let Some(client) = self.clients.get_mut(&cid) {
+                            client.last_input_serial = serial;
+                        }
+                    }
                     self.post(cid, Message::new(*p, 2).u32(time).fixed(x).fixed(y).finish());
                     self.post(cid, Message::new(*p, 3).u32(serial).u32(time).u32(button).u32((kind == hxproto::MOUSE_PRESS) as u32).finish());
                 }
@@ -2503,6 +2513,9 @@ impl<L: Link> Bridge<L> {
             let serial = self.next_serial();
             if xkb_mods != 0 {
                 self.post(cid, Message::new(k, 4).u32(serial).u32(xkb_mods).u32(0).u32(0).u32(0).finish());
+            }
+            if let Some(client) = self.clients.get_mut(&cid) {
+                client.last_input_serial = serial;
             }
             self.post(cid, Message::new(k, 3).u32(serial).u32(time).u32(key).u32(1).finish());
             let serial = self.next_serial();
