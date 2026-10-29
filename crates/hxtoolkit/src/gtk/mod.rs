@@ -212,6 +212,8 @@ fn icon_name(name: &str) -> String {
         "down" => "go-down-symbolic",
         "refresh" | "reload" => "view-refresh-symbolic",
         "search" => "system-search-symbolic",
+        "network" => "network-wired-symbolic",
+        "browser" | "web" => "web-browser-symbolic",
         "settings" | "preferences" => "emblem-system-symbolic",
         "delete" | "trash" => "user-trash-symbolic",
         "folder" => "folder-symbolic",
@@ -513,7 +515,15 @@ impl<M: Clone + 'static> Builder<M> {
             }
             "row" => gtk::Box::new(gtk::Orientation::Horizontal, 8).upcast(),
             "column" => gtk::Box::new(gtk::Orientation::Vertical, 8).upcast(),
-            "scroll" => gtk::ScrolledWindow::new().upcast(),
+            "scroll" => {
+                let scroller = gtk::ScrolledWindow::new();
+                scroller.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
+                scroller.set_propagate_natural_height(false);
+                scroller.set_propagate_natural_width(false);
+                scroller.set_min_content_height(0);
+                scroller.set_min_content_width(0);
+                scroller.upcast()
+            }
             "space" => gtk::Box::new(gtk::Orientation::Horizontal, 0).upcast(),
             "divider" => gtk::Separator::new(if axis == Axis::Horizontal { gtk::Orientation::Vertical } else { gtk::Orientation::Horizontal }).upcast(),
             "image" => gtk::Picture::new().upcast(),
