@@ -242,7 +242,13 @@ struct ActivationRequest {
     serial: Option<u32>,
     seat: Option<u32>,
     surface: Option<u32>,
+    app_id: Option<String>,
     committed: bool,
+}
+
+struct ActivationGrant {
+    expires: u64,
+    app_id: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +312,8 @@ struct Client {
     pid: u32,
     trusted: bool,
     last_input_serial: u32,
+    last_seat_serial: u32,
+    last_seat_serial_at: u64,
     pointer_enter_serial: u32,
     activation_requests: BTreeMap<u32, ActivationRequest>,
     next_server_id: u32,
@@ -345,7 +353,7 @@ pub struct Bridge<L: Link> {
     clipboard_owner: Option<(u32, u32)>,
     path: String,
     geometry: BTreeMap<u32, (i32, i32, i32, i32)>,
-    activation_tokens: BTreeMap<String, u64>,
+    activation_tokens: BTreeMap<String, ActivationGrant>,
 }
 
 const MAX_CLIENT_OBJECTS: usize = 65_536;
@@ -467,6 +475,8 @@ impl<L: Link> Bridge<L> {
                     pid,
                     trusted,
                     last_input_serial: 0,
+                    last_seat_serial: 0,
+                    last_seat_serial_at: 0,
                     pointer_enter_serial: 0,
                     activation_requests: BTreeMap::new(),
                     next_server_id: SERVER_ID_BASE,
@@ -990,23 +1000,28 @@ impl<L: Link> Bridge<L> {
                 let token = r.string();
                 let surface = r.u32();
                 let now = sys::uptime_ms();
-                self.activation_tokens.retain(|_, expires| *expires > now);
-                let valid_surface = self.clients.get(&cid).and_then(|client| client.surfaces.get(&surface)).and_then(|surface| surface.window.as_ref()).map(|window| window.id);
-                if let (Some(window), Some(_)) = (valid_surface, self.activation_tokens.remove(token.as_str())) {
-                    self.request(Request::ToplevelAction { toplevel: window, action: hxproto::ACTION_ACTIVATE });
+                self.activation_tokens.retain(|_, grant| grant.expires > now);
+                let target = self.clients.get(&cid).and_then(|client| client.surfaces.get(&surface)).and_then(|surface| surface.window.as_ref().map(|window| (window.id, surface.app_id.as_str())));
+                if let (Some((window, app_id)), Some(grant)) = (target, self.activation_tokens.remove(token.as_str())) {
+                    if grant.app_id.as_deref().map(|expected| expected == app_id).unwrap_or(true) {
+                        self.request(Request::ToplevelAction { toplevel: window, action: hxproto::ACTION_ACTIVATE });
+                    }
                 }
             }
             (Kind::ActivationToken, 0) => {
                 let serial = r.u32();
                 let seat = r.u32();
-                let valid = self.clients.get(&cid).map(|client| client.last_input_serial == serial && serial != 0 && client.objects.get(&seat).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
+                let valid = self.clients.get(&cid).map(|client| client.last_seat_serial == serial && serial != 0 && sys::uptime_ms().saturating_sub(client.last_seat_serial_at) <= 5000 && client.objects.get(&seat).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
                 if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
                     request.serial = valid.then_some(serial);
                     request.seat = valid.then_some(seat);
                 }
             }
             (Kind::ActivationToken, 1) => {
-                let _app_id = r.string();
+                let app_id = r.string();
+                if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
+                    request.app_id = Some(app_id);
+                }
             }
             (Kind::ActivationToken, 2) => {
                 let surface = r.u32();
@@ -1031,15 +1046,17 @@ impl<L: Link> Bridge<L> {
                     return;
                 };
                 let focused = request.surface.map(|surface| self.pointer_focus == Some((cid, surface)) || self.keyboard_focus == Some((cid, surface))).unwrap_or(false);
-                let serial_valid = request.serial.map(|serial| self.clients.get(&cid).map(|client| client.last_input_serial == serial).unwrap_or(false)).unwrap_or(false);
+                let serial_valid = request.serial.map(|serial| self.clients.get(&cid).map(|client| client.last_seat_serial == serial && sys::uptime_ms().saturating_sub(client.last_seat_serial_at) <= 5000).unwrap_or(false)).unwrap_or(false);
                 let seat_valid = request.seat.map(|seat| self.clients.get(&cid).and_then(|client| client.objects.get(&seat)).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
+                let now = sys::uptime_ms();
+                self.activation_tokens.retain(|_, grant| grant.expires > now);
                 let token = if focused && serial_valid && seat_valid && self.activation_tokens.len() < 1024 {
                     random_activation_token()
                 } else {
                     None
                 };
                 if let Some(token) = token {
-                    self.activation_tokens.insert(token.clone(), sys::uptime_ms().saturating_add(5000));
+                    self.activation_tokens.insert(token.clone(), ActivationGrant { expires: sys::uptime_ms().saturating_add(5000), app_id: request.app_id });
                     self.post(cid, Message::new(object, 0).string(&token).finish());
                 } else {
                     self.post(cid, Message::new(object, 0).string("").finish());
@@ -2458,6 +2475,8 @@ impl<L: Link> Bridge<L> {
             let serial = self.next_serial();
             if let Some(client) = self.clients.get_mut(&cid) {
                 client.pointer_enter_serial = serial;
+                client.last_seat_serial = serial;
+                client.last_seat_serial_at = sys::uptime_ms();
             }
             for p in pointers.iter() {
                 self.post(cid, Message::new(*p, 0).u32(serial).u32(sid).fixed(x).fixed(y).finish());
@@ -2480,6 +2499,8 @@ impl<L: Link> Bridge<L> {
                     if kind == hxproto::MOUSE_PRESS {
                         if let Some(client) = self.clients.get_mut(&cid) {
                             client.last_input_serial = serial;
+                            client.last_seat_serial = serial;
+                            client.last_seat_serial_at = sys::uptime_ms();
                         }
                     }
                     self.post(cid, Message::new(*p, 2).u32(time).fixed(x).fixed(y).finish());
@@ -2599,6 +2620,10 @@ impl<L: Link> Bridge<L> {
         self.keyboard_leave();
         let keyboards = self.clients.get(&cid).map(|c| c.keyboards.clone()).unwrap_or_default();
         let serial = self.next_serial();
+        if let Some(client) = self.clients.get_mut(&cid) {
+            client.last_seat_serial = serial;
+            client.last_seat_serial_at = sys::uptime_ms();
+        }
         for k in keyboards {
             self.post(cid, Message::new(k, 1).u32(serial).u32(sid).array(&[]).finish());
             self.post(cid, Message::new(k, 4).u32(serial).u32(0).u32(0).u32(0).u32(0).finish());
@@ -2639,6 +2664,8 @@ impl<L: Link> Bridge<L> {
             }
             if let Some(client) = self.clients.get_mut(&cid) {
                 client.last_input_serial = serial;
+                client.last_seat_serial = serial;
+                client.last_seat_serial_at = sys::uptime_ms();
             }
             self.post(cid, Message::new(k, 3).u32(serial).u32(time).u32(key).u32(1).finish());
             let serial = self.next_serial();

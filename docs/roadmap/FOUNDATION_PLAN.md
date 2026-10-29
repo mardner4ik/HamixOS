@@ -988,7 +988,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 
 ### W3. Nook Wayland: повнота (1-2 тижні)
 - [~] Текстовий clipboard `wl_data_device` ↔ hxproto має serial-перевірку й обмежений неблокувальний запис; DnD і primary selection ще не зроблені
-- [~] У мосту є `wp_viewporter`, fractional scale 120 і `xdg_activation_v1` з одноразовими serial/focus-bound токенами; `wp_presentation` та нативне перенесення в hxserver залишаються
+- [~] У мосту є `wp_viewporter`, fractional scale 120 і `xdg_activation_v1` з одноразовими 5-секундними токенами, свіжим serial, перевіркою focus і заданого `app_id`; `wp_presentation` та нативне перенесення в hxserver залишаються
 - [~] Діють ліміти клієнта і `F_SEAL_SHRINK` для memfd SHM; захист SIGBUS для інших fd та `native-wayland-limits` ще потрібні
 
 ### W4. Xwayland і видалення моста (1 тиждень)
