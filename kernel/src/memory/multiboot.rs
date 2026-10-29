@@ -3,7 +3,7 @@ use super::{frame, kernel_end, modules, FramebufferInfo, ModuleInfo, CMDLINE, FR
 const MB2_FB_TYPE_RGB: u8 = 1;
 
 const LOW_LIMIT: u64 = 1 << 32;
-const HIGH_LIMIT: u64 = 1 << 36;
+const HIGH_LIMIT: u64 = 1 << 37;
 
 fn map_high_memory(end: u64) {
     const MASK: u64 = 0x000F_FFFF_FFFF_F000;

@@ -3,7 +3,7 @@ use spin::Mutex;
 
 use crate::arch::without_interrupts;
 
-const MAX_FRAMES: usize = 1 << 24;
+const MAX_FRAMES: usize = 1 << 25;
 const BITMAP_SIZE: usize = MAX_FRAMES / 64;
 pub const PAGE_SIZE: usize = 4096;
 
