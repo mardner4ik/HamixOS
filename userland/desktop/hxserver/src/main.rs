@@ -11,9 +11,9 @@ mod chrome;
 #[allow(dead_code)]
 mod config;
 mod compositor;
-mod render;
 #[cfg(feature = "wayland")]
-mod wayland;
+mod frontend;
+mod render;
 mod wm;
 
 use alloc::collections::BTreeMap;
@@ -1056,8 +1056,8 @@ fn main() -> i32 {
     let mut bridge = if hxstd::env::var("NOOK_WAYLAND").as_deref() == Some("external") {
         None
     } else {
-        let link = wayland::Embedded { nook: &mut nook as *mut Nook, me, mailbox: sys::mailbox_fd().max(0) as u64 };
-        match hxwayland::Bridge::start(link) {
+        let link = frontend::wayland::Embedded { nook: &mut nook as *mut Nook, me, mailbox: sys::mailbox_fd().max(0) as u64 };
+        match frontend::wayland::protocol::Bridge::start(link) {
             Ok(b) => {
                 sys::service_register("hxwayland");
                 Some(b)

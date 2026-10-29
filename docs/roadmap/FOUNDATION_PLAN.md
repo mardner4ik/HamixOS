@@ -973,9 +973,9 @@ hxboot має працювати з ним краще, ніж GRUB:
       `wl_registry.global`/`global_remove`, `wl_display.delete_id`/`error`; черга отриманих fd із CLOEXEC, завершення
       часткового передавання fd, обмежена вихідна черга з backpressure, ліміти SHM
       (16 384 px / 128 МіБ), захист від усічення (`F_SEAL_SHRINK`), автоматичне звільнення локального SHM-відображення та обмежені
-      вхідний буфер і черга подій; нативний frontend hxserver ще попереду
-- [ ] `frontend/wayland/{client,surface,shm,seat,output,xdg}.rs`; трейт `Frontend` у сцені
-- [~] `Body::Wayland` у сцені hxserver компонує кадри без копіювання з відображеного SHM bridge; нативні protocol state і `wl_buffer.release` ще треба перенести у frontend
+      вхідний буфер і черга подій; protocol engine збирається безпосередньо всередині hxserver
+- [~] `frontend/wayland` містить вбудований engine і адаптер сцени; окремі `client`, `surface`, `shm`, `seat`, `output`, `xdg` state-модулі та трейт `Frontend` ще треба виділити
+- [x] `Body::Wayland` у сцені hxserver компонує кадри без копіювання з відображеного SHM; bridge надсилає `wl_buffer.release` після заміни
 - [ ] Рамка Nook через `zxdg_decoration_manager_v1`; CSD-клієнти без рамки
 - [~] Frame-колбеки: відкладення до позиціювання і фільтр поверхонь поза виходом; повне врахування оклюзії ще потрібне
 - Ворота: foot, GTK3-Wayland, hxtoolkit-Wayland у Nook без `hxwayland`; `native-wayland-zero-copy`
@@ -992,8 +992,8 @@ hxboot має працювати з ним краще, ніж GRUB:
 - [~] Діють ліміти клієнта, surface (16 384 px / 128 МіБ) і `F_SEAL_SHRINK` для memfd SHM; незапечатувані fd читаються у приватний snapshot на кожен commit, усічення джерела дає EOF замість `SIGBUS`; `native-wayland-limits` ще потрібні
 
 ### W4. Xwayland і видалення моста (1 тиждень)
-- [ ] XWM у `frontend/wayland/xwm.rs` через `xwayland_shell_v1`; лінивий старт Xwayland
-- [ ] Видалити `userland/desktop/hxwayland`, `wayland::Embedded`, `NOOK_WAYLAND`
+- [~] XWM перенесений у `frontend/wayland/xwm.rs` і ліниво запускає Xwayland; асоціація через `xwayland_shell_v1` замість `WL_SURFACE_ID` ще потрібна
+- [~] hxserver більше не залежить від crate `hxwayland`, protocol engine лежить у його `frontend/wayland`; окремий compatibility package, `Embedded` і `NOOK_WAYLAND` ще лишаються
 - [ ] ADR-0019B «Nook як Wayland-композитор»
 - Ворота: усі boot-тести, X11-програми в Nook, `lint-unsafe` не вище бази
 

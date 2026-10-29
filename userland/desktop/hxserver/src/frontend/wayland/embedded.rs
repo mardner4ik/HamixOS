@@ -3,6 +3,7 @@ use hxstd::sys;
 
 use crate::compositor::window::Body;
 use crate::Nook;
+use super::protocol;
 
 pub struct Embedded {
     pub nook: *mut Nook,
@@ -10,7 +11,7 @@ pub struct Embedded {
     pub mailbox: u64,
 }
 
-impl hxwayland::Link for Embedded {
+impl protocol::Link for Embedded {
     fn request(&mut self, request: Request) {
         let nook = unsafe { &mut *self.nook };
         nook.handle_request(self.me, request);
@@ -38,14 +39,14 @@ impl hxwayland::Link for Embedded {
         unsafe { &*self.nook }.is_shell(pid as i64)
     }
 
-    fn attach(&mut self, attach: hxwayland::Attach) {
+    fn attach(&mut self, attach: protocol::Attach) {
         let nook = unsafe { &mut *self.nook };
         nook.attach_external(self.me, attach);
     }
 }
 
 impl Nook {
-    pub fn attach_external(&mut self, sender: i64, a: hxwayland::Attach) {
+    pub fn attach_external(&mut self, sender: i64, a: protocol::Attach) {
         let Some(index) = self.core.index_of(a.window) else {
             return;
         };

@@ -718,9 +718,9 @@ dependencies = [
  "hxclient",
  "hxproto",
  "hxstd",
- "hxwayland",
  "imago",
  "vellum",
+ "wlwire",
 ]
 
 [[package]]

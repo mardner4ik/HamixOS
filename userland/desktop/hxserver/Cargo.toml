@@ -9,15 +9,15 @@ path = "src/main.rs"
 
 [features]
 default = ["wayland"]
-wayland = ["dep:hxwayland"]
+wayland = ["dep:wlwire"]
 
 [dependencies]
-hxwayland = { path = "../hxwayland", optional = true }
 hxstd = { path = "../../libs/hxstd" }
 vellum = { path = "../../../crates/vellum" }
 imago = { path = "../../../crates/imago" }
 hxproto = { path = "../../../crates/hxproto" }
 hxclient = { path = "../../libs/hxclient" }
+wlwire = { path = "../../../crates/wlwire", optional = true }
 
 [package.metadata.hamix]
 desktop = "nook"

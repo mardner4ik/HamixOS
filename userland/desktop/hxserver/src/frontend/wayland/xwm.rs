@@ -5,7 +5,7 @@ use hxstd::unix::{self, PollFd, POLLHUP, POLLIN};
 use hxstd::sys;
 use hxproto::{Request, Title};
 
-use crate::Bridge;
+use super::{Bridge, Link};
 
 pub const XWAYLAND_PATHS: [&str; 2] = ["/usr/bin/Xwayland", "/linux/usr/bin/Xwayland"];
 
@@ -395,7 +395,7 @@ fn parse(inbuf: &mut Vec<u8>) -> Parsed {
     out
 }
 
-impl<L: crate::Link> Bridge<L> {
+impl<L: Link> Bridge<L> {
     pub fn xwm_prepare(&mut self) {
         if self.xlisten.is_some() || self.xwm.is_some() || xwayland_binary().is_none() {
             return;
@@ -999,7 +999,7 @@ impl<L: crate::Link> Bridge<L> {
         });
         if let Some(buffer) = held {
             self.show(cid, sid, buffer);
-            self.post(cid, crate::wire::Message::new(buffer, 0).finish());
+            self.post(cid, super::wire::Message::new(buffer, 0).finish());
         }
         self.xwm_sync_identity(window);
     }
