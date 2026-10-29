@@ -126,6 +126,8 @@ enum Kind {
     Popup,
     Seat,
     Pointer,
+    CursorShapeManager,
+    CursorShapeDevice,
     Keyboard,
     Touch,
     Output,
@@ -152,7 +154,7 @@ enum Kind {
     HamixShell,
 }
 
-const GLOBALS: [(&str, u32, Kind); 15] = [
+const GLOBALS: [(&str, u32, Kind); 16] = [
     ("wl_compositor", 5, Kind::Compositor),
     ("wl_shm", 1, Kind::Shm),
     ("wl_seat", 7, Kind::Seat),
@@ -166,6 +168,7 @@ const GLOBALS: [(&str, u32, Kind); 15] = [
     ("zwlr_foreign_toplevel_manager_v1", 3, Kind::ToplevelManager),
     ("wp_viewporter", 1, Kind::Viewporter),
     ("wp_fractional_scale_manager_v1", 1, Kind::FractionalScaleManager),
+    ("wp_cursor_shape_manager_v1", 1, Kind::CursorShapeManager),
     ("zxdg_output_manager_v1", 3, Kind::XdgOutputManager),
     ("hamix_shell_v1", 1, Kind::HamixShell),
 ];
@@ -292,6 +295,7 @@ struct Client {
     pid: u32,
     trusted: bool,
     last_input_serial: u32,
+    pointer_enter_serial: u32,
     next_server_id: u32,
     toplevel_managers: Vec<u32>,
     handles: Vec<(u32, u32)>,
@@ -450,6 +454,7 @@ impl<L: Link> Bridge<L> {
                     pid,
                     trusted,
                     last_input_serial: 0,
+                    pointer_enter_serial: 0,
                     next_server_id: SERVER_ID_BASE,
                     toplevel_managers: Vec::new(),
                     handles: Vec::new(),
@@ -930,6 +935,31 @@ impl<L: Link> Bridge<L> {
                     client.keyboards.retain(|k| *k != object);
                 }
                 self.destroy(cid, object);
+            }
+            (Kind::CursorShapeManager, 0) => self.destroy(cid, object),
+            (Kind::CursorShapeManager, 1) => {
+                let id = r.u32();
+                let pointer = r.u32();
+                if self.clients.get(&cid).and_then(|c| c.objects.get(&pointer)).map(|entry| entry.0) == Some(Kind::Pointer) {
+                    self.add(cid, id, Kind::CursorShapeDevice, pointer);
+                }
+            }
+            (Kind::CursorShapeDevice, 0) => self.destroy(cid, object),
+            (Kind::CursorShapeDevice, 1) => {
+                let serial = r.u32();
+                let shape = r.u32();
+                let valid = self.clients.get(&cid).map(|client| client.pointer_enter_serial == serial && serial != 0).unwrap_or(false);
+                if valid {
+                    if let Some((focus_cid, sid)) = self.pointer_focus.filter(|(focus_cid, _)| *focus_cid == cid) {
+                        let pointer = self.clients.get(&cid).and_then(|c| c.objects.get(&extra)).filter(|entry| entry.0 == Kind::Pointer).map(|_| extra);
+                        if pointer.is_some() {
+                            let cursor = cursor_shape(shape);
+                            if let Some(window) = self.clients.get(&focus_cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.window.as_ref()).map(|w| w.id) {
+                                self.request(Request::SetCursor { window, cursor });
+                            }
+                        }
+                    }
+                }
             }
             (Kind::Pointer, _) | (Kind::Keyboard, _) | (Kind::Touch, _) => {}
             (Kind::Output, 0) => {
@@ -2336,6 +2366,9 @@ impl<L: Link> Bridge<L> {
                 }
             }
             let serial = self.next_serial();
+            if let Some(client) = self.clients.get_mut(&cid) {
+                client.pointer_enter_serial = serial;
+            }
             for p in pointers.iter() {
                 self.post(cid, Message::new(*p, 0).u32(serial).u32(sid).fixed(x).fixed(y).finish());
             }
@@ -2692,6 +2725,21 @@ fn release_pool(pool: Pool) {
 fn release_shm(shm: u32) {
     if shm != 0 {
         sys::shm_release(shm);
+    }
+}
+
+fn cursor_shape(shape: u32) -> u32 {
+    match shape {
+        0 | 4 | 5 => 0,
+        1 | 2 | 3 | 9..=16 | 28 | 29 => 2,
+        6 | 7 => 7,
+        8 => 1,
+        17 | 18 | 25 => 5,
+        19 | 20 | 26 => 4,
+        21 | 22 => 6,
+        23 | 24 => 7,
+        27 => 3,
+        _ => 0,
     }
 }
 
