@@ -42,6 +42,7 @@ pub struct Attach {
 struct Mapping {
     ptr: *mut u8,
     size: usize,
+    owned_fd: Option<u64>,
 }
 
 impl Mapping {
@@ -52,7 +53,63 @@ impl Mapping {
         } else {
             core::ptr::null_mut()
         };
-        Rc::new(Mapping { ptr, size: if ptr.is_null() { 0 } else { size } })
+        Rc::new(Mapping { ptr, size: if ptr.is_null() { 0 } else { size }, owned_fd: None })
+    }
+
+    fn snapshot(source_fd: u64, size: usize) -> Rc<Mapping> {
+        if size == 0 || size > MAX_CLIENT_SNAPSHOT_BYTES || sys::fstat_size(source_fd) < size as i64 {
+            return Rc::new(Mapping { ptr: core::ptr::null_mut(), size: 0, owned_fd: None });
+        }
+        let fd = unix::memfd_create("wayland-shm-snapshot");
+        if fd < 0 {
+            return Rc::new(Mapping { ptr: core::ptr::null_mut(), size: 0, owned_fd: None });
+        }
+        let fd = fd as u64;
+        if unix::ftruncate(fd, size as u64) < 0 {
+            sys::close(fd);
+            return Rc::new(Mapping { ptr: core::ptr::null_mut(), size: 0, owned_fd: None });
+        }
+        let ptr = unix::map_shared(fd, size as u64, 0).unwrap_or(core::ptr::null_mut());
+        if ptr.is_null() {
+            sys::close(fd);
+            Rc::new(Mapping { ptr, size: 0, owned_fd: None })
+        } else {
+            Rc::new(Mapping { ptr, size, owned_fd: Some(fd) })
+        }
+    }
+
+    fn refresh(&self, fd: u64, buffer: Buffer) -> bool {
+        if self.owned_fd.is_none() {
+            return true;
+        }
+        let Some(row_bytes) = (buffer.width as usize).checked_mul(4) else {
+            return false;
+        };
+        for row in 0..buffer.height as usize {
+            let Some(source) = buffer.offset.checked_add(row.saturating_mul(buffer.stride as usize)) else {
+                return false;
+            };
+            let Some(end) = source.checked_add(row_bytes) else {
+                return false;
+            };
+            if end > self.size {
+                return false;
+            }
+            let destination = unsafe { core::slice::from_raw_parts_mut(self.ptr.add(source), row_bytes) };
+            destination.fill(0);
+            let mut copied = 0usize;
+            while copied < row_bytes {
+                let n = unix::pread(fd, &mut destination[copied..], (source + copied) as u64);
+                if n > 0 {
+                    copied += n as usize;
+                } else if n == 0 {
+                    break;
+                } else if n != -4 {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -60,6 +117,9 @@ impl Drop for Mapping {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unix::unmap(self.ptr, self.size as u64);
+        }
+        if let Some(fd) = self.owned_fd {
+            sys::close(fd);
         }
     }
 }
@@ -206,9 +266,11 @@ struct LayerRole {
 struct Pool {
     live: bool,
     fd: u64,
+    snapshot: bool,
     map: Rc<Mapping>,
 }
 
+#[derive(Clone, Copy)]
 struct Buffer {
     pool: u32,
     offset: usize,
@@ -216,6 +278,7 @@ struct Buffer {
     height: i32,
     stride: i32,
     alpha: bool,
+    object_live: bool,
 }
 
 struct Window {
@@ -268,6 +331,7 @@ struct PopupRole {
 struct Surface {
     pending: Option<u32>,
     attached: bool,
+    current_buffer: Option<u32>,
     pending_frames: Vec<u32>,
     frames: Vec<u32>,
     xdg: Option<u32>,
@@ -361,12 +425,15 @@ const MAX_CLIENT_INPUT: usize = 1 << 20;
 const MAX_CLIENT_MESSAGE: usize = 4 << 10;
 const MAX_CLIENT_FDS: usize = 256;
 const MAX_CLIENT_POOL_BYTES: usize = 512 << 20;
+const MAX_CLIENT_SNAPSHOT_BYTES: usize = 128 << 20;
 const MAX_SURFACE_DIM: u32 = 16_384;
 const MAX_SURFACE_BYTES: u64 = 128 << 20;
 const OUT_LIMIT: usize = 4 << 20;
 
 fn client_pool_bytes(client: &Client) -> usize {
-    client.pools.values().fold(0usize, |total, pool| total.saturating_add(pool.map.size))
+    client.pools.values().fold(0usize, |total, pool| {
+        total.saturating_add(pool.map.size.saturating_mul(if pool.snapshot { 2 } else { 1 }))
+    })
 }
 
 fn send(client: &mut Client, data: Vec<u8>, fds: &[u64]) {
@@ -597,6 +664,12 @@ impl<L: Link> Bridge<L> {
         let Some(&(kind, extra)) = self.clients.get(&cid).and_then(|c| c.objects.get(&object)) else {
             return;
         };
+        if kind == Kind::Buffer && !self.clients.get(&cid).and_then(|client| client.buffers.get(&object)).map(|buffer| buffer.object_live).unwrap_or(false) {
+            if let Some(client) = self.clients.get_mut(&cid) {
+                client.dead = true;
+            }
+            return;
+        }
         let mut r = Reader::new(args);
         match (kind, opcode) {
             (Kind::Display, 0) => {
@@ -654,8 +727,7 @@ impl<L: Link> Bridge<L> {
                 let Some(fd) = self.take_fd(cid) else {
                     return;
                 };
-                let used = self.clients.get(&cid).map(client_pool_bytes).unwrap_or(MAX_CLIENT_POOL_BYTES);
-                if size == 0 || used.saturating_add(size) > MAX_CLIENT_POOL_BYTES {
+                if size == 0 || size > MAX_CLIENT_POOL_BYTES {
                     sys::close(fd);
                     if let Some(client) = self.clients.get_mut(&cid) {
                         client.dead = true;
@@ -663,14 +735,20 @@ impl<L: Link> Bridge<L> {
                     return;
                 }
                 let seals = unix::get_seals(fd);
+                let mut snapshot = seals < 0;
                 if seals >= 0 && (seals as u32 & F_SEAL_SHRINK) == 0 && unix::add_seals(fd, F_SEAL_SHRINK) < 0 {
+                    snapshot = true;
+                }
+                let used = self.clients.get(&cid).map(client_pool_bytes).unwrap_or(MAX_CLIENT_POOL_BYTES);
+                let charge = size.saturating_mul(if snapshot { 2 } else { 1 });
+                if used.saturating_add(charge) > MAX_CLIENT_POOL_BYTES {
                     sys::close(fd);
                     if let Some(client) = self.clients.get_mut(&cid) {
                         client.dead = true;
                     }
                     return;
                 }
-                let map = Mapping::new(fd, size);
+                let map = if snapshot { Mapping::snapshot(fd, size) } else { Mapping::new(fd, size) };
                 if map.ptr.is_null() {
                     sys::close(fd);
                     if let Some(client) = self.clients.get_mut(&cid) {
@@ -684,20 +762,28 @@ impl<L: Link> Bridge<L> {
                 };
                 let key = client.next_pool;
                 client.next_pool = client.next_pool.wrapping_add(1).max(1);
-                client.pools.insert(key, Pool { live: true, fd, map });
+                client.pools.insert(key, Pool { live: true, fd, snapshot, map });
                 self.add(cid, id, Kind::Pool, key);
             }
             (Kind::Shm, _) => self.destroy(cid, object),
             (Kind::Pool, 0) => {
                 let id = r.u32();
-                let offset = r.i32().max(0) as usize;
+                let raw_offset = r.i32();
+                let offset = raw_offset.max(0) as usize;
                 let width = r.i32();
                 let height = r.i32();
                 let stride = r.i32();
                 let format = r.u32();
+                let valid = self.clients.get(&cid).and_then(|client| client.pools.get(&extra)).map(|pool| shm_buffer_valid(raw_offset, width, height, stride, format, pool.map.size)).unwrap_or(false);
+                if !valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
                 self.add(cid, id, Kind::Buffer, 0);
                 if let Some(client) = self.clients.get_mut(&cid) {
-                    client.buffers.insert(id, Buffer { pool: extra, offset, width, height, stride, alpha: format == 0 });
+                client.buffers.insert(id, Buffer { pool: extra, offset, width, height, stride, alpha: format == 0, object_live: true });
                 }
             }
             (Kind::Pool, 1) => {
@@ -713,35 +799,39 @@ impl<L: Link> Bridge<L> {
                 self.destroy(cid, object);
             }
             (Kind::Pool, 2) => {
-                let size = r.i32().max(0) as usize;
+                let raw_size = r.i32();
                 if let Some(client) = self.clients.get_mut(&cid) {
+                    let Some(pool) = client.pools.get(&extra) else {
+                        client.dead = true;
+                        return;
+                    };
+                    let current_size = pool.map.size;
+                    let fd = pool.fd;
+                    let snapshot = pool.snapshot;
+                    if raw_size <= 0 || raw_size as usize <= current_size || raw_size as usize > MAX_CLIENT_POOL_BYTES || sys::fstat_size(fd) < raw_size as i64 {
+                        client.dead = true;
+                        return;
+                    }
+                    let size = raw_size as usize;
                     let used = client_pool_bytes(client);
                     if let Some(pool) = client.pools.get_mut(&extra) {
-                        if size > pool.map.size {
-                            if used.saturating_add(size - pool.map.size) > MAX_CLIENT_POOL_BYTES {
-                                client.dead = true;
-                                return;
-                            }
-                            pool.map = Mapping::new(pool.fd, size);
-                            if pool.map.ptr.is_null() {
-                                client.dead = true;
-                            }
+                        let charge = (size - current_size).saturating_mul(if snapshot { 2 } else { 1 });
+                        if used.saturating_add(charge) > MAX_CLIENT_POOL_BYTES {
+                            client.dead = true;
+                            return;
+                        }
+                        pool.map = if snapshot { Mapping::snapshot(fd, size) } else { Mapping::new(fd, size) };
+                        if pool.map.ptr.is_null() {
+                            client.dead = true;
                         }
                     }
                 }
             }
             (Kind::Buffer, 0) => {
-                if let Some(client) = self.clients.get_mut(&cid) {
-                    if let Some(buffer) = client.buffers.remove(&object) {
-                        let pool_dead = !client.pools.get(&buffer.pool).map(|p| p.live).unwrap_or(false) && !client.buffers.values().any(|b| b.pool == buffer.pool);
-                        if pool_dead {
-                            if let Some(pool) = client.pools.remove(&buffer.pool) {
-                                release_pool(pool);
-                            }
-                        }
-                    }
+                if let Some(buffer) = self.clients.get_mut(&cid).and_then(|client| client.buffers.get_mut(&object)) {
+                    buffer.object_live = false;
                 }
-                self.destroy(cid, object);
+                self.discard_buffer_if_unused(cid, object);
             }
             (Kind::WmBase, 0) => self.destroy(cid, object),
             (Kind::WmBase, 1) => {
@@ -1450,9 +1540,23 @@ impl<L: Link> Bridge<L> {
             }
             1 => {
                 let buffer = r.u32();
-                if let Some(s) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&id)) {
-                    s.pending = if buffer == 0 { None } else { Some(buffer) };
-                    s.attached = true;
+                let valid = buffer == 0 || self.clients.get(&cid).and_then(|client| client.objects.get(&buffer)).map(|entry| entry.0) == Some(Kind::Buffer) && self.clients.get(&cid).and_then(|client| client.buffers.get(&buffer)).map(|buffer| buffer.object_live).unwrap_or(false);
+                if !valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                let old_pending = if let Some(surface) = self.clients.get_mut(&cid).and_then(|client| client.surfaces.get_mut(&id)) {
+                    let old_pending = if surface.attached { surface.pending } else { None };
+                    surface.pending = if buffer == 0 { None } else { Some(buffer) };
+                    surface.attached = true;
+                    old_pending
+                } else {
+                    None
+                };
+                if let Some(old) = old_pending.filter(|old| *old != buffer) {
+                    self.discard_buffer_if_unused(cid, old);
                 }
             }
             3 => {
@@ -1485,20 +1589,30 @@ impl<L: Link> Bridge<L> {
     }
 
     fn commit(&mut self, cid: u32, id: u32) {
-        let Some(client) = self.clients.get_mut(&cid) else {
-            return;
+        let (attached, buffer, replaced_buffer, popup_pending) = {
+            let Some(client) = self.clients.get_mut(&cid) else {
+                return;
+            };
+            let Some(surface) = client.surfaces.get_mut(&id) else {
+                return;
+            };
+            let mut pending = core::mem::take(&mut surface.pending_frames);
+            surface.frames.append(&mut pending);
+            surface.pending_frames = pending;
+            let attached = core::mem::replace(&mut surface.attached, false);
+            let old_buffer = surface.current_buffer;
+            if attached {
+                surface.current_buffer = surface.pending.take();
+            }
+            let buffer = surface.current_buffer;
+            let replaced_buffer = if attached && old_buffer != buffer { old_buffer } else { None };
+            let popup_pending = surface.popup.map(|p| !p.configured).unwrap_or(false);
+            (attached, buffer, replaced_buffer, popup_pending)
         };
-        let Some(surface) = client.surfaces.get_mut(&id) else {
-            return;
-        };
-        let mut pending = core::mem::take(&mut surface.pending_frames);
-        surface.frames.append(&mut pending);
-        surface.pending_frames = pending;
-        let attached = core::mem::replace(&mut surface.attached, false);
-        let buffer = if attached { surface.pending.take() } else { None };
-        let popup_pending = surface.popup.map(|p| !p.configured).unwrap_or(false);
+        if let Some(buffer) = replaced_buffer {
+            self.discard_buffer_if_unused(cid, buffer);
+        }
         if popup_pending {
-            let _ = surface;
             self.configure_popup(cid, id);
             if buffer.is_none() {
                 return;
@@ -1542,18 +1656,44 @@ impl<L: Link> Bridge<L> {
         let Some(buffer_id) = buffer else {
             return;
         };
+        if !self.refresh_shm_buffer(cid, buffer_id) {
+            if let Some(client) = self.clients.get_mut(&cid) {
+                client.dead = true;
+            }
+            return;
+        }
         if !role && self.xwm.as_ref().and_then(|x| x.cid) == Some(cid) {
             let previous = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&id)).and_then(|s| s.held.replace(buffer_id));
             if let Some(previous) = previous {
-                self.post(cid, Message::new(previous, 0).finish());
+                if self.buffer_resource_live(cid, previous) {
+                    self.post(cid, Message::new(previous, 0).finish());
+                }
+                self.discard_buffer_if_unused(cid, previous);
             }
             return;
         }
         if role && self.show(cid, id, buffer_id) {
             return;
         }
-        self.post(cid, Message::new(buffer_id, 0).finish());
+        if self.buffer_resource_live(cid, buffer_id) {
+            self.post(cid, Message::new(buffer_id, 0).finish());
+        }
         let _ = is_popup;
+    }
+
+    fn refresh_shm_buffer(&self, cid: u32, buffer_id: u32) -> bool {
+        let Some((buffer, fd, snapshot, map)) = self.clients.get(&cid).and_then(|client| {
+            let buffer = *client.buffers.get(&buffer_id)?;
+            let pool = client.pools.get(&buffer.pool)?;
+            Some((buffer, pool.fd, pool.snapshot, pool.map.clone()))
+        }) else {
+            return false;
+        };
+        !snapshot || map.refresh(fd, buffer)
+    }
+
+    fn buffer_resource_live(&self, cid: u32, buffer_id: u32) -> bool {
+        self.clients.get(&cid).and_then(|client| client.buffers.get(&buffer_id)).map(|buffer| buffer.object_live).unwrap_or(false)
     }
 
     fn show(&mut self, cid: u32, sid: u32, buffer_id: u32) -> bool {
@@ -1777,7 +1917,7 @@ impl<L: Link> Bridge<L> {
         let previous = surface.shown.replace((buffer_id, map));
         self.link.attach(Attach { window: id, pixels, stride: (stride / 4) as u32, width: cols as u32, height: rows as u32, opaque, damage: area });
         if let Some((old, _)) = previous {
-            if old != buffer_id {
+            if old != buffer_id && self.buffer_resource_live(cid, old) {
                 self.post(cid, Message::new(old, 0).finish());
             }
         }
@@ -2267,6 +2407,11 @@ impl<L: Link> Bridge<L> {
 
     fn unmap(&mut self, cid: u32, sid: u32) {
         let window = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.window.take());
+        let (current_buffer, pending_buffer, held_buffer) = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).map(|surface| {
+            surface.attached = false;
+            let pending = surface.pending.take();
+            (surface.current_buffer.take(), pending, surface.held.take())
+        }).unwrap_or((None, None, None));
         if let Some(window) = window {
             self.request(Request::Destroy { window: window.id });
             release_shm(window.shm);
@@ -2275,7 +2420,7 @@ impl<L: Link> Bridge<L> {
         }
         let shown = self.clients.get_mut(&cid).and_then(|c| c.surfaces.get_mut(&sid)).and_then(|s| s.shown.take());
         if let Some((buffer, _)) = shown {
-            if self.clients.get(&cid).map(|c| c.buffers.contains_key(&buffer)).unwrap_or(false) {
+            if self.buffer_resource_live(cid, buffer) {
                 self.post(cid, Message::new(buffer, 0).finish());
             }
         }
@@ -2284,6 +2429,41 @@ impl<L: Link> Bridge<L> {
         }
         if self.keyboard_focus.map(|(c, s)| c == cid && s == sid).unwrap_or(false) {
             self.keyboard_focus = None;
+        }
+        if let Some(buffer) = current_buffer {
+            self.discard_buffer_if_unused(cid, buffer);
+        }
+        if let Some(buffer) = pending_buffer {
+            self.discard_buffer_if_unused(cid, buffer);
+        }
+        if let Some(buffer) = held_buffer {
+            if self.buffer_resource_live(cid, buffer) {
+                self.post(cid, Message::new(buffer, 0).finish());
+            }
+            self.discard_buffer_if_unused(cid, buffer);
+        }
+    }
+
+    fn discard_buffer_if_unused(&mut self, cid: u32, buffer_id: u32) {
+        let (release, delete_object) = self.clients.get_mut(&cid).map(|client| {
+            if client.surfaces.values().any(|surface| surface.current_buffer == Some(buffer_id) || surface.held == Some(buffer_id) || (surface.attached && surface.pending == Some(buffer_id))) {
+                return (None, false);
+            }
+            let Some(buffer) = client.buffers.get(&buffer_id) else { return (None, false) };
+            if buffer.object_live {
+                return (None, false);
+            }
+            let pool_id = buffer.pool;
+            client.buffers.remove(&buffer_id);
+            let pool_unused = !client.pools.get(&pool_id).map(|pool| pool.live).unwrap_or(false) && !client.buffers.values().any(|buffer| buffer.pool == pool_id);
+            let pool = if pool_unused { client.pools.remove(&pool_id) } else { None };
+            (pool, true)
+        }).unwrap_or((None, false));
+        if let Some(pool) = release {
+            release_pool(pool);
+        }
+        if delete_object {
+            self.destroy(cid, buffer_id);
         }
     }
 
@@ -2893,6 +3073,22 @@ fn surface_size_ok(width: u32, height: u32) -> bool {
         return false;
     }
     (width as u64).checked_mul(height as u64).and_then(|pixels| pixels.checked_mul(4)).map(|bytes| bytes <= MAX_SURFACE_BYTES).unwrap_or(false)
+}
+
+fn shm_buffer_valid(offset: i32, width: i32, height: i32, stride: i32, format: u32, pool_size: usize) -> bool {
+    if offset < 0 || width <= 0 || height <= 0 || stride <= 0 || stride % 4 != 0 || format > 1 || !surface_size_ok(width as u32, height as u32) {
+        return false;
+    }
+    let Some(row_bytes) = (width as usize).checked_mul(4) else {
+        return false;
+    };
+    if (stride as usize) < row_bytes {
+        return false;
+    }
+    let Some(last_row) = (height as usize - 1).checked_mul(stride as usize) else {
+        return false;
+    };
+    (offset as usize).checked_add(last_row).and_then(|start| start.checked_add(row_bytes)).map(|end| end <= pool_size).unwrap_or(false)
 }
 
 fn random_activation_token() -> Option<String> {
