@@ -177,9 +177,11 @@ enum Kind {
     XdgOutputManager,
     XdgOutput,
     HamixShell,
+    XwaylandShell,
+    XwaylandSurface,
 }
 
-const GLOBALS: [(&str, u32, Kind); 17] = [
+const GLOBALS: [(&str, u32, Kind); 18] = [
     ("wl_compositor", 5, Kind::Compositor),
     ("wl_shm", 1, Kind::Shm),
     ("wl_seat", 7, Kind::Seat),
@@ -197,6 +199,7 @@ const GLOBALS: [(&str, u32, Kind); 17] = [
     ("xdg_activation_v1", 1, Kind::ActivationManager),
     ("zxdg_output_manager_v1", 3, Kind::XdgOutputManager),
     ("hamix_shell_v1", 1, Kind::HamixShell),
+    ("xwayland_shell_v1", 1, Kind::XwaylandShell),
 ];
 
 fn privileged_global(kind: Kind) -> bool {
@@ -289,6 +292,13 @@ struct ActivationGrant {
     app_id: Option<String>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct XwaylandRole {
+    object: u32,
+    pending_serial: Option<u64>,
+    serial: Option<u64>,
+}
+
 #[derive(Clone, Copy)]
 struct PopupRole {
     object: u32,
@@ -321,6 +331,7 @@ struct Surface {
     popup: Option<PopupRole>,
     geometry: Option<(i32, i32, i32, i32)>,
     xwin: Option<u32>,
+    xwayland: Option<XwaylandRole>,
     held: Option<u32>,
     damage: Option<(i32, i32, i32, i32)>,
     csd: bool,
@@ -478,6 +489,10 @@ impl<L: Link> Bridge<L> {
 
     fn request(&mut self, request: Request) {
         self.link.request(request);
+    }
+
+    fn is_xwayland_client(&self, cid: u32) -> bool {
+        self.xwm.as_ref().and_then(|xwm| xwm.cid) == Some(cid)
     }
 
     fn accept(&mut self) {
@@ -663,7 +678,7 @@ impl<L: Link> Bridge<L> {
                 self.add(cid, registry, Kind::Registry, 0);
                 let trusted = self.clients.get(&cid).map(|client| client.trusted).unwrap_or(false);
                 for (i, (name, version, kind)) in GLOBALS.iter().enumerate() {
-                    if privileged_global(*kind) && !trusted {
+                    if (privileged_global(*kind) && !trusted) || (*kind == Kind::XwaylandShell && !self.is_xwayland_client(cid)) {
                         continue;
                     }
                     self.post(cid, Message::new(registry, 0).u32(i as u32 + 1).string(name).u32(*version).finish());
@@ -678,6 +693,12 @@ impl<L: Link> Bridge<L> {
                     return;
                 };
                 if privileged_global(*kind) && !self.clients.get(&cid).map(|client| client.trusted).unwrap_or(false) {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                if *kind == Kind::XwaylandShell && !self.is_xwayland_client(cid) {
                     if let Some(client) = self.clients.get_mut(&cid) {
                         client.dead = true;
                     }
@@ -1344,6 +1365,53 @@ impl<L: Link> Bridge<L> {
                     role.dirty = true;
                 }
             }
+            (Kind::XwaylandShell, 0) => self.destroy(cid, object),
+            (Kind::XwaylandShell, 1) => {
+                let id = r.u32();
+                let surface_id = r.u32();
+                let valid = self.is_xwayland_client(cid)
+                    && self.clients.get(&cid).and_then(|client| client.objects.get(&surface_id)).map(|entry| entry.0) == Some(Kind::Surface)
+                    && self.clients.get(&cid).and_then(|client| client.surfaces.get(&surface_id)).map(|surface| {
+                        surface.xdg.is_none()
+                            && surface.popup.is_none()
+                            && surface.layer.is_none()
+                            && surface.xwin.is_none()
+                            && surface.xwayland.is_none()
+                    }).unwrap_or(false);
+                if !valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                self.add(cid, id, Kind::XwaylandSurface, surface_id);
+                if let Some(surface) = self.clients.get_mut(&cid).and_then(|client| client.surfaces.get_mut(&surface_id)) {
+                    surface.xwayland = Some(XwaylandRole { object: id, pending_serial: None, serial: None });
+                }
+            }
+            (Kind::XwaylandSurface, 0) => {
+                let serial = r.u32() as u64 | ((r.u32() as u64) << 32);
+                let valid = serial != 0
+                    && self.is_xwayland_client(cid)
+                    && self.clients.get(&cid).and_then(|client| client.surfaces.get(&extra)).and_then(|surface| surface.xwayland).map(|role| role.object == object && role.serial.is_none()).unwrap_or(false);
+                if !valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                if let Some(role) = self.clients.get_mut(&cid).and_then(|client| client.surfaces.get_mut(&extra)).and_then(|surface| surface.xwayland.as_mut()) {
+                    role.pending_serial = Some(serial);
+                }
+            }
+            (Kind::XwaylandSurface, 1) => {
+                if let Some(role) = self.clients.get_mut(&cid).and_then(|client| client.surfaces.get_mut(&extra)).and_then(|surface| surface.xwayland.as_mut()) {
+                    if role.object == object {
+                        role.pending_serial = None;
+                    }
+                }
+                self.destroy(cid, object);
+            }
             (Kind::HamixShell, 0) => {
                 if let Some(client) = self.clients.get_mut(&cid) {
                     client.shells.retain(|s| *s != object);
@@ -1513,6 +1581,7 @@ impl<L: Link> Bridge<L> {
         match opcode {
             0 => {
                 self.unmap(cid, id);
+                self.xwm_surface_destroyed(cid, id);
                 if let Some(client) = self.clients.get_mut(&cid) {
                     client.surfaces.remove(&id);
                 }
@@ -1569,7 +1638,7 @@ impl<L: Link> Bridge<L> {
     }
 
     fn commit(&mut self, cid: u32, id: u32) {
-        let (attached, buffer, replaced_buffer, popup_pending) = {
+        let (attached, buffer, replaced_buffer, popup_pending, xwayland_serial) = {
             let Some(client) = self.clients.get_mut(&cid) else {
                 return;
             };
@@ -1587,8 +1656,25 @@ impl<L: Link> Bridge<L> {
             let buffer = surface.current_buffer;
             let replaced_buffer = if attached && old_buffer != buffer { old_buffer } else { None };
             let popup_pending = surface.popup.map(|p| !p.configured).unwrap_or(false);
-            (attached, buffer, replaced_buffer, popup_pending)
+            let xwayland_serial = surface.xwayland.as_mut().and_then(|role| role.pending_serial.take());
+            (attached, buffer, replaced_buffer, popup_pending, xwayland_serial)
         };
+        if let Some(serial) = xwayland_serial {
+            let role = self.clients.get_mut(&cid).and_then(|client| client.surfaces.get_mut(&id)).and_then(|surface| surface.xwayland.as_mut());
+            let Some(role) = role.filter(|role| role.serial.is_none()) else {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.dead = true;
+                }
+                return;
+            };
+            role.serial = Some(serial);
+            if !self.xwm_surface_serial(cid, id, serial) {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.dead = true;
+                }
+                return;
+            }
+        }
         if let Some(buffer) = replaced_buffer {
             self.discard_buffer_if_unused(cid, buffer);
         }

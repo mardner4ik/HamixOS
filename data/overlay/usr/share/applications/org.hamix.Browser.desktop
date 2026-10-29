@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=hxsurf
-Name[uk]=hxsurf
-Comment=hxsurf web browser
-Comment[uk]=Веб-браузер hxsurf
+Name=Browser
+Name[uk]=Браузер
+Comment=Web browser for HamixOS
+Comment[uk]=Веб-браузер HamixOS
 Keywords=web;browser;internet;surf;hxsurf;
 Exec=/usr/bin/hxsurf %U
 Icon=web-browser
@@ -13,5 +13,5 @@ X-Nook-Order=15
 Categories=Network;WebBrowser;
 X-Nook-Role=browser
 X-Nook-Dock=true
-X-Hamix-Permissions=network
+X-Hamix-Permissions=inet
 MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;

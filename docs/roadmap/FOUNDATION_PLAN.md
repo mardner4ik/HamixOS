@@ -992,7 +992,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 - [~] Діють ліміти клієнта, surface (16 384 px / 128 МіБ) і `F_SEAL_SHRINK` для memfd SHM; незапечатувані fd читаються у приватний snapshot на кожен commit, усічення джерела дає EOF замість `SIGBUS`; `native-wayland-limits` ще потрібні
 
 ### W4. Xwayland і видалення моста (1 тиждень)
-- [~] XWM перенесений у `frontend/wayland/xwm.rs` і ліниво запускає Xwayland; асоціація через `xwayland_shell_v1` замість `WL_SURFACE_ID` ще потрібна
+- [x] XWM перенесений у `frontend/wayland/xwm.rs`, ліниво запускає Xwayland і асоціює поверхню через `xwayland_shell_v1` та `WL_SURFACE_SERIAL`
 - [~] hxserver більше не залежить від crate `hxwayland`, protocol engine лежить у його `frontend/wayland`; окремий compatibility package, `Embedded` і `NOOK_WAYLAND` ще лишаються
 - [ ] ADR-0019B «Nook як Wayland-композитор»
 - Ворота: усі boot-тести, X11-програми в Nook, `lint-unsafe` не вище бази

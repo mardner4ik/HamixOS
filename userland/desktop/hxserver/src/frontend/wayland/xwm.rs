@@ -1,4 +1,4 @@
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use hxstd::unix::{self, PollFd, POLLHUP, POLLIN};
@@ -17,7 +17,7 @@ pub const SOCKET: &str = "/tmp/.X11-unix/X0";
 const XWAYLAND_IDLE_MS: u64 = 20000;
 
 const ATOM_NAMES: [&str; 22] = [
-    "WL_SURFACE_ID",
+    "WL_SURFACE_SERIAL",
     "WM_PROTOCOLS",
     "WM_DELETE_WINDOW",
     "WM_TAKE_FOCUS",
@@ -41,7 +41,7 @@ const ATOM_NAMES: [&str; 22] = [
     "_NET_WM_PID",
 ];
 
-const WL_SURFACE_ID: usize = 0;
+const WL_SURFACE_SERIAL: usize = 0;
 const WM_PROTOCOLS: usize = 1;
 const WM_DELETE_WINDOW: usize = 2;
 const WM_TAKE_FOCUS: usize = 3;
@@ -121,7 +121,9 @@ pub struct Xwm {
     pub pid: i64,
     check: u32,
     pub focus: u32,
-    orphans: BTreeMap<u32, u32>,
+    serial_windows: BTreeMap<u64, u32>,
+    serial_surfaces: BTreeMap<u64, u32>,
+    associated_serials: BTreeSet<u64>,
     idle_since: u64,
 }
 
@@ -474,7 +476,9 @@ impl<L: Link> Bridge<L> {
             pid,
             check: 0,
             focus: 0,
-            orphans: BTreeMap::new(),
+            serial_windows: BTreeMap::new(),
+            serial_surfaces: BTreeMap::new(),
+            associated_serials: BTreeSet::new(),
             idle_since: 0,
         });
         if !self.xwm_setup() {
@@ -853,8 +857,14 @@ impl<L: Link> Bridge<L> {
                     ..XWin::default()
                 };
                 xwm.windows.insert(window, win);
-                if let Some(sid) = xwm.orphans.remove(&window) {
-                    self.xwm_associate(window, sid);
+        let serial = xwm.serial_windows.iter().find(|(serial, target)| **target == window && xwm.serial_surfaces.contains_key(*serial))
+            .map(|(serial, _)| *serial);
+                if let Some(serial) = serial {
+                    if let Some(sid) = xwm.serial_surfaces.remove(&serial) {
+                        xwm.serial_windows.remove(&serial);
+                        xwm.associated_serials.insert(serial);
+                        self.xwm_associate(window, sid);
+                    }
                 }
             }
             17 => {
@@ -862,6 +872,7 @@ impl<L: Link> Bridge<L> {
                 self.xwm_drop_surface(window);
                 if let Some(xwm) = self.xwm.as_mut() {
                     xwm.windows.remove(&window);
+                    xwm.serial_windows.retain(|_, target| *target != window);
                 }
             }
             18 => {
@@ -945,18 +956,13 @@ impl<L: Link> Bridge<L> {
             33 => {
                 let window = u32_at(e, 4);
                 let kind = u32_at(e, 8);
-                let (surface_atom, state_atom, fullscreen, max_v, max_h) = {
+                let (surface_serial_atom, state_atom, fullscreen, max_v, max_h) = {
                     let xwm = self.xwm.as_ref().unwrap();
-                    (xwm.atom(WL_SURFACE_ID), xwm.atom(NET_WM_STATE), xwm.atom(NET_WM_STATE_FULLSCREEN), xwm.atom(NET_WM_STATE_MAXIMIZED_VERT), xwm.atom(NET_WM_STATE_MAXIMIZED_HORZ))
+                    (xwm.atom(WL_SURFACE_SERIAL), xwm.atom(NET_WM_STATE), xwm.atom(NET_WM_STATE_FULLSCREEN), xwm.atom(NET_WM_STATE_MAXIMIZED_VERT), xwm.atom(NET_WM_STATE_MAXIMIZED_HORZ))
                 };
-                if kind == surface_atom {
-                    let sid = u32_at(e, 12);
-                    let known = self.xwm.as_ref().map(|x| x.windows.contains_key(&window)).unwrap_or(false);
-                    if known {
-                        self.xwm_associate(window, sid);
-                    } else if let Some(xwm) = self.xwm.as_mut() {
-                        xwm.orphans.insert(window, sid);
-                    }
+                if kind == surface_serial_atom && e[1] == 32 {
+                    let serial = u32_at(e, 12) as u64 | ((u32_at(e, 16) as u64) << 32);
+                    self.xwm_register_serial(window, serial);
                 } else if kind == state_atom {
                     let action = u32_at(e, 12);
                     let first = u32_at(e, 16);
@@ -981,14 +987,15 @@ impl<L: Link> Bridge<L> {
 
     fn xwm_associate(&mut self, window: u32, sid: u32) {
         let Some(cid) = self.xwm_cid() else {
-            if let Some(xwm) = self.xwm.as_mut() {
-                xwm.orphans.insert(window, sid);
-            }
             return;
         };
         let exists = self.clients.get(&cid).map(|c| c.surfaces.contains_key(&sid)).unwrap_or(false);
         if !exists {
             return;
+        }
+        let previous = self.xwm.as_ref().and_then(|x| x.windows.get(&window)).and_then(|w| w.surface);
+        if previous.is_some() && previous != Some(sid) {
+            self.xwm_drop_surface(window);
         }
         if let Some(w) = self.xwm.as_mut().and_then(|x| x.windows.get_mut(&window)) {
             w.surface = Some(sid);
@@ -1002,6 +1009,67 @@ impl<L: Link> Bridge<L> {
             self.post(cid, super::wire::Message::new(buffer, 0).finish());
         }
         self.xwm_sync_identity(window);
+    }
+
+    fn xwm_register_serial(&mut self, window: u32, serial: u64) {
+        if serial == 0 {
+            return;
+        }
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if xwm.serial_windows.contains_key(&serial) || xwm.associated_serials.contains(&serial) {
+            return;
+        }
+        xwm.serial_windows.insert(serial, window);
+        if let Some(sid) = xwm.serial_surfaces.remove(&serial).filter(|_| xwm.windows.contains_key(&window)) {
+            xwm.serial_windows.remove(&serial);
+            xwm.associated_serials.insert(serial);
+            self.xwm_associate(window, sid);
+        }
+    }
+
+    pub(super) fn xwm_surface_serial(&mut self, cid: u32, sid: u32, serial: u64) -> bool {
+        if serial == 0 || self.xwm.as_ref().and_then(|xwm| xwm.cid) != Some(cid) {
+            return false;
+        }
+        let surface_valid = self.clients.get(&cid).and_then(|client| client.surfaces.get(&sid))
+            .and_then(|surface| surface.xwayland)
+            .map(|role| role.serial == Some(serial))
+            .unwrap_or(false);
+        if !surface_valid {
+            return false;
+        }
+        let Some(xwm) = self.xwm.as_mut() else {
+            return false;
+        };
+        if xwm.serial_surfaces.contains_key(&serial) || xwm.associated_serials.contains(&serial) {
+            return false;
+        }
+        xwm.serial_surfaces.insert(serial, sid);
+        let window = xwm.serial_windows.get(&serial).copied().filter(|window| xwm.windows.contains_key(window));
+        if let Some(window) = window {
+            xwm.serial_windows.remove(&serial);
+            xwm.serial_surfaces.remove(&serial);
+            xwm.associated_serials.insert(serial);
+            self.xwm_associate(window, sid);
+        }
+        true
+    }
+
+    pub(super) fn xwm_surface_destroyed(&mut self, cid: u32, sid: u32) {
+        let windows = self.xwm.as_ref().filter(|xwm| xwm.cid == Some(cid)).map(|xwm| {
+            xwm.windows.iter().filter_map(|(window, info)| (info.surface == Some(sid)).then_some(*window)).collect::<Vec<_>>()
+        });
+        let Some(windows) = windows else {
+            return;
+        };
+        for window in windows {
+            self.xwm_drop_surface(window);
+        }
+        if let Some(xwm) = self.xwm.as_mut() {
+            xwm.serial_surfaces.retain(|_, surface| *surface != sid);
+        }
     }
 
     fn xwm_drop_surface(&mut self, window: u32) {
