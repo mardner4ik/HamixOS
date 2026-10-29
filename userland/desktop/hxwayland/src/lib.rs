@@ -361,6 +361,8 @@ const MAX_CLIENT_INPUT: usize = 1 << 20;
 const MAX_CLIENT_MESSAGE: usize = 4 << 10;
 const MAX_CLIENT_FDS: usize = 256;
 const MAX_CLIENT_POOL_BYTES: usize = 512 << 20;
+const MAX_SURFACE_DIM: u32 = 16_384;
+const MAX_SURFACE_BYTES: u64 = 128 << 20;
 const OUT_LIMIT: usize = 4 << 20;
 
 fn client_pool_bytes(client: &Client) -> usize {
@@ -1591,6 +1593,12 @@ impl<L: Link> Bridge<L> {
             (gw as u32, gh as u32, closed, (gx as usize, gy as usize), surface.popup.is_some(), damage, before, scaling)
         };
         if closed {
+            return false;
+        }
+        if !surface_size_ok(width, height) {
+            if let Some(client) = self.clients.get_mut(&cid) {
+                client.dead = true;
+            }
             return false;
         }
         let xinfo = self.clients.get(&cid).and_then(|c| c.surfaces.get(&sid)).and_then(|s| s.xwin).and_then(|w| self.xwm_window_info(w));
@@ -2878,6 +2886,13 @@ fn cursor_shape(shape: u32) -> Option<u32> {
         21 | 23 | 29 => Some(6),
         _ => None,
     }
+}
+
+fn surface_size_ok(width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 || width > MAX_SURFACE_DIM || height > MAX_SURFACE_DIM {
+        return false;
+    }
+    (width as u64).checked_mul(height as u64).and_then(|pixels| pixels.checked_mul(4)).map(|bytes| bytes <= MAX_SURFACE_BYTES).unwrap_or(false)
 }
 
 fn random_activation_token() -> Option<String> {
