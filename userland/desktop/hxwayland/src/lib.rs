@@ -999,6 +999,12 @@ impl<L: Link> Bridge<L> {
             (Kind::ActivationManager, 2) => {
                 let token = r.string();
                 let surface = r.u32();
+                if self.clients.get(&cid).and_then(|client| client.objects.get(&surface)).map(|entry| entry.0) != Some(Kind::Surface) {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
                 let now = sys::uptime_ms();
                 self.activation_tokens.retain(|_, grant| grant.expires > now);
                 let target = self.clients.get(&cid).and_then(|client| client.surfaces.get(&surface)).and_then(|surface| surface.window.as_ref().map(|window| (window.id, surface.app_id.as_str())));
@@ -1011,7 +1017,14 @@ impl<L: Link> Bridge<L> {
             (Kind::ActivationToken, 0) => {
                 let serial = r.u32();
                 let seat = r.u32();
-                let valid = self.clients.get(&cid).map(|client| client.last_seat_serial == serial && serial != 0 && sys::uptime_ms().saturating_sub(client.last_seat_serial_at) <= 5000 && client.objects.get(&seat).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
+                let seat_valid = self.clients.get(&cid).and_then(|client| client.objects.get(&seat)).map(|entry| entry.0) == Some(Kind::Seat);
+                if !seat_valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
+                let valid = self.clients.get(&cid).map(|client| client.last_seat_serial == serial && serial != 0 && sys::uptime_ms().saturating_sub(client.last_seat_serial_at) <= 5000).unwrap_or(false);
                 if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
                     request.serial = valid.then_some(serial);
                     request.seat = valid.then_some(seat);
@@ -1026,8 +1039,14 @@ impl<L: Link> Bridge<L> {
             (Kind::ActivationToken, 2) => {
                 let surface = r.u32();
                 let valid = self.clients.get(&cid).and_then(|client| client.objects.get(&surface)).map(|entry| entry.0) == Some(Kind::Surface);
+                if !valid {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                }
                 if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
-                    request.surface = valid.then_some(surface);
+                    request.surface = Some(surface);
                 }
             }
             (Kind::ActivationToken, 3) => {
