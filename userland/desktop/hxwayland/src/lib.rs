@@ -1030,14 +1030,7 @@ impl<L: Link> Bridge<L> {
                 let _mime = r.string();
                 if let Some(fd) = self.take_fd(cid) {
                     if let Some((_, data)) = self.clipboard.as_ref() {
-                        let mut done = 0;
-                        while done < data.len() {
-                            let n = sys::write(fd, &data[done..]);
-                            if n <= 0 {
-                                break;
-                            }
-                            done += n as usize;
-                        }
+                        write_clipboard(fd, data);
                     }
                     sys::close(fd);
                 }
@@ -2686,6 +2679,28 @@ fn release_pool(pool: Pool) {
 fn release_shm(shm: u32) {
     if shm != 0 {
         sys::shm_release(shm);
+    }
+}
+
+fn write_clipboard(fd: u64, data: &[u8]) {
+    if unix::set_nonblocking(fd, true) < 0 {
+        return;
+    }
+    let deadline = sys::uptime_ms().saturating_add(1000);
+    let mut done = 0usize;
+    while done < data.len() {
+        let n = sys::write(fd, &data[done..]);
+        if n > 0 {
+            done = done.saturating_add(n as usize);
+            continue;
+        }
+        if n != unix::EAGAIN || sys::uptime_ms() >= deadline {
+            return;
+        }
+        let mut pfd = [PollFd { fd: fd as i32, events: POLLOUT, revents: 0 }];
+        if unix::poll(&mut pfd, 50) <= 0 || pfd[0].revents & (unix::POLLHUP | unix::POLLERR | unix::POLLNVAL) != 0 {
+            return;
+        }
     }
 }
 
