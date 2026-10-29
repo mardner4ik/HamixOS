@@ -982,14 +982,14 @@ hxboot має працювати з ним краще, ніж GRUB:
 
 ### W2. Nook Wayland: оболонка і робочий стіл (1 тиждень)
 - [ ] `zwlr_layer_shell_v1`, foreign-toplevel, `hamix_shell_v1` нативно -- nook-shell на Wayland без моста
-- [ ] `wl_subcompositor`, `wp_cursor_shape_manager_v1`, курсори клієнтів
+- [~] `wp_cursor_shape_manager_v1` з перевіркою serial/focus і формами курсорів Nook; `wl_subcompositor` ще лише частково обробляється мостом, нативної підтримки субповерхонь немає
 - [ ] Перевірка довіри для привілейованих протоколів (`SO_PEERCRED` + група)
 - Ворота: `native-shell-wayland`, golden у режимі Wayland
 
 ### W3. Nook Wayland: повнота (1-2 тижні)
-- [ ] Буфер обміну, DnD, primary selection між Wayland, hxproto і X11
-- [ ] `wp_viewporter`, `wp_fractional_scale`, `xdg_activation_v1`, `wp_presentation`
-- [ ] Ліміти клієнта, `SIGBUS`-захист пулів, `native-wayland-limits`
+- [~] Текстовий clipboard `wl_data_device` ↔ hxproto має serial-перевірку й обмежений неблокувальний запис; DnD і primary selection ще не зроблені
+- [~] У мосту є `wp_viewporter`, fractional scale 120 і `xdg_activation_v1` з одноразовими serial/focus-bound токенами; `wp_presentation` та нативне перенесення в hxserver залишаються
+- [~] Діють ліміти клієнта і `F_SEAL_SHRINK` для memfd SHM; захист SIGBUS для інших fd та `native-wayland-limits` ще потрібні
 
 ### W4. Xwayland і видалення моста (1 тиждень)
 - [ ] XWM у `frontend/wayland/xwm.rs` через `xwayland_shell_v1`; лінивий старт Xwayland

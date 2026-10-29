@@ -149,12 +149,14 @@ enum Kind {
     Viewport,
     FractionalScaleManager,
     FractionalScale,
+    ActivationManager,
+    ActivationToken,
     XdgOutputManager,
     XdgOutput,
     HamixShell,
 }
 
-const GLOBALS: [(&str, u32, Kind); 16] = [
+const GLOBALS: [(&str, u32, Kind); 17] = [
     ("wl_compositor", 5, Kind::Compositor),
     ("wl_shm", 1, Kind::Shm),
     ("wl_seat", 7, Kind::Seat),
@@ -169,6 +171,7 @@ const GLOBALS: [(&str, u32, Kind); 16] = [
     ("wp_viewporter", 1, Kind::Viewporter),
     ("wp_fractional_scale_manager_v1", 1, Kind::FractionalScaleManager),
     ("wp_cursor_shape_manager_v1", 1, Kind::CursorShapeManager),
+    ("xdg_activation_v1", 1, Kind::ActivationManager),
     ("zxdg_output_manager_v1", 3, Kind::XdgOutputManager),
     ("hamix_shell_v1", 1, Kind::HamixShell),
 ];
@@ -234,6 +237,14 @@ struct Positioner {
     offset: (i32, i32),
 }
 
+#[derive(Clone, Default)]
+struct ActivationRequest {
+    serial: Option<u32>,
+    seat: Option<u32>,
+    surface: Option<u32>,
+    committed: bool,
+}
+
 #[derive(Clone, Copy)]
 struct PopupRole {
     object: u32,
@@ -296,6 +307,7 @@ struct Client {
     trusted: bool,
     last_input_serial: u32,
     pointer_enter_serial: u32,
+    activation_requests: BTreeMap<u32, ActivationRequest>,
     next_server_id: u32,
     toplevel_managers: Vec<u32>,
     handles: Vec<(u32, u32)>,
@@ -333,6 +345,7 @@ pub struct Bridge<L: Link> {
     clipboard_owner: Option<(u32, u32)>,
     path: String,
     geometry: BTreeMap<u32, (i32, i32, i32, i32)>,
+    activation_tokens: BTreeMap<String, u64>,
 }
 
 const MAX_CLIENT_OBJECTS: usize = 65_536;
@@ -455,6 +468,7 @@ impl<L: Link> Bridge<L> {
                     trusted,
                     last_input_serial: 0,
                     pointer_enter_serial: 0,
+                    activation_requests: BTreeMap::new(),
                     next_server_id: SERVER_ID_BASE,
                     toplevel_managers: Vec::new(),
                     handles: Vec::new(),
@@ -961,6 +975,81 @@ impl<L: Link> Bridge<L> {
                         }
                     }
                 }
+            }
+            (Kind::ActivationManager, 0) => self.destroy(cid, object),
+            (Kind::ActivationManager, 1) => {
+                let id = r.u32();
+                self.add(cid, id, Kind::ActivationToken, 0);
+                if self.clients.get(&cid).and_then(|c| c.objects.get(&id)).map(|entry| entry.0) == Some(Kind::ActivationToken) {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.activation_requests.insert(id, ActivationRequest::default());
+                    }
+                }
+            }
+            (Kind::ActivationManager, 2) => {
+                let token = r.string();
+                let surface = r.u32();
+                let now = sys::uptime_ms();
+                self.activation_tokens.retain(|_, expires| *expires > now);
+                let valid_surface = self.clients.get(&cid).and_then(|client| client.surfaces.get(&surface)).and_then(|surface| surface.window.as_ref()).map(|window| window.id);
+                if let (Some(window), Some(_)) = (valid_surface, self.activation_tokens.remove(token.as_str())) {
+                    self.request(Request::ToplevelAction { toplevel: window, action: hxproto::ACTION_ACTIVATE });
+                }
+            }
+            (Kind::ActivationToken, 0) => {
+                let serial = r.u32();
+                let seat = r.u32();
+                let valid = self.clients.get(&cid).map(|client| client.last_input_serial == serial && serial != 0 && client.objects.get(&seat).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
+                if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
+                    request.serial = valid.then_some(serial);
+                    request.seat = valid.then_some(seat);
+                }
+            }
+            (Kind::ActivationToken, 1) => {
+                let _app_id = r.string();
+            }
+            (Kind::ActivationToken, 2) => {
+                let surface = r.u32();
+                let valid = self.clients.get(&cid).and_then(|client| client.objects.get(&surface)).map(|entry| entry.0) == Some(Kind::Surface);
+                if let Some(request) = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)) {
+                    request.surface = valid.then_some(surface);
+                }
+            }
+            (Kind::ActivationToken, 3) => {
+                let request = self.clients.get_mut(&cid).and_then(|client| client.activation_requests.get_mut(&object)).map(|request| {
+                    if request.committed {
+                        None
+                    } else {
+                        request.committed = true;
+                        Some(request.clone())
+                    }
+                }).flatten();
+                let Some(request) = request else {
+                    if let Some(client) = self.clients.get_mut(&cid) {
+                        client.dead = true;
+                    }
+                    return;
+                };
+                let focused = request.surface.map(|surface| self.pointer_focus == Some((cid, surface)) || self.keyboard_focus == Some((cid, surface))).unwrap_or(false);
+                let serial_valid = request.serial.map(|serial| self.clients.get(&cid).map(|client| client.last_input_serial == serial).unwrap_or(false)).unwrap_or(false);
+                let seat_valid = request.seat.map(|seat| self.clients.get(&cid).and_then(|client| client.objects.get(&seat)).map(|entry| entry.0) == Some(Kind::Seat)).unwrap_or(false);
+                let token = if focused && serial_valid && seat_valid && self.activation_tokens.len() < 1024 {
+                    random_activation_token()
+                } else {
+                    None
+                };
+                if let Some(token) = token {
+                    self.activation_tokens.insert(token.clone(), sys::uptime_ms().saturating_add(5000));
+                    self.post(cid, Message::new(object, 0).string(&token).finish());
+                } else {
+                    self.post(cid, Message::new(object, 0).string("").finish());
+                }
+            }
+            (Kind::ActivationToken, 4) => {
+                if let Some(client) = self.clients.get_mut(&cid) {
+                    client.activation_requests.remove(&object);
+                }
+                self.destroy(cid, object);
             }
             (Kind::Pointer, _) | (Kind::Keyboard, _) | (Kind::Touch, _) => {}
             (Kind::Output, 0) => {
@@ -2649,6 +2738,7 @@ impl<L: Link> Bridge<L> {
             clipboard_owner: None,
             path,
             geometry: BTreeMap::new(),
+            activation_tokens: BTreeMap::new(),
         })
     }
 
@@ -2742,6 +2832,20 @@ fn cursor_shape(shape: u32) -> Option<u32> {
         21 | 23 | 29 => Some(6),
         _ => None,
     }
+}
+
+fn random_activation_token() -> Option<String> {
+    let random = fs::read_prefix("/dev/urandom", 16)?;
+    if random.len() != 16 {
+        return None;
+    }
+    let digits = b"0123456789abcdef";
+    let mut token = String::with_capacity(32);
+    for byte in random {
+        token.push(digits[(byte >> 4) as usize] as char);
+        token.push(digits[(byte & 15) as usize] as char);
+    }
+    Some(token)
 }
 
 fn write_clipboard(fd: u64, data: &[u8]) {
