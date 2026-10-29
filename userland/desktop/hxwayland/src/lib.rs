@@ -240,6 +240,18 @@ fn privileged_global(kind: Kind) -> bool {
     matches!(kind, Kind::LayerShell | Kind::ToplevelManager | Kind::HamixShell)
 }
 
+fn peer_in_group(uid: u32, gid: u32, group: &str) -> bool {
+    let Some(user) = hxstd::users::find_uid("", uid) else {
+        return false;
+    };
+    let Some((_, group_gid)) = hxstd::users::group_ids().into_iter().find(|(name, _)| name == group) else {
+        return false;
+    };
+    gid == group_gid
+        || user.gid == group_gid
+        || hxstd::users::group_members(group).iter().any(|member| member == &user.name)
+}
+
 const SERVER_ID_BASE: u32 = 0xFF00_0000;
 
 #[derive(Clone)]
@@ -516,8 +528,13 @@ impl<L: Link> Bridge<L> {
     }
 
     fn add_client(&mut self, fd: u64) -> u32 {
-        let pid = unix::peer_cred(fd).map(|cred| cred.pid).unwrap_or(0);
-        let trusted = pid > 0 && self.link.trusted_peer(pid);
+        let (pid, trusted) = match unix::peer_cred(fd) {
+            Some(cred) => (
+                cred.pid,
+                cred.pid > 0 && (self.link.trusted_peer(cred.pid) || peer_in_group(cred.uid, cred.gid, "nook-shell")),
+            ),
+            None => (0, false),
+        };
         {
             let id = self.next_client;
             self.next_client += 1;

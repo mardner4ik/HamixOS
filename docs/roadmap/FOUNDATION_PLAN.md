@@ -983,7 +983,7 @@ hxboot має працювати з ним краще, ніж GRUB:
 ### W2. Nook Wayland: оболонка і робочий стіл (1 тиждень)
 - [ ] `zwlr_layer_shell_v1`, foreign-toplevel, `hamix_shell_v1` нативно -- nook-shell на Wayland без моста
 - [~] `wp_cursor_shape_manager_v1` з перевіркою serial/focus і формами курсорів Nook; `wl_subcompositor` ще лише частково обробляється мостом, нативної підтримки субповерхонь немає
-- [ ] Перевірка довіри для привілейованих протоколів (`SO_PEERCRED` + група)
+- [~] Bridge перевіряє `SO_PEERCRED` і членство UID у `nook-shell` для привілейованих протоколів; нативному frontend потрібна та сама політика
 - Ворота: `native-shell-wayland`, golden у режимі Wayland
 
 ### W3. Nook Wayland: повнота (1-2 тижні)
